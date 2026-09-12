@@ -27,11 +27,20 @@ export async function GET(request: NextRequest) {
       : `NULL::text as "logisticType", NULL::integer as "fullStockQty", NULL::integer as "fullStockUnavailableQty",`;
     const hasLowStock = await hasColumn(client, "products", "low_stock_threshold");
     const lowStockCol = hasLowStock ? `p.low_stock_threshold as "lowStockThreshold"` : `NULL::integer as "lowStockThreshold"`;
+    // TC guardado junto con el último costo cargado (ver migración 019): deja
+    // mostrar ese mismo costo también en dólares, con el TC de cuando se
+    // cargó (no el de hoy, que lo haría "saltar" solo con que cambie la
+    // cotización).
+    const hasCostFx = await hasColumn(client, "product_costs", "exchange_rate");
+    const costFxCol = hasCostFx
+      ? `(SELECT exchange_rate FROM product_costs pc WHERE pc.account_id = p.account_id AND pc.product_id = p.id ORDER BY pc.valid_from DESC LIMIT 1) as "currentCostExchangeRate",`
+      : `NULL::double precision as "currentCostExchangeRate",`;
     const result = await client.query(
       `SELECT p.id, p.title, p.sku, p.current_price as "currentPrice", p.stock,
               ${thumbnailColumn} as thumbnail,
               ${fullCols}
               ${lowStockCol},
+              ${costFxCol}
               (SELECT cost FROM product_costs pc WHERE pc.account_id = p.account_id AND pc.product_id = p.id ORDER BY pc.valid_from DESC LIMIT 1) as "currentCost",
               (SELECT COALESCE(SUM(oi.quantity), 0) FROM order_items oi JOIN orders o ON o.account_id = oi.account_id AND o.id = oi.order_id
                 WHERE oi.account_id = p.account_id AND oi.product_id = p.id AND o.date_created::date BETWEEN $1::date AND $2::date
@@ -60,6 +69,7 @@ export async function GET(request: NextRequest) {
       fullStockUnavailableQty: number | null;
       lowStockThreshold: number | null;
       currentCost: number | null;
+      currentCostExchangeRate: number | null;
       unitsSold: number;
       totalProfit: number;
       lastSaleDate: string | Date | null;
@@ -93,10 +103,18 @@ export async function GET(request: NextRequest) {
       // más dura que el margen de arriba: dice si el producto YA te está
       // dejando pérdida en la práctica, no si en teoría podría.
       const avgProfitPerUnit = r.unitsSold > 0 ? r.totalProfit / r.unitsSold : null;
+      // El mismo costo, mostrado en dólares con el TC de cuando se cargó. Sin
+      // ese TC guardado (costos cargados antes de la migración 019, o nunca
+      // cargados) no hay con qué convertir.
+      const currentCostUsd =
+        r.currentCost !== null && r.currentCostExchangeRate !== null && r.currentCostExchangeRate > 0
+          ? r.currentCost / r.currentCostExchangeRate
+          : null;
       return {
         ...r,
         effectiveStock,
         fullStockValue,
+        currentCostUsd,
         lastSaleDate: r.lastSaleDate ? new Date(r.lastSaleDate).toISOString() : null,
         marginPct:
           r.currentCost !== null && r.currentPrice > 0
@@ -117,9 +135,16 @@ export async function PATCH(request: NextRequest) {
   if (!account) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
 
   const body = await request.json();
-  const { productId, cost, lowStockThreshold } = body as {
+  const { productId, cost, exchangeRate, costCurrency, lowStockThreshold } = body as {
     productId: string;
     cost?: number;
+    /** TC vigente al momento de cargar el costo — para poder mostrarlo
+     * también en dólares más adelante (ver migración 019). Opcional: sin él
+     * el lado en dólares queda vacío hasta que se vuelva a guardar. */
+    exchangeRate?: number | null;
+    /** En qué moneda lo escribió el vendedor. Solo informativo: `cost` sigue
+     * siempre en pesos, ya convertido si hacía falta. */
+    costCurrency?: "ARS" | "USD";
     lowStockThreshold?: number | null;
   };
   if (!productId) {
@@ -132,6 +157,9 @@ export async function PATCH(request: NextRequest) {
   }
   if (hasCost && (typeof cost !== "number" || cost < 0)) {
     return NextResponse.json({ error: "cost tiene que ser un número >= 0." }, { status: 400 });
+  }
+  if (hasCost && exchangeRate !== undefined && exchangeRate !== null && (typeof exchangeRate !== "number" || exchangeRate <= 0)) {
+    return NextResponse.json({ error: "exchangeRate tiene que ser un número > 0, o no mandarlo." }, { status: 400 });
   }
   if (hasThreshold && lowStockThreshold !== null && (typeof lowStockThreshold !== "number" || lowStockThreshold < 0 || !Number.isInteger(lowStockThreshold))) {
     return NextResponse.json({ error: "lowStockThreshold tiene que ser un entero >= 0, o null para sacar la alerta." }, { status: 400 });
@@ -156,10 +184,17 @@ export async function PATCH(request: NextRequest) {
 
     // Los impuestos ya no se guardan por producto: son una alícuota de la
     // cuenta (ver /api/account/settings). La columna `tax` queda en 0.
-    await client.query(
-      `INSERT INTO product_costs (account_id, product_id, cost, valid_from) VALUES ($1, $2, $3, $4)`,
-      [account.id, productId, cost, new Date().toISOString()]
-    );
+    if (await hasColumn(client, "product_costs", "exchange_rate")) {
+      await client.query(
+        `INSERT INTO product_costs (account_id, product_id, cost, valid_from, exchange_rate, cost_currency) VALUES ($1, $2, $3, $4, $5, $6)`,
+        [account.id, productId, cost, new Date().toISOString(), exchangeRate ?? null, costCurrency ?? "ARS"]
+      );
+    } else {
+      await client.query(
+        `INSERT INTO product_costs (account_id, product_id, cost, valid_from) VALUES ($1, $2, $3, $4)`,
+        [account.id, productId, cost, new Date().toISOString()]
+      );
+    }
 
     // Y se aplica ya mismo a las ventas de ese producto. Antes el costo se
     // guardaba y nada más: había que correr un "Sincronizar" completo —que

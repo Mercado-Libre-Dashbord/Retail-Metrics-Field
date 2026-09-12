@@ -194,6 +194,65 @@ describe("PATCH /api/products", () => {
     expect(insert?.[0]).not.toContain("tax");
     expect(insert?.[1]).toEqual(["acc1", "MLA1", 350, expect.any(String)]);
   });
+
+  it("returns 400 for an exchangeRate that isn't a positive number", async () => {
+    const request = { json: async () => ({ productId: "MLA1", cost: 350, exchangeRate: -1 }) } as any;
+    expect((await PATCH(request)).status).toBe(400);
+  });
+
+  it("guarda el tipo de cambio y la moneda usada junto con el costo, cuando la migración 019 ya corrió", async () => {
+    const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes("information_schema.columns")) {
+        return {
+          rows: [
+            { table_name: "product_costs", column_name: "exchange_rate" },
+            { table_name: "order_items", column_name: "iva_applied" },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
+    const request = { json: async () => ({ productId: "MLA1", cost: 5000, exchangeRate: 1450, costCurrency: "USD" }) } as any;
+
+    await PATCH(request);
+
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO product_costs"),
+      ["acc1", "MLA1", 5000, expect.any(String), 1450, "USD"]
+    );
+  });
+
+  it("guarda cost_currency ARS por defecto y exchange_rate null cuando no se manda ninguno de los dos", async () => {
+    const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes("information_schema.columns")) {
+        return { rows: [{ table_name: "product_costs", column_name: "exchange_rate" }] };
+      }
+      return { rows: [] };
+    });
+    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
+    const request = { json: async () => ({ productId: "MLA1", cost: 350 }) } as any;
+
+    await PATCH(request);
+
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO product_costs"),
+      ["acc1", "MLA1", 350, expect.any(String), null, "ARS"]
+    );
+  });
+
+  it("sigue guardando el costo sin tipo de cambio cuando la migración 019 no corrió", async () => {
+    const query = queryMock();
+    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
+    const request = { json: async () => ({ productId: "MLA1", cost: 350, exchangeRate: 1450, costCurrency: "USD" }) } as any;
+
+    await PATCH(request);
+
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO product_costs"),
+      ["acc1", "MLA1", 350, expect.any(String)]
+    );
+  });
 });
 
 describe("GET /api/products", () => {
@@ -249,5 +308,27 @@ describe("GET /api/products", () => {
 
     expect(body.find((p: any) => p.id === "MLA1").lastSaleDate).toBe("2026-08-01T12:00:00.000Z");
     expect(body.find((p: any) => p.id === "MLA2").lastSaleDate).toBeNull();
+  });
+
+  it("devuelve currentCostUsd usando el TC guardado junto al costo, o null si no hay TC guardado", async () => {
+    const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes("information_schema.columns")) {
+        return { rows: [{ table_name: "product_costs", column_name: "exchange_rate" }] };
+      }
+      return {
+        rows: [
+          // Costo cargado en dólares: 5000 ARS con TC 1450 => ~3.45 USD.
+          { id: "MLA1", title: "Con TC", sku: null, currentPrice: 1000, stock: 10, currentCost: 5000, currentCostExchangeRate: 1450, unitsSold: 0, totalProfit: 0 },
+          // Costo viejo, cargado antes de la migración 019: sin TC, no hay con qué convertir.
+          { id: "MLA2", title: "Sin TC", sku: null, currentPrice: 1000, stock: 10, currentCost: 500, currentCostExchangeRate: null, unitsSold: 0, totalProfit: 0 },
+        ],
+      };
+    });
+    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
+
+    const body = await (await GET({ nextUrl: new URL("http://x/api/products") } as any)).json();
+
+    expect(body.find((p: any) => p.id === "MLA1").currentCostUsd).toBeCloseTo(5000 / 1450);
+    expect(body.find((p: any) => p.id === "MLA2").currentCostUsd).toBeNull();
   });
 });

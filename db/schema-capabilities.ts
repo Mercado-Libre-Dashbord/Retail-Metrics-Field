@@ -137,6 +137,16 @@ export const EXPECTED_COLUMNS: { table: string; column: string; ddl: string }[] 
     column: "orders_synced_through",
     ddl: "-- Correr db/postgres/migrations/018-orders-synced-through.sql (sync incremental de órdenes).",
   },
+  {
+    table: "product_costs",
+    column: "exchange_rate",
+    ddl: "-- Correr db/postgres/migrations/019-costo-en-dolares.sql (costo cargado en pesos y en dólares).",
+  },
+  {
+    table: "product_costs",
+    column: "cost_currency",
+    ddl: "-- Correr db/postgres/migrations/019-costo-en-dolares.sql (costo cargado en pesos y en dólares).",
+  },
 ];
 
 export async function missingMigrations(client: QueryExecutor): Promise<{ table: string; column: string; ddl: string }[]> {

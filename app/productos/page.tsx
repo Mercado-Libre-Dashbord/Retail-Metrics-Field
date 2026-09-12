@@ -10,6 +10,10 @@ interface Product {
   currentPrice: number;
   stock: number;
   currentCost: number | null;
+  /** El mismo currentCost, convertido a dólares con el TC guardado junto al
+   * costo (ver migración 019). Null si ese costo se cargó antes de que
+   * existiera esto, o si nunca se cargó ningún costo. */
+  currentCostUsd: number | null;
   thumbnail: string | null;
   unitsSold: number;
   totalProfit: number;
@@ -36,6 +40,10 @@ interface Product {
 
 function fmt(n: number) {
   return n.toLocaleString("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 0 });
+}
+
+function fmtUsd(n: number) {
+  return n.toLocaleString("es-AR", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
 }
 
 /**
@@ -220,7 +228,6 @@ export default function ProductosPage() {
   // entre visitas (localStorage) para no tener que volver a escribirlo cada
   // vez que vuelve a esta pantalla el mismo día.
   const [costCurrencyByProduct, setCostCurrencyByProduct] = useState<Record<string, "ARS" | "USD">>({});
-  const [exchangeRate, setExchangeRate] = useState("");
 
   function getCostCurrency(productId: string): "ARS" | "USD" {
     return costCurrencyByProduct[productId] ?? "ARS";
@@ -230,24 +237,59 @@ export default function ProductosPage() {
     setCostCurrencyByProduct((prev) => ({ ...prev, [productId]: getCostCurrency(productId) === "USD" ? "ARS" : "USD" }));
   }
 
+  // Cotización del dólar oficial y blue, en vivo — para no obligar al
+  // vendedor a ir a buscar el número a otro lado antes de cargar un costo en
+  // dólares. "custom" deja pisarla a mano (por ejemplo, el TC que le cobra
+  // puntualmente su proveedor, distinto de cualquiera de los dos públicos).
+  const [rateSource, setRateSource] = useState<"oficial" | "blue" | "custom">("oficial");
+  const [customRate, setCustomRate] = useState("");
+  const [liveRates, setLiveRates] = useState<{
+    oficial: { compra: number; venta: number; fecha: string } | null;
+    blue: { compra: number; venta: number; fecha: string } | null;
+  } | null>(null);
+  const [liveRatesError, setLiveRatesError] = useState(false);
+
   useEffect(() => {
     try {
-      const savedRate = localStorage.getItem("productos.exchangeRate");
-      if (savedRate) setExchangeRate(savedRate);
+      const savedSource = localStorage.getItem("productos.rateSource");
+      if (savedSource === "oficial" || savedSource === "blue" || savedSource === "custom") setRateSource(savedSource);
+      const savedCustom = localStorage.getItem("productos.customRate");
+      if (savedCustom) setCustomRate(savedCustom);
     } catch {
       // Modo privado o storage bloqueado: sin memoria entre visitas, no es
       // motivo para romper la pantalla.
     }
+    fetch("/api/exchange-rate")
+      .then(async (r) => {
+        if (!r.ok) throw new Error(String(r.status));
+        setLiveRates(await r.json());
+      })
+      .catch(() => setLiveRatesError(true));
   }, []);
 
-  function updateExchangeRate(value: string) {
-    setExchangeRate(value);
+  function updateRateSource(value: "oficial" | "blue" | "custom") {
+    setRateSource(value);
     try {
-      localStorage.setItem("productos.exchangeRate", value);
+      localStorage.setItem("productos.rateSource", value);
     } catch {
       // Igual que arriba: si no se puede guardar, no pasa nada grave.
     }
   }
+
+  function updateCustomRate(value: string) {
+    setCustomRate(value);
+    try {
+      localStorage.setItem("productos.customRate", value);
+    } catch {
+      // Igual que arriba.
+    }
+  }
+
+  // TC efectivo que se usa para convertir costos: el de la fuente elegida
+  // (con la punta de venta, que es la que importa para saber cuánto cuesta
+  // COMPRAR dólares), o el personalizado si se optó por escribirlo a mano.
+  const liveRate = rateSource !== "custom" ? liveRates?.[rateSource]?.venta ?? null : null;
+  const exchangeRate = rateSource === "custom" ? customRate : liveRate !== null ? String(liveRate) : "";
 
   // Edición de precio/stock que se escribe de vuelta a la publicación real en
   // Mercado Libre — separado a propósito de "editing" (que es el costo,
@@ -365,22 +407,30 @@ export default function ProductosPage() {
     }
     // El costo siempre se guarda en pesos (así calculan el margen todas las
     // ventas, en ARS) — si esta fila se está cargando en dólares, se
-    // convierte acá, antes de mandarlo, con el tipo de cambio puesto arriba.
-    // La sincronización con Mercado Libre no se entera de nada de esto: sigue
+    // convierte acá, antes de mandarlo, con el tipo de cambio de arriba. La
+    // sincronización con Mercado Libre no se entera de nada de esto: sigue
     // viendo un costo en pesos, como siempre.
-    let cost = rawCost;
-    if (getCostCurrency(productId) === "USD") {
-      const rate = Number(exchangeRate);
-      if (exchangeRate.trim() === "" || Number.isNaN(rate) || rate <= 0) {
-        setErrors((prev) => ({ ...prev, [productId]: "Ingresá el tipo de cambio arriba antes de guardar en dólares." }));
-        return;
-      }
-      cost = rawCost * rate;
+    const currency = getCostCurrency(productId);
+    const rate = Number(exchangeRate);
+    const hasValidRate = exchangeRate.trim() !== "" && !Number.isNaN(rate) && rate > 0;
+    if (currency === "USD" && !hasValidRate) {
+      setErrors((prev) => ({ ...prev, [productId]: "Ingresá el tipo de cambio arriba antes de guardar en dólares." }));
+      return;
     }
+    const cost = currency === "USD" ? rawCost * rate : rawCost;
     setErrors((prev) => ({ ...prev, [productId]: "" }));
     setSavingId(productId);
     try {
-      const { ok, data } = await patchProduct({ productId, cost });
+      // El TC se manda siempre que haya uno cargado (aunque el costo se haya
+      // escrito en pesos): así queda una foto de con qué cotización
+      // equivalía a cuántos dólares, y se puede mostrar el costo en las dos
+      // monedas sin que ese número se mueva solo con la cotización del día.
+      const { ok, data } = await patchProduct({
+        productId,
+        cost,
+        exchangeRate: hasValidRate ? rate : null,
+        costCurrency: currency,
+      });
       if (!ok) {
         setErrors((prev) => ({ ...prev, [productId]: data.error ?? "No se pudo guardar el costo." }));
         return;
@@ -507,23 +557,46 @@ export default function ProductosPage() {
             </span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", marginBottom: "var(--space-3)", flexWrap: "wrap" }}>
-            <label htmlFor="exchange-rate" className="field-hint" style={{ margin: 0 }}>
+            <label htmlFor="rate-source" className="field-hint" style={{ margin: 0 }}>
               Tipo de cambio (ARS por US$)
             </label>
-            <input
-              id="exchange-rate"
-              type="number"
-              min="0"
-              step="0.01"
-              inputMode="decimal"
-              placeholder="Ej: 1450"
-              value={exchangeRate}
-              onChange={(e) => updateExchangeRate(e.target.value)}
-              style={{ width: 90, padding: "6px 8px" }}
-            />
+            <select
+              id="rate-source"
+              value={rateSource}
+              onChange={(e) => updateRateSource(e.target.value as "oficial" | "blue" | "custom")}
+              style={{ padding: "6px 8px" }}
+            >
+              <option value="oficial">
+                Dólar oficial{liveRates?.oficial ? ` ($${liveRates.oficial.venta.toLocaleString("es-AR")})` : ""}
+              </option>
+              <option value="blue">
+                Dólar blue{liveRates?.blue ? ` ($${liveRates.blue.venta.toLocaleString("es-AR")})` : ""}
+              </option>
+              <option value="custom">Personalizado</option>
+            </select>
+            {rateSource === "custom" ? (
+              <input
+                id="exchange-rate"
+                type="number"
+                min="0"
+                step="0.01"
+                inputMode="decimal"
+                placeholder="Ej: 1450"
+                aria-label="Tipo de cambio personalizado"
+                value={customRate}
+                onChange={(e) => updateCustomRate(e.target.value)}
+                style={{ width: 90, padding: "6px 8px" }}
+              />
+            ) : liveRate === null ? (
+              <span className="field-error" role="alert">
+                {liveRatesError
+                  ? "No se pudo traer la cotización en vivo. Elegí \"Personalizado\" y cargala a mano."
+                  : "Buscando cotización…"}
+              </span>
+            ) : null}
             <span className="field-hint" style={{ margin: 0 }}>
               Para cargar un costo en dólares, tocá el botón "ARS"/"USD" al lado del costo de ese producto — lo
-              convertimos a pesos con este tipo de cambio al guardar, para que el margen cierre igual que el resto.
+              convertimos a pesos con este tipo de cambio al guardar, y queda a la vista en las dos monedas.
             </span>
           </div>
         </>
@@ -554,7 +627,8 @@ export default function ProductosPage() {
                 <th className="num">Precio</th>
                 <th className="num">Stock</th>
                 <th className="num">Valor en Full</th>
-                <th className="num">Costo</th>
+                <th className="num">Costo (ARS)</th>
+                <th className="num">Costo (US$)</th>
                 <th className="num">Margen</th>
                 <th className="num">Vendidas</th>
                 <th>Última venta</th>
@@ -620,6 +694,7 @@ export default function ProductosPage() {
                   <td className={`num ${p.currentCost === null ? "missing-cost" : ""}`}>
                     {p.currentCost === null ? "Sin costo cargado" : p.currentCost.toFixed(2)}
                   </td>
+                  <td className="num">{p.currentCostUsd === null ? "—" : fmtUsd(p.currentCostUsd)}</td>
                   <td className="num">{p.marginPct === null ? "-" : `${(p.marginPct * 100).toFixed(1)}%`}</td>
                   <td className="num">{p.unitsSold}</td>
                   <td>{p.lastSaleDate ? new Date(p.lastSaleDate).toLocaleDateString("es-AR") : "Nunca"}</td>
