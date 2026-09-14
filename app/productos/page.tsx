@@ -214,27 +214,61 @@ export default function ProductosPage() {
   // puntas están elegidas (ver filterProductsSoldWithin y load()).
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
-  const [editing, setEditing] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [savingId, setSavingId] = useState<string | null>(null);
   const [noAccount, setNoAccount] = useState(false);
   const [loadError, setLoadError] = useState("");
 
-  // En qué moneda se carga el costo de CADA producto — por fila, no global:
-  // un vendedor con costos mixtos (algunos proveedores facturan en dólares,
-  // otros en pesos) necesita poder alternar producto por producto sin que
-  // elegir uno cambie todos los demás. Sin entrada = ARS (el caso más común).
-  // El tipo de cambio en cambio sí es uno solo, compartido, y se acuerda
-  // entre visitas (localStorage) para no tener que volver a escribirlo cada
-  // vez que vuelve a esta pantalla el mismo día.
-  const [costCurrencyByProduct, setCostCurrencyByProduct] = useState<Record<string, "ARS" | "USD">>({});
+  // Costo en edición, en las DOS monedas a la vez: escribir en una recalcula
+  // la otra con el tipo de cambio de abajo, así nunca queda ambigüedad sobre
+  // en qué moneda se está guardando un número (un botón "ARS/USD" al lado de
+  // un solo campo la tenía: cambiar de moneda DESPUÉS de escribir el número
+  // reinterpretaba el mismo texto sin avisar, y el costo en pesos terminaba
+  // guardado mal — y con él, el margen y el "Valor en Full" de ese producto).
+  // Sin entrada todavía = se muestra el costo ya guardado, no vacío, para
+  // poder modificarlo sin tener que volver a escribirlo entero.
+  const [costDraft, setCostDraft] = useState<Record<string, { ars: string; usd: string }>>({});
+  // En qué moneda escribió el vendedor por última vez — solo para guardar un
+  // dato informativo (`cost_currency`) junto al costo; el número en pesos
+  // (canónico) sale igual de cualquiera de los dos campos.
+  const [lastEditedCurrency, setLastEditedCurrency] = useState<Record<string, "ARS" | "USD">>({});
 
-  function getCostCurrency(productId: string): "ARS" | "USD" {
-    return costCurrencyByProduct[productId] ?? "ARS";
+  function round2(n: number): number {
+    return Math.round(n * 100) / 100;
   }
 
-  function toggleCostCurrency(productId: string) {
-    setCostCurrencyByProduct((prev) => ({ ...prev, [productId]: getCostCurrency(productId) === "USD" ? "ARS" : "USD" }));
+  function updateCostArs(productId: string, value: string) {
+    const rate = Number(exchangeRate);
+    const hasRate = exchangeRate.trim() !== "" && !Number.isNaN(rate) && rate > 0;
+    const parsed = Number(value);
+    setCostDraft((prev) => ({
+      ...prev,
+      [productId]: {
+        ars: value,
+        usd: hasRate && value.trim() !== "" && !Number.isNaN(parsed) ? String(round2(parsed / rate)) : "",
+      },
+    }));
+    setLastEditedCurrency((prev) => ({ ...prev, [productId]: "ARS" }));
+    if (errors[productId]) setErrors((prev) => ({ ...prev, [productId]: "" }));
+  }
+
+  function updateCostUsd(productId: string, value: string) {
+    const rate = Number(exchangeRate);
+    const hasRate = exchangeRate.trim() !== "" && !Number.isNaN(rate) && rate > 0;
+    const parsed = Number(value);
+    setCostDraft((prev) => ({
+      ...prev,
+      [productId]: {
+        usd: value,
+        // Sin TC válido no hay con qué convertir: se deja vacío A PROPÓSITO
+        // (no el valor de pesos que hubiera antes) para que "Guardar" sin TC
+        // falle con un error claro, en vez de guardar en silencio un costo
+        // en pesos que no es el que se acaba de escribir en dólares.
+        ars: hasRate && value.trim() !== "" && !Number.isNaN(parsed) ? String(round2(parsed * rate)) : "",
+      },
+    }));
+    setLastEditedCurrency((prev) => ({ ...prev, [productId]: "USD" }));
+    if (errors[productId]) setErrors((prev) => ({ ...prev, [productId]: "" }));
   }
 
   // Cotización del dólar oficial y blue, en vivo — para no obligar al
@@ -292,16 +326,11 @@ export default function ProductosPage() {
   const exchangeRate = rateSource === "custom" ? customRate : liveRate !== null ? String(liveRate) : "";
 
   // Edición de precio/stock que se escribe de vuelta a la publicación real en
-  // Mercado Libre — separado a propósito de "editing" (que es el costo,
+  // Mercado Libre — separado a propósito de "costDraft" (que es el costo,
   // interno nuestro, nunca toca ML).
   const [mlEditing, setMlEditing] = useState<Record<string, { price: string; stock: string }>>({});
   const [mlErrors, setMlErrors] = useState<Record<string, string>>({});
   const [mlSavingId, setMlSavingId] = useState<string | null>(null);
-
-  // Umbral de alerta de stock bajo, por producto.
-  const [thresholdEditing, setThresholdEditing] = useState<Record<string, string>>({});
-  const [thresholdErrors, setThresholdErrors] = useState<Record<string, string>>({});
-  const [thresholdSavingId, setThresholdSavingId] = useState<string | null>(null);
 
   function load() {
     setLoadError("");
@@ -385,9 +414,6 @@ export default function ProductosPage() {
     }
   }
 
-  /** PATCH /api/products, compartido entre saveCost y saveThreshold — evita
-   * que el chequeo de res.ok se termine escribiendo dos veces y, la próxima
-   * vez que haga falta ajustarlo, arreglándolo en una sola de las dos. */
   async function patchProduct(body: Record<string, unknown>): Promise<{ ok: boolean; data: any }> {
     const res = await fetch("/api/products", {
       method: "PATCH",
@@ -399,25 +425,34 @@ export default function ProductosPage() {
   }
 
   async function saveCost(productId: string) {
-    const draft = editing[productId] ?? "";
-    const rawCost = Number(draft);
-    if (draft.trim() === "" || Number.isNaN(rawCost) || rawCost < 0) {
-      setErrors((prev) => ({ ...prev, [productId]: "Ingresá un costo (≥ 0)." }));
+    const product = products?.find((p) => p.id === productId);
+    const draft = costDraft[productId];
+    // Sin haber tocado nada todavía, se guarda lo que ya estaba (mismo
+    // fallback que muestra el campo ARS — ver el `value` del input): permite
+    // apretar "Guardar" sin cambios sin que eso mande un costo vacío.
+    const arsDraft = draft?.ars ?? (product?.currentCost !== null && product?.currentCost !== undefined ? String(product.currentCost) : "");
+    const rawCost = Number(arsDraft);
+    if (arsDraft.trim() === "" || Number.isNaN(rawCost) || rawCost < 0) {
+      // Si hay algo cargado del lado de dólares pero el campo en pesos quedó
+      // vacío, es porque falta el tipo de cambio para convertirlo (ver
+      // updateCostUsd) — un error más específico que el genérico de abajo.
+      const usdDraft = draft?.usd ?? "";
+      setErrors((prev) => ({
+        ...prev,
+        [productId]:
+          usdDraft.trim() !== ""
+            ? "Ingresá el tipo de cambio arriba antes de guardar en dólares."
+            : "Ingresá un costo (≥ 0), en pesos o en dólares.",
+      }));
       return;
     }
     // El costo siempre se guarda en pesos (así calculan el margen todas las
-    // ventas, en ARS) — si esta fila se está cargando en dólares, se
-    // convierte acá, antes de mandarlo, con el tipo de cambio de arriba. La
-    // sincronización con Mercado Libre no se entera de nada de esto: sigue
-    // viendo un costo en pesos, como siempre.
-    const currency = getCostCurrency(productId);
+    // ventas, en ARS) — el campo en pesos ya viene convertido si el vendedor
+    // escribió en dólares (ver updateCostUsd). La sincronización con
+    // Mercado Libre no se entera de nada de esto: sigue viendo un costo en
+    // pesos, como siempre.
     const rate = Number(exchangeRate);
     const hasValidRate = exchangeRate.trim() !== "" && !Number.isNaN(rate) && rate > 0;
-    if (currency === "USD" && !hasValidRate) {
-      setErrors((prev) => ({ ...prev, [productId]: "Ingresá el tipo de cambio arriba antes de guardar en dólares." }));
-      return;
-    }
-    const cost = currency === "USD" ? rawCost * rate : rawCost;
     setErrors((prev) => ({ ...prev, [productId]: "" }));
     setSavingId(productId);
     try {
@@ -427,53 +462,22 @@ export default function ProductosPage() {
       // monedas sin que ese número se mueva solo con la cotización del día.
       const { ok, data } = await patchProduct({
         productId,
-        cost,
+        cost: rawCost,
         exchangeRate: hasValidRate ? rate : null,
-        costCurrency: currency,
+        costCurrency: lastEditedCurrency[productId] ?? "ARS",
       });
       if (!ok) {
         setErrors((prev) => ({ ...prev, [productId]: data.error ?? "No se pudo guardar el costo." }));
         return;
       }
-      setEditing((prev) => ({ ...prev, [productId]: "" }));
-      load();
-    } finally {
-      setSavingId(null);
-    }
-  }
-
-  async function saveThreshold(productId: string) {
-    // Mismo fallback que el `value` del input (precargado con lo ya
-    // guardado): si no, apretar "Guardar" sin tocar el campo mandaba "" —
-    // que significa "sacar la alerta"— y borraba en silencio un umbral que
-    // seguía viéndose en pantalla.
-    const current = products?.find((p) => p.id === productId)?.lowStockThreshold ?? null;
-    const draft = thresholdEditing[productId] ?? (current !== null ? String(current) : "");
-    const lowStockThreshold = draft.trim() === "" ? null : Number(draft);
-    if (lowStockThreshold !== null && (Number.isNaN(lowStockThreshold) || lowStockThreshold < 0 || !Number.isInteger(lowStockThreshold))) {
-      setThresholdErrors((prev) => ({ ...prev, [productId]: "Entero ≥ 0, o vacío para sacar la alerta." }));
-      return;
-    }
-    setThresholdErrors((prev) => ({ ...prev, [productId]: "" }));
-    setThresholdSavingId(productId);
-    try {
-      // Esta pantalla siempre manda lowStockThreshold solo (nunca junto con
-      // cost), así que del lado del servidor un problema acá siempre vuelve
-      // como error duro (503), nunca como el "warning" de éxito parcial que
-      // existe para cuando alguien manda los dos campos juntos.
-      const { ok, data } = await patchProduct({ productId, lowStockThreshold });
-      if (!ok) {
-        setThresholdErrors((prev) => ({ ...prev, [productId]: data.error ?? "No se pudo guardar la alerta." }));
-        return;
-      }
-      setThresholdEditing((prev) => {
+      setCostDraft((prev) => {
         const next = { ...prev };
         delete next[productId];
         return next;
       });
       load();
     } finally {
-      setThresholdSavingId(null);
+      setSavingId(null);
     }
   }
 
@@ -595,8 +599,8 @@ export default function ProductosPage() {
               </span>
             ) : null}
             <span className="field-hint" style={{ margin: 0 }}>
-              Para cargar un costo en dólares, tocá el botón "ARS"/"USD" al lado del costo de ese producto — lo
-              convertimos a pesos con este tipo de cambio al guardar, y queda a la vista en las dos monedas.
+              Escribí el costo de cada producto en pesos o en dólares — el otro campo se completa solo con este tipo
+              de cambio.
             </span>
           </div>
         </>
@@ -634,7 +638,6 @@ export default function ProductosPage() {
                 <th>Última venta</th>
                 <th className="num">Beneficio</th>
                 <th>Actualizar costo</th>
-                <th>Alerta stock</th>
                 <th>ML</th>
               </tr>
             </thead>
@@ -711,72 +714,41 @@ export default function ProductosPage() {
                   </td>
                   <td>
                     <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-1)" }}>
-                      <div style={{ display: "flex", gap: "var(--space-1)", alignItems: "center" }}>
+                      <div style={{ display: "flex", gap: "var(--space-1)", alignItems: "center", flexWrap: "wrap" }}>
+                        <label htmlFor={`cost-ars-${p.id}`} className="field-hint" style={{ margin: 0 }}>
+                          $
+                        </label>
                         <input
-                          id={`cost-${p.id}`}
+                          id={`cost-ars-${p.id}`}
                           type="number"
                           min="0"
                           inputMode="decimal"
-                          placeholder={getCostCurrency(p.id) === "USD" ? "Costo US$" : "Costo"}
-                          aria-label={`Nuevo costo para ${p.title}${getCostCurrency(p.id) === "USD" ? ", en dólares" : ""}`}
+                          placeholder="Pesos"
+                          aria-label={`Costo en pesos para ${p.title}`}
                           aria-invalid={errors[p.id] ? true : undefined}
-                          value={editing[p.id] ?? ""}
-                          onChange={(e) => {
-                            setEditing((prev) => ({ ...prev, [p.id]: e.target.value }));
-                            if (errors[p.id]) setErrors((prev) => ({ ...prev, [p.id]: "" }));
-                          }}
+                          value={costDraft[p.id]?.ars ?? (p.currentCost !== null ? String(p.currentCost) : "")}
+                          onChange={(e) => updateCostArs(p.id, e.target.value)}
                           style={{ width: 76, padding: "6px" }}
                         />
-                        <button
-                          type="button"
-                          className="btn btn-secondary btn-sm"
-                          onClick={() => toggleCostCurrency(p.id)}
-                          title="Elegir en qué moneda cargar el costo de este producto"
-                          aria-label={`Moneda del costo para ${p.title}: ${getCostCurrency(p.id)}. Tocar para cambiar.`}
-                          style={{ padding: "5px 7px", fontSize: 12, fontWeight: 600 }}
-                        >
-                          {getCostCurrency(p.id)}
-                        </button>
+                        <label htmlFor={`cost-usd-${p.id}`} className="field-hint" style={{ margin: 0 }}>
+                          US$
+                        </label>
+                        <input
+                          id={`cost-usd-${p.id}`}
+                          type="number"
+                          min="0"
+                          inputMode="decimal"
+                          placeholder="Dólares"
+                          aria-label={`Costo en dólares para ${p.title}`}
+                          value={costDraft[p.id]?.usd ?? (p.currentCostUsd !== null ? String(round2(p.currentCostUsd)) : "")}
+                          onChange={(e) => updateCostUsd(p.id, e.target.value)}
+                          style={{ width: 68, padding: "6px" }}
+                        />
                         <button className="btn btn-secondary btn-sm" onClick={() => saveCost(p.id)} disabled={savingId === p.id}>
                           {savingId === p.id ? "…" : "Guardar"}
                         </button>
                       </div>
-                      {getCostCurrency(p.id) === "USD" && Number(editing[p.id]) > 0 && Number(exchangeRate) > 0 && (
-                        <p className="field-hint" style={{ margin: 0 }}>
-                          ≈ {fmt(Number(editing[p.id]) * Number(exchangeRate))}
-                        </p>
-                      )}
                       {errors[p.id] && <p className="field-error">{errors[p.id]}</p>}
-                    </div>
-                  </td>
-                  <td>
-                    <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-1)" }}>
-                      <div style={{ display: "flex", gap: "var(--space-1)", alignItems: "center" }}>
-                        <input
-                          id={`threshold-${p.id}`}
-                          type="number"
-                          min="0"
-                          step="1"
-                          inputMode="numeric"
-                          placeholder="Sin alerta"
-                          aria-label={`Umbral de stock bajo para ${p.title}`}
-                          aria-invalid={thresholdErrors[p.id] ? true : undefined}
-                          // Precargado con el valor guardado (no solo como
-                          // placeholder): así, si el vendedor aprieta
-                          // "Guardar" sin tocar nada, no manda un campo
-                          // vacío que borraría una alerta ya configurada.
-                          value={thresholdEditing[p.id] ?? (p.lowStockThreshold !== null ? String(p.lowStockThreshold) : "")}
-                          onChange={(e) => {
-                            setThresholdEditing((prev) => ({ ...prev, [p.id]: e.target.value }));
-                            if (thresholdErrors[p.id]) setThresholdErrors((prev) => ({ ...prev, [p.id]: "" }));
-                          }}
-                          style={{ width: 76, padding: "6px" }}
-                        />
-                        <button className="btn btn-secondary btn-sm" onClick={() => saveThreshold(p.id)} disabled={thresholdSavingId === p.id}>
-                          {thresholdSavingId === p.id ? "…" : "Guardar"}
-                        </button>
-                      </div>
-                      {thresholdErrors[p.id] && <p className="field-error">{thresholdErrors[p.id]}</p>}
                     </div>
                   </td>
                   <td>
