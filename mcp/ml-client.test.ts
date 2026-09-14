@@ -25,6 +25,34 @@ describe("mlFetch", () => {
     await expect(mlFetch("/users/me", "bad-token")).rejects.toBeInstanceOf(MlApiError);
   });
 
+  it("pulls a clean message out of ML's JSON error body instead of dumping the raw JSON", async () => {
+    // El bug real que arregla: sin esto, el JSON entero (llaves, corchetes,
+    // comillas) terminaba mostrado tal cual en la pantalla de Productos como
+    // si fuera el mensaje de error.
+    const body = JSON.stringify({
+      message: "Invalid product data",
+      error: "bad_request",
+      status: 400,
+      cause: [{ code: "item.available_quantity.invalid", message: "available_quantity no puede ser negativo" }],
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 400, text: async () => body }));
+
+    await expect(mlFetch("/items/MLA1", "token123")).rejects.toMatchObject({
+      message: expect.stringContaining("Invalid product data — available_quantity no puede ser negativo"),
+    });
+    await expect(mlFetch("/items/MLA1", "token123")).rejects.not.toMatchObject({
+      message: expect.stringContaining("{"),
+    });
+  });
+
+  it("falls back to the raw text when the error body isn't JSON", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500, text: async () => "gateway timeout" }));
+
+    await expect(mlFetch("/items/MLA1", "token123")).rejects.toMatchObject({
+      message: expect.stringContaining("gateway timeout"),
+    });
+  });
+
   it("retries once after a 429 response and then returns the successful result", async () => {
     const fetchMock = vi
       .fn()
