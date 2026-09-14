@@ -389,8 +389,18 @@ export default function ProductosPage() {
   async function saveMlEdit(productId: string) {
     const draft = mlEditing[productId];
     const price = Number(draft?.price);
-    const stock = Number(draft?.stock);
-    if (!draft || Number.isNaN(price) || price <= 0 || Number.isNaN(stock) || stock < 0 || !Number.isInteger(stock)) {
+    if (!draft || Number.isNaN(price) || price <= 0) {
+      setMlErrors((prev) => ({ ...prev, [productId]: "El precio tiene que ser mayor a 0." }));
+      return;
+    }
+    // El stock de un producto en Full lo administra Mercado Libre por el
+    // lado de la logística, no la publicación — ML rechaza cualquier intento
+    // de tocarlo acá con "item.available_quantity.not_modifiable". Ni
+    // siquiera se ofrece el campo para ese caso (ver el render más abajo),
+    // así que tampoco se manda.
+    const inFull = products?.find((p) => p.id === productId)?.logisticType === "fulfillment";
+    const stock = inFull ? undefined : Number(draft.stock);
+    if (!inFull && (Number.isNaN(stock) || (stock as number) < 0 || !Number.isInteger(stock))) {
       setMlErrors((prev) => ({ ...prev, [productId]: "Precio > 0 y stock entero ≥ 0." }));
       return;
     }
@@ -400,7 +410,7 @@ export default function ProductosPage() {
       const res = await fetch("/api/products/ml-update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ productId, price, stock }),
+        body: JSON.stringify({ productId, price, ...(stock !== undefined ? { stock } : {}) }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -674,7 +684,14 @@ export default function ProductosPage() {
                     )}
                   </td>
                   <td className={`num ${p.lowStock ? "missing-cost" : ""}`}>
-                    {mlEditing[p.id] ? (
+                    {mlEditing[p.id] && p.logisticType === "fulfillment" ? (
+                      // El stock de un producto en Full no se puede tocar
+                      // desde acá — Mercado Libre lo rechaza siempre. Se
+                      // muestra igual que fuera de edición, sin campo.
+                      <>
+                        {p.effectiveStock} <span className="badge badge-other">Full</span>
+                      </>
+                    ) : mlEditing[p.id] ? (
                       <input
                         type="number"
                         min="0"
@@ -762,6 +779,12 @@ export default function ProductosPage() {
                             Cancelar
                           </button>
                         </div>
+                        {p.logisticType === "fulfillment" && (
+                          <p className="field-hint" style={{ margin: 0 }}>
+                            El stock de un producto en Full lo administra Mercado Libre — acá solo se puede cambiar
+                            el precio.
+                          </p>
+                        )}
                         {mlErrors[p.id] && <p className="field-error">{mlErrors[p.id]}</p>}
                       </div>
                     ) : (
