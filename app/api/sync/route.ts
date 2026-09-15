@@ -46,6 +46,20 @@ const ORDERS_PER_BATCH = 50;
  */
 const PRODUCTS_TIME_BUDGET_MS = 35_000;
 
+/**
+ * El cierre en sí mismo no entra siempre en una sola llamada: una cuenta con
+ * un historial grande (decenas de miles de ventas) o un catálogo grande en
+ * Full puede tardar más que el resto de sus pasos juntos. Se separa en estos
+ * sub-pasos, cada uno en su propia llamada — mismo patrón que el catálogo y
+ * las órdenes — para que ninguno se quede sin los 60s de la función a mitad
+ * de camino. Cuando eso pasaba, como TODO el cierre corre en una sola
+ * transacción, nada de lo que ya se había calculado llegaba a guardarse:
+ * ads, stock de Full y facturación quedaban en cero para siempre, aunque el
+ * botón "Sincronizar" se apretara una y otra vez.
+ */
+const FINALIZE_STEPS = ["ads", "backfill", "fullstock", "recalc", "billing"] as const;
+type FinalizeStep = (typeof FINALIZE_STEPS)[number];
+
 interface SyncBody {
   /** scroll_id de catálogo para retomar el escaneo donde quedó. */
   productsScrollId?: string;
@@ -55,8 +69,14 @@ interface SyncBody {
   ordersFrom?: string;
   /** Desde qué orden, dentro de esa ventana, seguir. */
   ordersOffsetInWindow?: number;
-  /** Pide correr el cierre (ads, stock de Full, recálculo, facturación) en esta llamada. */
+  /** Pide correr el cierre (ads, stock de Full, recálculo, facturación). */
   finalize?: boolean;
+  /** En qué sub-paso del cierre seguir — ver FINALIZE_STEPS. Sin mandar, arranca desde el primero. */
+  finalizeStep?: FinalizeStep;
+  /** Desde qué inventory_id seguir sincronizando stock de Full. */
+  fullStockOffset?: number;
+  /** Desde qué línea de venta seguir recalculando ganancia neta. */
+  recalcOffset?: number;
 }
 
 export async function POST(request: NextRequest) {
@@ -72,6 +92,11 @@ export async function POST(request: NextRequest) {
 
   const body = (await request.json().catch(() => ({}))) as SyncBody;
   const finalize = body.finalize === true;
+  const finalizeStep: FinalizeStep = FINALIZE_STEPS.includes(body.finalizeStep as FinalizeStep)
+    ? (body.finalizeStep as FinalizeStep)
+    : "ads";
+  const fullStockOffset = Math.max(0, Number(body.fullStockOffset ?? 0));
+  const recalcOffset = Math.max(0, Number(body.recalcOffset ?? 0));
   const productsDone = body.productsDone === true;
   // Arranque de un sync nuevo (no la continuación de un lote en curso): usar
   // el checkpoint de la cuenta si ya completó una vuelta entera alguna vez.
@@ -86,43 +111,62 @@ export async function POST(request: NextRequest) {
     const result = await withScope({ accountId: account.id }, async (client) => {
       const hasIva = await hasColumn(client, "order_items", "iva_applied");
 
-      // Publicidad, recálculo y facturación dependen de tener todas las
-      // órdenes cargadas, así que van al final — pero en su PROPIA llamada,
-      // con su propio presupuesto de 60s. Antes compartían la llamada con el
-      // último lote de órdenes: para una cuenta con mucho volumen (catálogo
-      // grande en Full, muchos años de Ads) esa combinación ocasionalmente se
-      // pasaba del techo de tiempo (pasó en producción), justo cuando ya no
-      // quedaba nada más por sincronizar.
-      const finalizePhase = async () => {
-        const today = new Date().toISOString().slice(0, 10);
-        const adsRowsSynced = await syncAds(client, account.id, sellerId, `${HISTORY_START_DATE}T00:00:00Z`);
-        // Antes del recálculo: le da nombre y foto a las publicaciones dadas
-        // de baja que se vendieron, así aparecen en Productos y se les puede
-        // cargar el costo.
-        await backfillMissingProducts(client, account.id, sellerId);
-        // Depende del catálogo ya sincronizado (necesita el inventory_id de
-        // cada producto), no de las órdenes.
-        const fullStockSynced = await syncFullStock(client, account.id);
-        await recalculate(client, account.id, hasIva, account.otherTaxRate, appliesIva(account.taxCondition));
-        const billingChargesSynced = await syncBillingCharges(client, account.id);
-        // Recién ahora queda confirmado que todo el historial hasta hoy está
-        // al día: el próximo sync puede arrancar cerca de acá en vez de
-        // desde cero.
-        await setOrdersSyncedThrough(client, account.id, today);
+      // Publicidad, recálculo, stock de Full y facturación dependen de tener
+      // todas las órdenes cargadas, así que van al final — pero cada uno en
+      // su PROPIA llamada, con su propio presupuesto de 60s (ver
+      // FINALIZE_STEPS). Antes era un solo paso: para una cuenta con mucho
+      // volumen (decenas de miles de ventas, catálogo grande en Full) el
+      // cierre entero no entraba en el tiempo de una función — y como corre
+      // en una sola transacción, si se cortaba a mitad de camino no quedaba
+      // NADA guardado (ni ads, ni stock de Full, ni facturación), por más
+      // veces que se reintentara. Pasó en producción con una cuenta real.
+      const zeroed = { productsSynced: 0, ordersSynced: 0, adsRowsSynced: 0, billingChargesSynced: 0, fullStockSynced: 0, productsDone: true };
 
-        return {
-          done: true,
-          productsSynced: 0,
-          ordersSynced: 0,
-          adsRowsSynced,
-          billingChargesSynced,
-          fullStockSynced,
-          productsDone: true,
-          finalized: true,
-        };
+      const finalizePhase = async (step: FinalizeStep): Promise<Record<string, unknown>> => {
+        switch (step) {
+          case "ads": {
+            const adsRowsSynced = await syncAds(client, account.id, sellerId, `${HISTORY_START_DATE}T00:00:00Z`);
+            return { ...zeroed, adsRowsSynced, done: false, finalized: false, finalizeStep: "backfill" as FinalizeStep };
+          }
+          case "backfill": {
+            // Le da nombre y foto a las publicaciones dadas de baja que se
+            // vendieron, así aparecen en Productos y se les puede cargar el
+            // costo — antes del recálculo, que depende de esos costos.
+            await backfillMissingProducts(client, account.id, sellerId);
+            return { ...zeroed, done: false, finalized: false, finalizeStep: "fullstock" as FinalizeStep };
+          }
+          case "fullstock": {
+            // Depende del catálogo ya sincronizado (necesita el inventory_id
+            // de cada producto), no de las órdenes. Por lotes: ver
+            // syncFullStock.
+            const { synced, nextOffset } = await syncFullStock(client, account.id, fullStockOffset);
+            if (nextOffset !== null) {
+              return { ...zeroed, fullStockSynced: synced, done: false, finalized: false, finalizeStep: "fullstock" as FinalizeStep, fullStockOffset: nextOffset };
+            }
+            return { ...zeroed, fullStockSynced: synced, done: false, finalized: false, finalizeStep: "recalc" as FinalizeStep };
+          }
+          case "recalc": {
+            const { done, nextOffset } = await recalculate(
+              client, account.id, hasIva, account.otherTaxRate, appliesIva(account.taxCondition), recalcOffset
+            );
+            if (!done) {
+              return { ...zeroed, done: false, finalized: false, finalizeStep: "recalc" as FinalizeStep, recalcOffset: nextOffset ?? 0 };
+            }
+            return { ...zeroed, done: false, finalized: false, finalizeStep: "billing" as FinalizeStep };
+          }
+          case "billing": {
+            const billingChargesSynced = await syncBillingCharges(client, account.id);
+            // Recién ahora queda confirmado que todo el historial hasta hoy
+            // está al día: el próximo sync puede arrancar cerca de acá en
+            // vez de desde cero.
+            const today = new Date().toISOString().slice(0, 10);
+            await setOrdersSyncedThrough(client, account.id, today);
+            return { ...zeroed, billingChargesSynced, done: true, finalized: true };
+          }
+        }
       };
 
-      if (finalize) return finalizePhase();
+      if (finalize) return finalizePhase(finalizeStep);
 
       const ordersPhase = async (productsSynced: number, from: string, offset: number) => {
         const today = new Date().toISOString().slice(0, 10);

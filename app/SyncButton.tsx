@@ -2,6 +2,9 @@
 
 import { useState } from "react";
 
+/** Sub-pasos del cierre — ver la misma lista en app/api/sync/route.ts. */
+type FinalizeStep = "ads" | "backfill" | "fullstock" | "recalc" | "billing";
+
 interface SyncResponse {
   done: boolean;
   productsSynced: number;
@@ -18,6 +21,12 @@ interface SyncResponse {
   ordersOffsetInWindow?: number;
   /** Si el cierre (ads, stock de Full, recálculo, facturación) ya corrió. */
   finalized?: boolean;
+  /** En qué sub-paso del cierre seguir, cuando finalized todavía es false. */
+  finalizeStep?: FinalizeStep;
+  /** Desde qué inventory_id seguir sincronizando stock de Full. */
+  fullStockOffset?: number;
+  /** Desde qué línea de venta seguir recalculando ganancia neta. */
+  recalcOffset?: number;
   error?: string;
 }
 
@@ -27,6 +36,9 @@ interface CallBody {
   ordersFrom?: string;
   ordersOffsetInWindow?: number;
   finalize?: boolean;
+  finalizeStep?: FinalizeStep;
+  fullStockOffset?: number;
+  recalcOffset?: number;
 }
 
 export function SyncButton() {
@@ -130,14 +142,25 @@ export function SyncButton() {
         setProgress(`${totals.orders} órdenes sincronizadas…`);
         if (data.done) {
           if (!data.finalized) {
-            // Todo el historial de órdenes ya está al día — falta solo el
-            // cierre (ads, stock de Full, recálculo, facturación), en su
-            // propia llamada para que no compita por tiempo con el lote que
-            // recién terminó.
+            // Todo el historial de órdenes ya está al día — falta el cierre
+            // (ads, stock de Full, recálculo, facturación). Tampoco entra
+            // siempre en una sola llamada (una cuenta con mucho volumen
+            // puede tardar más en el recálculo o en el stock de Full que en
+            // el resto del sync junto), así que se pide de a un sub-paso por
+            // vez hasta que el servidor avisa que terminó del todo.
             setProgress("Cerrando sincronización…");
-            const closing = await call({ finalize: true });
-            totals.ads += closing.adsRowsSynced;
-            totals.billing += closing.billingChargesSynced ?? 0;
+            let finalizeStep: FinalizeStep | undefined;
+            let fullStockOffset = 0;
+            let recalcOffset = 0;
+            for (let step = 0; step < 200; step += 1) {
+              const closing = await call({ finalize: true, finalizeStep, fullStockOffset, recalcOffset });
+              totals.ads += closing.adsRowsSynced;
+              totals.billing += closing.billingChargesSynced ?? 0;
+              if (closing.finalized) break;
+              finalizeStep = closing.finalizeStep;
+              fullStockOffset = closing.fullStockOffset ?? 0;
+              recalcOffset = closing.recalcOffset ?? 0;
+            }
           }
           break;
         }

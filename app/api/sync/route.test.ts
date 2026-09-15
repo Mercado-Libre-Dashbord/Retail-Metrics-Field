@@ -5,9 +5,9 @@ vi.mock("@/sync/sync-service", () => ({
   syncProductsPage: vi.fn().mockResolvedValue({ productsSynced: 0, nextScrollId: undefined }),
   syncOrders: vi.fn().mockResolvedValue(0),
   syncAds: vi.fn().mockResolvedValue(0),
-  syncFullStock: vi.fn().mockResolvedValue(0),
+  syncFullStock: vi.fn().mockResolvedValue({ synced: 0, nextOffset: null }),
   syncBillingCharges: vi.fn().mockResolvedValue(0),
-  recalculate: vi.fn(),
+  recalculate: vi.fn().mockResolvedValue({ done: true, nextOffset: null }),
   backfillMissingProducts: vi.fn().mockResolvedValue(0),
   pendingOrderIds: vi.fn(async (_db: unknown, _acc: string, ids: string[]) => ids),
 }));
@@ -20,7 +20,7 @@ vi.mock("@/db/accounts", async () => {
 
 import { POST } from "./route";
 import { withScope } from "@/db/client";
-import { syncOrders, syncProductsPage, recalculate, pendingOrderIds, backfillMissingProducts } from "@/sync/sync-service";
+import { syncOrders, syncProductsPage, syncFullStock, recalculate, pendingOrderIds, backfillMissingProducts } from "@/sync/sync-service";
 import { listOrdersPage } from "@/mcp/tools";
 import { resolveCurrentAccount } from "@/lib/current-account";
 import { setOrdersSyncedThrough } from "@/db/accounts";
@@ -47,8 +47,10 @@ describe("POST /api/sync", () => {
 
     await POST(req({ productsDone: true }));
     // El cierre (donde corre recalculate) se pide en una llamada aparte, una
-    // vez que el historial de órdenes ya está al día.
-    await POST(req({ finalize: true }));
+    // vez que el historial de órdenes ya está al día — y recalc es un
+    // sub-paso más adentro del cierre (ver FINALIZE_STEPS), así que se pide
+    // directamente en vez de tener que pasar por ads/backfill/fullstock antes.
+    await POST(req({ finalize: true, finalizeStep: "recalc" }));
 
     expect(vi.mocked(syncOrders).mock.calls[0][5]).toBe(false);
     expect(vi.mocked(recalculate).mock.calls[0][4]).toBe(false);
@@ -146,8 +148,9 @@ describe("POST /api/sync", () => {
     // El cierre (donde se guarda el checkpoint) corre en su propia llamada,
     // con su propio presupuesto de 60s — no compite por tiempo con el lote
     // de órdenes que recién terminó (eso fue lo que se pasó del techo en
-    // producción con una cuenta de mucho volumen).
-    await POST(req({ finalize: true }));
+    // producción con una cuenta de mucho volumen). El checkpoint se guarda
+    // recién en el último sub-paso ("billing"), así que se pide directo.
+    await POST(req({ finalize: true, finalizeStep: "billing" }));
 
     expect(vi.mocked(setOrdersSyncedThrough)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(setOrdersSyncedThrough).mock.calls[0][1]).toBe("acc1");
@@ -203,15 +206,73 @@ describe("POST /api/sync", () => {
     expect(vi.mocked(recalculate)).not.toHaveBeenCalled();
 
     // El cierre (ads, backfill, stock de Full, recálculo, facturación) va en
-    // su propia llamada, con su propio presupuesto de 60s — así una cuenta
-    // de mucho volumen no se pasa del techo justo en el último paso.
-    const closingBody = await (await POST(req({ finalize: true }))).json();
+    // sus propias llamadas, una por sub-paso, cada una con su propio
+    // presupuesto de 60s — así una cuenta de mucho volumen no se pasa del
+    // techo justo en el último paso. Se recorre igual que lo hace el cliente
+    // real (SyncButton), pidiendo el siguiente finalizeStep hasta terminar.
+    let closingBody: any = { finalized: false };
+    for (let i = 0; i < 10 && !closingBody.finalized; i += 1) {
+      closingBody = await (
+        await POST(req({ finalize: true, finalizeStep: closingBody.finalizeStep }))
+      ).json();
+    }
 
     expect(closingBody).toMatchObject({ done: true, finalized: true });
     // Le da nombre y foto a las publicaciones dadas de baja antes de recalcular:
     // si no corre, esas ventas siguen mostrándose como un id suelto.
     expect(vi.mocked(backfillMissingProducts)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(recalculate)).toHaveBeenCalled();
+  });
+
+  it("el cierre pasa por ads, backfill, stock de Full, recálculo y facturación en ese orden, cada uno en su propia llamada", async () => {
+    vi.mocked(resolveCurrentAccount).mockResolvedValue({ id: "acc1", mlSellerId: "S1", otherTaxRate: 0, taxCondition: "responsable_inscripto" } as any);
+    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query: vi.fn().mockResolvedValue({ rows: [] }) }));
+
+    const steps: (string | undefined)[] = [];
+    let requestedStep: string | undefined;
+    let closingBody: any = { finalized: false };
+    for (let i = 0; i < 10 && !closingBody.finalized; i += 1) {
+      steps.push(requestedStep ?? "ads");
+      closingBody = await (await POST(req({ finalize: true, finalizeStep: requestedStep }))).json();
+      requestedStep = closingBody.finalizeStep;
+    }
+
+    expect(steps).toEqual(["ads", "backfill", "fullstock", "recalc", "billing"]);
+    expect(closingBody).toMatchObject({ done: true, finalized: true });
+  });
+
+  it("sigue pidiendo stock de Full hasta que syncFullStock deja de devolver un nextOffset", async () => {
+    vi.mocked(resolveCurrentAccount).mockResolvedValue({ id: "acc1", mlSellerId: "S1", otherTaxRate: 0, taxCondition: "responsable_inscripto" } as any);
+    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query: vi.fn().mockResolvedValue({ rows: [] }) }));
+    vi.mocked(syncFullStock)
+      .mockResolvedValueOnce({ synced: 300, nextOffset: 300 })
+      .mockResolvedValueOnce({ synced: 300, nextOffset: 600 })
+      .mockResolvedValueOnce({ synced: 51, nextOffset: null });
+
+    const first = await (await POST(req({ finalize: true, finalizeStep: "fullstock", fullStockOffset: 0 }))).json();
+    expect(first).toMatchObject({ finalized: false, finalizeStep: "fullstock", fullStockOffset: 300, fullStockSynced: 300 });
+
+    const second = await (await POST(req({ finalize: true, finalizeStep: "fullstock", fullStockOffset: first.fullStockOffset }))).json();
+    expect(second).toMatchObject({ finalized: false, finalizeStep: "fullstock", fullStockOffset: 600, fullStockSynced: 300 });
+
+    const third = await (await POST(req({ finalize: true, finalizeStep: "fullstock", fullStockOffset: second.fullStockOffset }))).json();
+    expect(third).toMatchObject({ finalized: false, finalizeStep: "recalc", fullStockSynced: 51 });
+    expect(vi.mocked(syncFullStock).mock.calls.map((c) => c[2])).toEqual([0, 300, 600]);
+  });
+
+  it("sigue pidiendo el recálculo hasta que recalculate deja de devolver un nextOffset", async () => {
+    vi.mocked(resolveCurrentAccount).mockResolvedValue({ id: "acc1", mlSellerId: "S1", otherTaxRate: 0, taxCondition: "responsable_inscripto" } as any);
+    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query: vi.fn().mockResolvedValue({ rows: [] }) }));
+    vi.mocked(recalculate)
+      .mockResolvedValueOnce({ done: false, nextOffset: 500 })
+      .mockResolvedValueOnce({ done: true, nextOffset: null });
+
+    const first = await (await POST(req({ finalize: true, finalizeStep: "recalc", recalcOffset: 0 }))).json();
+    expect(first).toMatchObject({ finalized: false, finalizeStep: "recalc", recalcOffset: 500 });
+
+    const second = await (await POST(req({ finalize: true, finalizeStep: "recalc", recalcOffset: first.recalcOffset }))).json();
+    expect(second).toMatchObject({ finalized: false, finalizeStep: "billing" });
+    expect(vi.mocked(recalculate).mock.calls.map((c) => c[5])).toEqual([0, 500]);
   });
 
   it("un catálogo grande corta el escaneo y devuelve el scroll_id, sin tocar órdenes todavía", async () => {

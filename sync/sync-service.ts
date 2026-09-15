@@ -282,23 +282,46 @@ export async function syncAds(
 }
 
 /**
+ * Cuántos inventory_id se piden por llamada. Una cuenta con un catálogo
+ * grande en Full (miles de publicaciones) no entra en el tiempo de una sola
+ * función junto con el resto del cierre del sync — se pedía TODO de una y,
+ * para esas cuentas, el cierre entero (que además guarda publicidad y
+ * facturación en la misma transacción) nunca llegaba a confirmarse.
+ */
+const FULL_STOCK_BATCH = 300;
+
+/**
  * Actualiza la foto de stock guardado en Full de los productos que tienen
  * inventory_id. Corre al final, como syncAds: es informativo (valorización
  * de stock), no afecta ninguna venta ni ganancia neta, así que si falla no
  * tiene sentido tirar abajo el resto del sync.
+ *
+ * Por lotes de `FULL_STOCK_BATCH`, no todo de una: quien llama (ver
+ * `/api/sync`) sigue pidiendo con el `nextOffset` devuelto hasta que da
+ * `null`, en su propia llamada — así una cuenta con miles de inventory_id no
+ * se come sola el presupuesto de tiempo del cierre entero.
  */
-export async function syncFullStock(db: QueryExecutor, accountId: string): Promise<number> {
-  if (!(await hasColumn(db, "products", "inventory_id"))) return 0;
+export async function syncFullStock(
+  db: QueryExecutor,
+  accountId: string,
+  offset = 0
+): Promise<{ synced: number; nextOffset: number | null }> {
+  if (!(await hasColumn(db, "products", "inventory_id"))) return { synced: 0, nextOffset: null };
   try {
+    // DISTINCT + orden estable: varias publicaciones pueden compartir un
+    // mismo inventory_id (ver getFullStock), y sin un orden fijo la paginación
+    // por offset podría saltear o repetir ids entre una llamada y la siguiente.
     const productsResult = await db.query<{ inventory_id: string }>(
-      `SELECT inventory_id FROM products WHERE account_id = $1 AND inventory_id IS NOT NULL`,
+      `SELECT DISTINCT inventory_id FROM products WHERE account_id = $1 AND inventory_id IS NOT NULL ORDER BY inventory_id`,
       [accountId]
     );
-    const inventoryIds = productsResult.rows.map((r) => r.inventory_id);
-    if (inventoryIds.length === 0) return 0;
+    const allIds = productsResult.rows.map((r) => r.inventory_id);
+    if (allIds.length === 0) return { synced: 0, nextOffset: null };
+    const batch = allIds.slice(offset, offset + FULL_STOCK_BATCH);
+    if (batch.length === 0) return { synced: 0, nextOffset: null };
 
     const hasFullSince = await hasColumn(db, "products", "full_since");
-    const stock = await getFullStock(accountId, inventoryIds);
+    const stock = await getFullStock(accountId, batch);
     for (const s of stock) {
       // full_since se pisa solo si todavía está vacío: es la primera vez
       // que VIMOS este producto con stock en Full, no la fecha real de
@@ -309,10 +332,11 @@ export async function syncFullStock(db: QueryExecutor, accountId: string): Promi
         [s.availableQuantity, s.unavailableQuantity, accountId, s.inventoryId]
       );
     }
-    return stock.length;
+    const nextOffset = offset + FULL_STOCK_BATCH < allIds.length ? offset + FULL_STOCK_BATCH : null;
+    return { synced: stock.length, nextOffset };
   } catch (err) {
     console.error("No se pudo sincronizar el stock de Full, se continúa sin ese dato:", (err as Error).message);
-    return 0;
+    return { synced: 0, nextOffset: null };
   }
 }
 
@@ -474,9 +498,13 @@ export async function recalculate(
   accountId: string,
   hasIva: boolean,
   otherTaxRate = 0,
-  appliesIva = true
-): Promise<void> {
-  await reallocateAdsCosts(db, accountId, hasIva, otherTaxRate, appliesIva);
+  appliesIva = true,
+  offset = 0,
+  deadline: number = Date.now() + RECALCULATE_TIME_BUDGET_MS,
+  /** Solo para tests: probar la resumibilidad no debería depender de crear miles de filas reales. */
+  batchSize = RECALCULATE_WRITE_BATCH
+): Promise<{ done: boolean; nextOffset: number | null }> {
+  return reallocateAdsCosts(db, accountId, hasIva, otherTaxRate, appliesIva, offset, deadline, batchSize);
 }
 
 export async function runSync(
@@ -494,7 +522,7 @@ export async function runSync(
   const ordersSynced = await syncOrders(db, accountId, orderIds, hasIva, otherTaxRate, appliesIva);
   const adsRowsSynced = await syncAds(db, accountId, sellerId, sinceIso);
   await backfillMissingProducts(db, accountId, sellerId);
-  const fullStockSynced = await syncFullStock(db, accountId);
+  const { synced: fullStockSynced } = await syncFullStock(db, accountId);
   await recalculate(db, accountId, hasIva, otherTaxRate, appliesIva);
   const billingChargesSynced = await syncBillingCharges(db, accountId);
 
@@ -587,22 +615,49 @@ interface OrderItemRow {
   shippingcost: number;
 }
 
+/**
+ * Cuántas líneas entran en un solo UPDATE ...FROM (VALUES ...). Antes se
+ * escribía una consulta por línea, una atrás de la otra: para una cuenta con
+ * decenas de miles de ventas eso solo, ya de por sí, se comía el presupuesto
+ * de tiempo del cierre del sync entero (que también guarda publicidad, stock
+ * de Full y facturación en la misma transacción) — el cierre nunca llegaba a
+ * confirmarse para esas cuentas, así que ninguna de esas cuatro cosas quedaba
+ * guardada nunca, por más veces que se reintentara.
+ */
+const RECALCULATE_WRITE_BATCH = 500;
+const RECALCULATE_TIME_BUDGET_MS = 40_000;
+
+/**
+ * Por lotes y con presupuesto de tiempo: procesa desde `offset` hasta que se
+ * termina o se acaba `deadline`, y devuelve por dónde seguir. Quien llama
+ * (ver `/api/sync`) reintenta con el `nextOffset` en su propia llamada
+ * mientras `done` sea false — mismo patrón que `syncFullStock` y
+ * `syncProductsPage`.
+ */
 async function reallocateAdsCosts(
   db: QueryExecutor,
   accountId: string,
   hasIva: boolean,
   otherTaxRate = 0,
-  appliesIva = true
-): Promise<void> {
+  appliesIva = true,
+  offset = 0,
+  deadline: number = Date.now() + RECALCULATE_TIME_BUDGET_MS,
+  batchSize = RECALCULATE_WRITE_BATCH
+): Promise<{ done: boolean; nextOffset: number | null }> {
+  // Orden estable (por id): sin esto, la paginación por offset entre llamadas
+  // podría saltear o repetir líneas si Postgres decidiera devolverlas en otro
+  // orden de una consulta a la siguiente.
   const itemsResult = await db.query<OrderItemRow>(
     `SELECT oi.id, oi.product_id as productId, oi.quantity, o.date_created as dateCreated,
             oi.unit_price as unitPrice, oi.ml_commission as mlCommission,
             oi.shipping_cost as shippingCost
      FROM order_items oi JOIN orders o ON o.account_id = oi.account_id AND o.id = oi.order_id
-     WHERE oi.account_id = $1`,
+     WHERE oi.account_id = $1
+     ORDER BY oi.id`,
     [accountId]
   );
   const items = itemsResult.rows;
+  if (items.length === 0) return { done: true, nextOffset: null };
 
   const unitsSoldByProductDate = new Map<string, number>();
   for (const it of items) {
@@ -636,26 +691,54 @@ async function reallocateAdsCosts(
     costsByProduct.set(row.productid, list);
   }
 
-  for (const it of items) {
-    const key = `${it.productid}|${new Date(it.datecreated).toISOString().slice(0, 10)}`;
-    const dailySpend = adsByProductDate.get(key) ?? 0;
-    const unitsSoldThatDay = unitsSoldByProductDate.get(key) ?? 0;
-    const adsCostAllocated = allocateAdsCost(dailySpend, unitsSoldThatDay, Number(it.quantity));
-    const entry = getCostEntryAtDate(costsByProduct.get(it.productid) ?? [], new Date(it.datecreated).toISOString());
-    const profitInput = {
-      unitPrice: Number(it.unitprice),
-      quantity: Number(it.quantity),
-      mlCommission: Number(it.mlcommission),
-      shippingCost: Number(it.shippingcost),
-      adsCostAllocated,
-      costApplied: entry?.cost ?? null,
-      taxApplied: Number(it.unitprice) * otherTaxRate,
-      appliesIva,
-    };
-    const netProfit = calculateNetProfit(profitInput);
+  let i = offset;
+  while (i < items.length) {
+    // Siempre procesa al menos un lote, aunque el presupuesto ya esté
+    // agotado al entrar: evita quedar en un ciclo de "no avanzó nada" si a
+    // quien llama se le ocurre pasar un deadline ya vencido.
+    if (i > offset && Date.now() >= deadline) break;
+
+    const batch = items.slice(i, i + batchSize);
+    const values: unknown[] = [];
+    const valueRows: string[] = [];
+    const cols = hasIva ? 6 : 5;
+    batch.forEach((it, idx) => {
+      const key = `${it.productid}|${new Date(it.datecreated).toISOString().slice(0, 10)}`;
+      const dailySpend = adsByProductDate.get(key) ?? 0;
+      const unitsSoldThatDay = unitsSoldByProductDate.get(key) ?? 0;
+      const adsCostAllocated = allocateAdsCost(dailySpend, unitsSoldThatDay, Number(it.quantity));
+      const entry = getCostEntryAtDate(costsByProduct.get(it.productid) ?? [], new Date(it.datecreated).toISOString());
+      const profitInput = {
+        unitPrice: Number(it.unitprice),
+        quantity: Number(it.quantity),
+        mlCommission: Number(it.mlcommission),
+        shippingCost: Number(it.shippingcost),
+        adsCostAllocated,
+        costApplied: entry?.cost ?? null,
+        taxApplied: Number(it.unitprice) * otherTaxRate,
+        appliesIva,
+      };
+      values.push(it.id, adsCostAllocated, calculateNetProfit(profitInput), entry?.cost ?? null, profitInput.taxApplied);
+      if (hasIva) values.push(calculateIva(profitInput));
+
+      const base = idx * cols;
+      const placeholders = Array.from({ length: cols }, (_, c) => `$${base + c + 1}`);
+      valueRows.push(`(${placeholders[0]}::bigint, ${placeholders.slice(1).join(", ")})`);
+    });
+
     await db.query(
-      `UPDATE order_items SET ads_cost_allocated = $1, net_profit = $2, cost_applied = $3, tax_applied = $4${hasIva ? ", iva_applied = $6" : ""} WHERE id = $5`,
-      [adsCostAllocated, netProfit, entry?.cost ?? null, profitInput.taxApplied, it.id, ...(hasIva ? [calculateIva(profitInput)] : [])]
+      `UPDATE order_items AS oi SET
+         ads_cost_allocated = v.ads_cost_allocated,
+         net_profit = v.net_profit,
+         cost_applied = v.cost_applied,
+         tax_applied = v.tax_applied${hasIva ? ",\n         iva_applied = v.iva_applied" : ""}
+       FROM (VALUES ${valueRows.join(", ")})
+         AS v(id, ads_cost_allocated, net_profit, cost_applied, tax_applied${hasIva ? ", iva_applied" : ""})
+       WHERE oi.id = v.id`,
+      values
     );
+    i += batch.length;
   }
+
+  return { done: i >= items.length, nextOffset: i >= items.length ? null : i };
 }

@@ -455,8 +455,9 @@ describe("syncFullStock", () => {
     vi.mocked(getFullStock).mockResolvedValueOnce([
       { inventoryId: "INV1", availableQuantity: 8, unavailableQuantity: 1 },
     ]);
-    const synced = await withScope({ accountId: account.id }, (client) => syncFullStock(client, account.id));
+    const { synced, nextOffset } = await withScope({ accountId: account.id }, (client) => syncFullStock(client, account.id));
     expect(synced).toBe(1);
+    expect(nextOffset).toBeNull();
 
     const first = await withScope({ accountId: account.id }, async (client) => {
       const r = await client.query<{ full_stock_qty: number; full_since: string }>(
@@ -484,6 +485,106 @@ describe("syncFullStock", () => {
     });
     expect(second.full_stock_qty).toBe(3);
     expect(new Date(second.full_since).getTime()).toBe(new Date(first.full_since).getTime());
+  });
+});
+
+describe("recalculate", () => {
+  it("aplica el costo vigente, reparte la publicidad del día y calcula la ganancia neta de la línea", async () => {
+    const { withScope } = await import("@/db/client");
+    const { recalculate } = await import("./sync-service");
+    const account = await makeAccount();
+
+    await withScope({ accountId: account.id }, async (client) => {
+      await client.query(
+        `INSERT INTO orders (account_id, id, date_created, status, buyer_total) VALUES ($1,'O1','2026-02-01', 'paid', 2000)`,
+        [account.id]
+      );
+      await client.query(
+        `INSERT INTO order_items (account_id, order_id, product_id, unit_price, quantity, ml_commission, shipping_cost, ads_cost_allocated)
+         VALUES ($1,'O1','MLA1',1000,2,130,0,0)`,
+        [account.id]
+      );
+      await client.query(
+        `INSERT INTO product_costs (account_id, product_id, cost, valid_from) VALUES ($1,'MLA1',300,'2026-01-01')`,
+        [account.id]
+      );
+      // Única línea vendida ese día para ese producto: se lleva todo el gasto.
+      await client.query(
+        `INSERT INTO ads_spend (account_id, product_id, date, amount, channel) VALUES ($1,'MLA1','2026-02-01',40,'mercado_ads')`,
+        [account.id]
+      );
+    });
+
+    const result = await withScope({ accountId: account.id }, (client) =>
+      recalculate(client, account.id, false, 0, true)
+    );
+    expect(result).toEqual({ done: true, nextOffset: null });
+
+    const row = await withScope({ accountId: account.id }, async (client) => {
+      const r = await client.query<{ cost_applied: number; ads_cost_allocated: number; tax_applied: number; net_profit: number }>(
+        `SELECT cost_applied, ads_cost_allocated, tax_applied, net_profit FROM order_items WHERE account_id = $1 AND order_id = 'O1'`,
+        [account.id]
+      );
+      return r.rows[0];
+    });
+    expect(row.cost_applied).toBe(300);
+    expect(row.ads_cost_allocated).toBe(40);
+    expect(row.tax_applied).toBe(0);
+    // 1000*2 - comisión 130 - envío 0 - ads 40 - costo 300*2 - impuesto 0 - IVA 0.
+    expect(row.net_profit).toBe(1230);
+  });
+
+  it("corta al agotar el presupuesto de tiempo y retoma desde el offset devuelto, sin saltear ni repetir filas", async () => {
+    const { withScope } = await import("@/db/client");
+    const { recalculate } = await import("./sync-service");
+    const account = await makeAccount();
+
+    await withScope({ accountId: account.id }, async (client) => {
+      await client.query(
+        `INSERT INTO orders (account_id, id, date_created, status, buyer_total) VALUES ($1,'O1',now(),'paid',300)`,
+        [account.id]
+      );
+      for (const p of ["MLA1", "MLA2", "MLA3"]) {
+        await client.query(
+          `INSERT INTO order_items (account_id, order_id, product_id, unit_price, quantity, ml_commission, shipping_cost, ads_cost_allocated)
+           VALUES ($1,'O1',$2,100,1,0,0,0)`,
+          [account.id, p]
+        );
+      }
+    });
+
+    // Lotes de a 1, con el presupuesto de tiempo ya vencido: procesa una sola
+    // fila por llamada (siempre al menos una, ver el comentario en
+    // reallocateAdsCosts) y avisa por dónde seguir — el mismo patrón que
+    // sigue el cliente real (ver SyncButton) para no perder ni repetir nada.
+    let offset = 0;
+    let done = false;
+    let calls = 0;
+    while (!done && calls < 10) {
+      const result = await withScope({ accountId: account.id }, (client) =>
+        recalculate(client, account.id, false, 0.1, false, offset, Date.now() - 1, 1)
+      );
+      done = result.done;
+      offset = result.nextOffset ?? offset;
+      calls += 1;
+    }
+    expect(calls).toBe(3);
+    expect(done).toBe(true);
+
+    const rows = await withScope({ accountId: account.id }, async (client) => {
+      const r = await client.query<{ product_id: string; tax_applied: number }>(
+        `SELECT product_id, tax_applied FROM order_items WHERE account_id = $1 ORDER BY product_id`,
+        [account.id]
+      );
+      return r.rows;
+    });
+    // otherTaxRate=0.1 sobre unit_price=100: si alguna fila hubiera quedado
+    // sin procesar, seguiría en null en vez de 10.
+    expect(rows).toEqual([
+      { product_id: "MLA1", tax_applied: 10 },
+      { product_id: "MLA2", tax_applied: 10 },
+      { product_id: "MLA3", tax_applied: 10 },
+    ]);
   });
 });
 
