@@ -659,20 +659,39 @@ async function reallocateAdsCosts(
   const items = itemsResult.rows;
   if (items.length === 0) return { done: true, nextOffset: null };
 
+  // Por producto+día (para el caso, hoy inexistente, de que un gasto SÍ
+  // venga atado a una publicación puntual) y por día solo, para todo el
+  // catálogo (para el caso real de hoy: ver más abajo).
   const unitsSoldByProductDate = new Map<string, number>();
+  const unitsSoldByDate = new Map<string, number>();
   for (const it of items) {
-    const key = `${it.productid}|${new Date(it.datecreated).toISOString().slice(0, 10)}`;
+    const dateStr = new Date(it.datecreated).toISOString().slice(0, 10);
+    const key = `${it.productid}|${dateStr}`;
     unitsSoldByProductDate.set(key, (unitsSoldByProductDate.get(key) ?? 0) + Number(it.quantity));
+    unitsSoldByDate.set(dateStr, (unitsSoldByDate.get(dateStr) ?? 0) + Number(it.quantity));
   }
 
-  const adsResult = await db.query<{ productid: string; date: string | Date; amount: number }>(
+  const adsResult = await db.query<{ productid: string | null; date: string | Date; amount: number }>(
     `SELECT product_id as productId, date, amount FROM ads_spend WHERE account_id = $1 AND channel = 'mercado_ads'`,
     [accountId]
   );
   const adsByProductDate = new Map<string, number>();
+  // Mercado Ads dejó de discriminar el gasto por publicación (ver
+  // getAdsSpend en mcp/tools.ts): TODO lo que llega hoy tiene product_id
+  // null. Antes esto se guardaba igual en `adsByProductDate` con clave
+  // "null|fecha", que nunca podía matchear la clave real de una línea de
+  // venta ("MLA123|fecha") — el gasto en Ads terminaba SIEMPRE en $0 por
+  // línea, sin ningún aviso, aunque la cuenta sí tuviera plata gastada real.
+  // Ahora ese gasto sin publicación se guarda aparte, por día, y se reparte
+  // entre TODAS las unidades vendidas ese día en toda la cuenta.
+  const adsByDate = new Map<string, number>();
   for (const row of adsResult.rows) {
     const dateStr = row.date instanceof Date ? row.date.toISOString().slice(0, 10) : String(row.date).slice(0, 10);
-    adsByProductDate.set(`${row.productid}|${dateStr}`, Number(row.amount));
+    if (row.productid) {
+      adsByProductDate.set(`${row.productid}|${dateStr}`, (adsByProductDate.get(`${row.productid}|${dateStr}`) ?? 0) + Number(row.amount));
+    } else {
+      adsByDate.set(dateStr, (adsByDate.get(dateStr) ?? 0) + Number(row.amount));
+    }
   }
 
   // Recalculamos cost_applied acá también (no solo al insertar la orden): un
@@ -703,10 +722,26 @@ async function reallocateAdsCosts(
     const valueRows: string[] = [];
     const cols = hasIva ? 6 : 5;
     batch.forEach((it, idx) => {
-      const key = `${it.productid}|${new Date(it.datecreated).toISOString().slice(0, 10)}`;
-      const dailySpend = adsByProductDate.get(key) ?? 0;
-      const unitsSoldThatDay = unitsSoldByProductDate.get(key) ?? 0;
-      const adsCostAllocated = allocateAdsCost(dailySpend, unitsSoldThatDay, Number(it.quantity));
+      const dateStr = new Date(it.datecreated).toISOString().slice(0, 10);
+      const productDateKey = `${it.productid}|${dateStr}`;
+      // Gasto sin publicación asociada (todo Mercado Ads hoy): se reparte
+      // entre todas las unidades vendidas ESE DÍA en toda la cuenta, no solo
+      // las de este producto — es la única base real que hay para repartirlo.
+      const unattributedAds = allocateAdsCost(
+        adsByDate.get(dateStr) ?? 0,
+        unitsSoldByDate.get(dateStr) ?? 0,
+        Number(it.quantity)
+      );
+      // Gasto atado a esta publicación puntual (si alguna vez vuelve a venir
+      // así, o se carga a mano para un producto): se reparte solo entre las
+      // unidades de este producto ese día. Nunca se pisan entre sí: una fila
+      // de ads_spend tiene product_id o no lo tiene, nunca las dos cosas.
+      const attributedAds = allocateAdsCost(
+        adsByProductDate.get(productDateKey) ?? 0,
+        unitsSoldByProductDate.get(productDateKey) ?? 0,
+        Number(it.quantity)
+      );
+      const adsCostAllocated = unattributedAds + attributedAds;
       const entry = getCostEntryAtDate(costsByProduct.get(it.productid) ?? [], new Date(it.datecreated).toISOString());
       const profitInput = {
         unitPrice: Number(it.unitprice),

@@ -30,7 +30,10 @@ describe("GET /api/summary", () => {
     expect(res.status).toBe(401);
   });
 
-  it("computes derived KPIs from the raw totals and manual ad spend", async () => {
+  it("computes derived KPIs from the raw totals and ad spend", async () => {
+    // adSpend sale directo de la tabla ads_spend (todo lo cargado, cualquier
+    // canal) — no de sumar el gasto ya repartido por venta, que puede quedar
+    // corto si hubo gasto en un día sin ninguna venta ese día.
     const query = vi.fn().mockImplementation(async (sql: string) => {
       if (sql.includes("ads_spend")) {
         return { rows: [{ total: 200 }] };
@@ -42,7 +45,6 @@ describe("GET /api/summary", () => {
             grossSales: 2000,
             totalCommission: 260,
             totalShipping: 180,
-            totalMercadoAds: 100,
             totalCost: 600,
             netProfit: 860,
             itemsMissingCost: 0,
@@ -58,11 +60,11 @@ describe("GET /api/summary", () => {
 
     expect(body.orders).toBe(2);
     expect(body.aov).toBe(1000);
-    expect(body.adSpend).toBe(300);
-    expect(body.mer).toBeCloseTo(2000 / 300);
-    expect(body.cpa).toBe(150);
+    expect(body.adSpend).toBe(200);
+    expect(body.mer).toBeCloseTo(2000 / 200);
+    expect(body.cpa).toBe(100);
     expect(body.netAov).toBe(430);
-    expect(body.trueCpa).toBe(150);
+    expect(body.trueCpa).toBe(100);
   });
 
   it("returns zeroed rates instead of dividing by zero when there is no data", async () => {

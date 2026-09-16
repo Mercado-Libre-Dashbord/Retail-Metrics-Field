@@ -184,7 +184,6 @@ export async function GET(request: NextRequest) {
          COALESCE(SUM(oi.unit_price * oi.quantity), 0) as "grossSales",
          COALESCE(SUM(oi.ml_commission), 0) as "totalCommission",
          COALESCE(SUM(oi.shipping_cost), 0) as "totalShipping",
-         COALESCE(SUM(oi.ads_cost_allocated), 0) as "totalMercadoAds",
          COALESCE(SUM(oi.cost_applied * oi.quantity), 0) as "totalCost",
          ${(await hasColumn(client, "order_items", "iva_applied")) ? "COALESCE(SUM(oi.iva_applied), 0)" : "0::double precision"} as "totalIva",
          COALESCE(SUM(oi.net_profit), 0) as "netProfit",
@@ -198,21 +197,16 @@ export async function GET(request: NextRequest) {
     );
     const totals = totalsResult.rows[0] as Record<string, string | number>;
 
-    // "totalMercadoAds" de arriba es solo lo que se pudo atar a una venta
-    // puntual (product_id + fecha matchean una línea real). Lo que queda a
-    // nivel cuenta —lo cargado a mano (Meta/Google/TikTok, siempre sin
-    // producto) y, desde que Mercado Ads dejó de dar el gasto por
-    // publicación, también el total de Product Ads sin poder repartirse por
-    // producto— entra acá. Son conjuntos disjuntos: nunca se cuenta dos veces.
-    const unallocatedAdsResult = await client.query(
+    // El Ad Spend de la tarjeta sale directo de ads_spend (todo lo cargado,
+    // de cualquier canal) — no de sumar oi.ads_cost_allocated (el gasto ya
+    // repartido entre las ventas), que puede quedar corto si hubo gasto en
+    // Ads un día sin ninguna venta ese día para repartírselo.
+    const adSpendResult = await client.query(
       `SELECT COALESCE(SUM(amount), 0) as total FROM ads_spend
-       WHERE account_id = $1 AND (channel != 'mercado_ads' OR product_id IS NULL)
-         AND date BETWEEN $2::date AND $3::date`,
+       WHERE account_id = $1 AND date BETWEEN $2::date AND $3::date`,
       [account.id, from, to]
     );
-    const unallocatedAdsTotal = Number(unallocatedAdsResult.rows[0].total);
-
-    const adSpend = Number(totals.totalMercadoAds) + unallocatedAdsTotal;
+    const adSpend = Number(adSpendResult.rows[0].total);
     const revenue = Number(totals.grossSales);
     const orders = Number(totals.orders);
     const netProfit = Number(totals.netProfit);

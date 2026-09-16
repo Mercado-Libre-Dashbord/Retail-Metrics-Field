@@ -489,6 +489,61 @@ describe("syncFullStock", () => {
 });
 
 describe("recalculate", () => {
+  it("reparte el gasto de Mercado Ads sin publicación asociada entre TODAS las ventas de ese día, no solo las de un producto", async () => {
+    // El bug real que corrige: Mercado Ads dejó de discriminar el gasto por
+    // publicación (ver getAdsSpend en mcp/tools.ts) — todo lo que sincroniza
+    // hoy llega con product_id NULL. La versión vieja de este cálculo
+    // guardaba ese gasto bajo la clave "null|fecha" y después buscaba
+    // "MLA1|fecha" para cada línea de venta: nunca matcheaban, así que
+    // ads_cost_allocated quedaba siempre en $0 sin ningún aviso, aunque la
+    // cuenta sí tuviera plata real gastada — la pestaña de Campañas mostraba
+    // "sin gasto en publicidad" con presupuesto activo.
+    const { withScope } = await import("@/db/client");
+    const { recalculate } = await import("./sync-service");
+    const account = await makeAccount();
+
+    await withScope({ accountId: account.id }, async (client) => {
+      await client.query(
+        `INSERT INTO orders (account_id, id, date_created, status, buyer_total) VALUES ($1,'O1','2026-03-01', 'paid', 400)`,
+        [account.id]
+      );
+      // MLA1 vende 3 unidades y MLA2 vende 1, el mismo día: 4 unidades en
+      // total para repartir el gasto sin publicación asociada.
+      await client.query(
+        `INSERT INTO order_items (account_id, order_id, product_id, unit_price, quantity, ml_commission, shipping_cost, ads_cost_allocated)
+         VALUES ($1,'O1','MLA1',100,3,0,0,0)`,
+        [account.id]
+      );
+      await client.query(
+        `INSERT INTO order_items (account_id, order_id, product_id, unit_price, quantity, ml_commission, shipping_cost, ads_cost_allocated)
+         VALUES ($1,'O1','MLA2',100,1,0,0,0)`,
+        [account.id]
+      );
+      // Gasto real de Mercado Ads ese día, sin ninguna publicación asociada
+      // — el caso de siempre, hoy.
+      await client.query(
+        `INSERT INTO ads_spend (account_id, product_id, date, amount, channel) VALUES ($1,NULL,'2026-03-01',100,'mercado_ads')`,
+        [account.id]
+      );
+    });
+
+    await withScope({ accountId: account.id }, (client) => recalculate(client, account.id, false, 0, true));
+
+    const rows = await withScope({ accountId: account.id }, async (client) => {
+      const r = await client.query<{ product_id: string; ads_cost_allocated: number }>(
+        `SELECT product_id, ads_cost_allocated FROM order_items WHERE account_id = $1 ORDER BY product_id`,
+        [account.id]
+      );
+      return r.rows;
+    });
+    // Repartido proporcional a las unidades de cada línea: MLA1 (3/4 del
+    // total) se lleva 75, MLA2 (1/4) se lleva 25 — nunca $0 los dos.
+    expect(rows).toEqual([
+      { product_id: "MLA1", ads_cost_allocated: 75 },
+      { product_id: "MLA2", ads_cost_allocated: 25 },
+    ]);
+  });
+
   it("aplica el costo vigente, reparte la publicidad del día y calcula la ganancia neta de la línea", async () => {
     const { withScope } = await import("@/db/client");
     const { recalculate } = await import("./sync-service");
@@ -508,6 +563,9 @@ describe("recalculate", () => {
         `INSERT INTO product_costs (account_id, product_id, cost, valid_from) VALUES ($1,'MLA1',300,'2026-01-01')`,
         [account.id]
       );
+      // Gasto atado a una publicación puntual (no el caso real de hoy — ver
+      // el test de arriba — pero sí lo que pasaría si ML alguna vez vuelve a
+      // discriminar por publicación, o se carga a mano para un producto).
       // Única línea vendida ese día para ese producto: se lleva todo el gasto.
       await client.query(
         `INSERT INTO ads_spend (account_id, product_id, date, amount, channel) VALUES ($1,'MLA1','2026-02-01',40,'mercado_ads')`,
