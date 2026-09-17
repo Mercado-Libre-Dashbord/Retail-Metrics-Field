@@ -805,10 +805,19 @@ export async function probeProductAdsGranularity(
   }
   const [costA, costB, costC] = await Promise.all([costOnDay(dateA), costOnDay(dateB), costOnDay(dateC)]);
 
+  // Los primeros 3 intentos (campaigns/{id}/items, items/search,
+  // campaigns/{id}/ads/search) dieron 404 real contra una cuenta real —
+  // quedan documentados en la sonda anterior, ver el commit que agregó esto.
+  // Búsqueda pública apunta a un recurso PLANO `ads/search` (no anidado bajo
+  // /campaigns/{id}/), filtrado por campaign_id como query param, que
+  // devolvería item_id + cost por fila — nunca confirmado contra esta cuenta,
+  // así que se prueban las dos formas de filtro que aparecen documentadas
+  // (query plano y `filters[campo]=valor`) más el plural, sin descartar
+  // ninguna de antemano.
   const candidatePaths = [
-    `${base}/campaigns/${campaignId}/items?date_from=${dateA}&date_to=${rangeEnd}&metrics=cost`,
-    `${base}/items/search?campaign_id=${campaignId}&date_from=${dateA}&date_to=${rangeEnd}&metrics=cost`,
-    `${base}/campaigns/${campaignId}/ads/search?date_from=${dateA}&date_to=${rangeEnd}&metrics=cost`,
+    `${base}/ads/search?campaign_id=${campaignId}&date_from=${dateA}&date_to=${rangeEnd}&metrics=cost`,
+    `${base}/ads/search?filters[campaign_id]=${campaignId}&date_from=${dateA}&date_to=${rangeEnd}&metrics=cost`,
+    `${base}/ads/search?campaign_ids=${campaignId}&date_from=${dateA}&date_to=${rangeEnd}&metrics=cost`,
   ];
   const itemLevelAttempts: ProductAdsGranularityProbe["itemLevelAttempts"] = [];
   for (const path of candidatePaths) {
