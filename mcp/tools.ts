@@ -719,6 +719,110 @@ export async function listCampaigns(accountId: string): Promise<MlCampaign[]> {
   }));
 }
 
+export interface ProductAdsGranularityProbe {
+  advertiserFound: boolean;
+  campaignsFound: number;
+  /**
+   * Costo de la MISMA campaña pedido en dos ventanas de un solo día,
+   * distintas entre sí. Si de verdad difieren (no es la misma cifra
+   * repetida), confirma que se puede pedir el gasto por día con el
+   * endpoint que YA usamos (campaigns/search) achicando date_from/date_to
+   * — sin necesitar ningún endpoint nuevo ni sin confirmar.
+   */
+  dailyWindowTest: { dateA: string; costA: number | null; dateB: string; costB: number | null; differ: boolean } | null;
+  /**
+   * Intentos sobre rutas de nivel-ítem (costo por publicación puntual) SIN
+   * CONFIRMAR contra documentación real — no hay acceso a
+   * developers.mercadolibre.com desde donde se escribió esto. Son variantes
+   * plausibles del mismo recurso de campañas. Un 404 en las tres es la
+   * señal más fuerte de que ese detalle no existe tal cual; cualquier otra
+   * cosa (200, o un 400 con un mensaje distinto a "no existe") es una pista
+   * real para seguir. Nunca hay que asumir que existen solo por probarlas.
+   */
+  itemLevelAttempts: { path: string; ok: boolean; status?: number; sampleKeys?: string[]; error?: string }[];
+}
+
+/**
+ * Sonda de solo lectura para responder, con datos reales de una cuenta con
+ * campañas activas, si Mercado Ads puede dar el gasto por día (sí, con el
+ * endpoint que ya usamos) y por publicación puntual (sin confirmar). Nunca
+ * escribe nada ni cambia una campaña — mismo criterio que
+ * probeAccountRestrictions: mejor una sonda con resultado sin confirmar que
+ * prometer algo sobre documentación de terceros sin probarlo.
+ */
+export async function probeProductAdsGranularity(
+  accountId: string
+): Promise<ProductAdsGranularityProbe | { advertiserFound: false }> {
+  const advertiser = await getAdvertiserId(accountId);
+  if (!advertiser) return { advertiserFound: false };
+
+  const token = await getValidAccessToken(accountId);
+  const base = productAdsBase(advertiser.siteId, advertiser.advertiserId);
+  // No se reusa listCampaigns() a propósito: internamente vuelve a pedir el
+  // advertiser, una llamada de más ya que acá arriba ya lo tenemos.
+  const dateTo = dateStr(new Date());
+  const dateFrom = dateStr(new Date(Date.now() - (PRODUCT_ADS_MAX_DAYS - 1) * 86400000));
+  const campaignsRes = await listOrEmpty(
+    () => mlFetch(`${base}/campaigns/search?date_from=${dateFrom}&date_to=${dateTo}`, token, { headers: { "Api-Version": "2" } }),
+    { results: [] }
+  );
+  const campaigns = campaignsRes.results ?? [];
+  if (campaigns.length === 0) {
+    return { advertiserFound: true, campaignsFound: 0, dailyWindowTest: null, itemLevelAttempts: [] };
+  }
+
+  const campaignId = String(campaigns[0].id);
+  const today = new Date();
+  const rangeEnd = dateStr(today);
+  const dateA = dateStr(new Date(today.getTime() - 3 * 86400000));
+  const dateB = dateStr(new Date(today.getTime() - 6 * 86400000));
+
+  async function costOnDay(date: string): Promise<number | null> {
+    try {
+      const res = await mlFetch(`${base}/campaigns/search?date_from=${date}&date_to=${date}&metrics=cost`, token, {
+        headers: { "Api-Version": "2" },
+      });
+      const match = (res.results ?? []).find((c: any) => String(c.id) === campaignId);
+      return typeof match?.metrics?.cost === "number" ? match.metrics.cost : null;
+    } catch {
+      return null;
+    }
+  }
+  const [costA, costB] = await Promise.all([costOnDay(dateA), costOnDay(dateB)]);
+
+  const candidatePaths = [
+    `${base}/campaigns/${campaignId}/items?date_from=${dateA}&date_to=${rangeEnd}&metrics=cost`,
+    `${base}/items/search?campaign_id=${campaignId}&date_from=${dateA}&date_to=${rangeEnd}&metrics=cost`,
+    `${base}/campaigns/${campaignId}/ads/search?date_from=${dateA}&date_to=${rangeEnd}&metrics=cost`,
+  ];
+  const itemLevelAttempts: ProductAdsGranularityProbe["itemLevelAttempts"] = [];
+  for (const path of candidatePaths) {
+    try {
+      const res = await mlFetch(path, token, { headers: { "Api-Version": "2" } });
+      const sample = Array.isArray(res?.results) ? res.results[0] : res;
+      itemLevelAttempts.push({
+        path,
+        ok: true,
+        sampleKeys: sample && typeof sample === "object" ? Object.keys(sample) : [],
+      });
+    } catch (err) {
+      itemLevelAttempts.push({
+        path,
+        ok: false,
+        status: err instanceof MlApiError ? err.status : undefined,
+        error: (err as Error).message,
+      });
+    }
+  }
+
+  return {
+    advertiserFound: true,
+    campaignsFound: campaigns.length,
+    dailyWindowTest: { dateA, costA, dateB, costB, differ: costA !== null && costB !== null && costA !== costB },
+    itemLevelAttempts,
+  };
+}
+
 // Requiere el scope "Write". Solo cambia el estado de una campaña que ya
 // existe (pausar/reactivar) — no crea campañas nuevas ni toca presupuestos.
 export async function setCampaignStatus(accountId: string, campaignId: string, status: "active" | "paused"): Promise<void> {

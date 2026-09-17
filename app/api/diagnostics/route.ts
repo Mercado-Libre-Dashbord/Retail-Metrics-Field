@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withScope } from "@/db/client";
 import { missingMigrations } from "@/db/schema-capabilities";
 import { getCurrentUser, resolveCurrentAccount } from "@/lib/current-account";
-import { getAdvertiserId, probeAccountRestrictions } from "@/mcp/tools";
+import { getAdvertiserId, probeAccountRestrictions, probeProductAdsGranularity } from "@/mcp/tools";
 
 export const runtime = "nodejs";
 
@@ -63,6 +63,16 @@ export async function GET() {
         advertiserError = (err as Error).message;
       }
     }
+    // Sonda de solo lectura: ¿se puede pedir el gasto de Ads por día (con el
+    // endpoint que ya usamos) y por publicación puntual (sin confirmar)?
+    // Solo tiene sentido correrla si ML ya reconoció un advertiser — si no,
+    // no hay ninguna campaña real contra la cual probar nada.
+    const adsGranularity = advertiserFound
+      ? await probeProductAdsGranularity(account.id).catch((err) => ({
+          advertiserFound: true as const,
+          error: (err as Error).message,
+        }))
+      : null;
     const adsResult = await client.query<{ n: string; total: string; min_date: string | null; max_date: string | null }>(
       `SELECT COUNT(*) as n, COALESCE(SUM(amount), 0) as total, MIN(date) as min_date, MAX(date) as max_date
          FROM ads_spend WHERE account_id = $1 AND channel = 'mercado_ads'`,
@@ -125,6 +135,7 @@ export async function GET() {
           totalSincronizado: Number(ads.total ?? 0),
           desde: ads.min_date,
           hasta: ads.max_date,
+          granularidadProbada: adsGranularity,
         },
         full: full && {
           productosConInventoryId: Number(full.con_inventory ?? 0),
@@ -138,6 +149,8 @@ export async function GET() {
           "Si dice 'monotributo' o 'exento', el IVA no se calcula — es correcto, no un error.",
         publicidad:
           "Si advertiserEncontrado es false, ML dice que la cuenta nunca creó una campaña de Product Ads: no hay nada que sincronizar. Si es true y totalSincronizado es 0 (o 'desde'/'hasta' quedan muy viejos), la publicidad de los últimos ~90 días no se trajo — Mercado Ads solo sirve métricas de ese rango. Apretá 'Sincronizar' de nuevo para reintentarlo.",
+        granularidadProbada:
+          "dailyWindowTest: si differ=true, costA y costB son distintos de verdad — confirma que se puede pedir el gasto por día achicando la ventana de fecha, sin ningún endpoint nuevo. itemLevelAttempts: tres rutas SIN CONFIRMAR para costo por publicación puntual — status 404 en las tres es la señal más fuerte de que esa ruta no existe tal cual; cualquier otra cosa (ok:true, o un status distinto) es una pista real para investigar más. Mandá el bloque completo, no solo el resumen.",
         conEnvioEnCero:
           "Si es igual a lineasDeVenta, ninguna orden tiene el envío traído de la API. Apretá 'Sincronizar' en Resumen: recorre toda la historia y repara las órdenes que quedaron en una versión vieja del cálculo.",
         conIvaCalculado:

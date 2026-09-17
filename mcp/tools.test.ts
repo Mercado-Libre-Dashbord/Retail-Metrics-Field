@@ -25,6 +25,7 @@ import {
   clampToAdsWindow,
   ADS_LOOKBACK_DAYS,
   getFullStock,
+  probeProductAdsGranularity,
 } from "./tools";
 import { mlFetch, MlApiError } from "./ml-client";
 
@@ -626,6 +627,74 @@ describe("getAdsSpend", () => {
       const from = Date.parse(`${url.searchParams.get("date_from")}T00:00:00Z`);
       const to = Date.parse(`${url.searchParams.get("date_to")}T00:00:00Z`);
       expect((to - from) / 86400000).toBeLessThanOrEqual(89);
+    }
+  });
+});
+
+describe("probeProductAdsGranularity", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("returns advertiserFound: false when the account has no Product Ads advertiser", async () => {
+    vi.mocked(mlFetch).mockResolvedValueOnce({ advertisers: [] });
+    expect(await probeProductAdsGranularity("acc1")).toEqual({ advertiserFound: false });
+  });
+
+  it("returns campaignsFound: 0 without probing anything else when there are no campaigns yet", async () => {
+    vi.mocked(mlFetch)
+      .mockResolvedValueOnce({ advertisers: [{ advertiser_id: 999, site_id: "MLA" }] })
+      .mockResolvedValueOnce({ results: [] });
+
+    expect(await probeProductAdsGranularity("acc1")).toEqual({
+      advertiserFound: true,
+      campaignsFound: 0,
+      dailyWindowTest: null,
+      itemLevelAttempts: [],
+    });
+    expect(vi.mocked(mlFetch)).toHaveBeenCalledTimes(2);
+  });
+
+  it("detects when the same campaign's cost genuinely differs between two single-day windows, and reports item-level 404s as not confirmed", async () => {
+    vi.mocked(mlFetch)
+      .mockResolvedValueOnce({ advertisers: [{ advertiser_id: 999, site_id: "MLA" }] }) // getAdvertiserId
+      .mockResolvedValueOnce({ results: [{ id: 1, name: "Campaña 1", status: "active", budget: 5000 }] }) // listCampaigns
+      .mockResolvedValueOnce({ results: [{ id: 1, metrics: { cost: 300 } }] }) // costOnDay dateA
+      .mockResolvedValueOnce({ results: [{ id: 1, metrics: { cost: 150 } }] }) // costOnDay dateB
+      .mockRejectedValueOnce(new MlApiError(404, "not_found")) // candidate path 1
+      .mockRejectedValueOnce(new MlApiError(404, "not_found")) // candidate path 2
+      .mockRejectedValueOnce(new MlApiError(404, "not_found")); // candidate path 3
+
+    const result = await probeProductAdsGranularity("acc1");
+
+    expect(result).toMatchObject({
+      advertiserFound: true,
+      campaignsFound: 1,
+      dailyWindowTest: { costA: 300, costB: 150, differ: true },
+    });
+    if ("itemLevelAttempts" in result) {
+      expect(result.itemLevelAttempts).toHaveLength(3);
+      for (const attempt of result.itemLevelAttempts) {
+        expect(attempt.ok).toBe(false);
+        expect(attempt.status).toBe(404);
+      }
+    }
+  });
+
+  it("reports an item-level path as a real lead when it doesn't 404", async () => {
+    vi.mocked(mlFetch)
+      .mockResolvedValueOnce({ advertisers: [{ advertiser_id: 999, site_id: "MLA" }] })
+      .mockResolvedValueOnce({ results: [{ id: 1, name: "Campaña 1", status: "active", budget: 5000 }] })
+      .mockResolvedValueOnce({ results: [] }) // costOnDay dateA — sin coincidencia
+      .mockResolvedValueOnce({ results: [] }) // costOnDay dateB
+      .mockResolvedValueOnce({ results: [{ item_id: "MLA1", cost: 50 }] }) // candidate path 1: ¡responde algo real!
+      .mockRejectedValueOnce(new MlApiError(404, "not_found"))
+      .mockRejectedValueOnce(new MlApiError(404, "not_found"));
+
+    const result = await probeProductAdsGranularity("acc1");
+
+    if ("itemLevelAttempts" in result) {
+      expect(result.itemLevelAttempts[0]).toMatchObject({ ok: true, sampleKeys: ["item_id", "cost"] });
+    } else {
+      throw new Error("expected itemLevelAttempts in result");
     }
   });
 });
