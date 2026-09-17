@@ -933,9 +933,15 @@ export default function HomePage() {
         onCustomToChange={setCustomTo}
       />
 
-      <p className="field-hint" style={{ margin: "var(--space-2) 0 0", textAlign: "right" }}>
+      <p
+        className="field-hint"
+        style={{ margin: "var(--space-2) 0 0", textAlign: "right", display: "flex", gap: "var(--space-3)", justifyContent: "flex-end", flexWrap: "wrap" }}
+      >
         <a href={`/api/export/orders?from=${from}&to=${to}`}>
           Descargar detalle del período (CSV)
+        </a>
+        <a href="/api/export/financial-statement">
+          Descargar estado financiero (Excel)
         </a>
       </p>
 
