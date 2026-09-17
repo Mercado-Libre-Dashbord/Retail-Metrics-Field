@@ -779,6 +779,19 @@ input[type="text"], input[type="number"], input[type="date"], input[type="email"
   animation: spin 0.7s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* Un progreso que se queda con el mismo texto (ej. "0 órdenes sincronizadas…"
+   mientras el servidor recorre un tramo sin novedades) se leía como
+   trabado. Este spinner al lado avisa que sigue en marcha aunque el
+   número no cambie todavía. */
+.sync-spinner {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent-strong);
+  animation: spin 0.7s linear infinite;
+}
 .login-divider {
   display: flex;
   align-items: center;

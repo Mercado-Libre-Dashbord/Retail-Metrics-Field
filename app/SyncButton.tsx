@@ -198,7 +198,13 @@ export function SyncButton() {
           {syncing ? "Sincronizando…" : "Sincronizar"}
         </button>
         {progress && (
-          <span role="status" aria-live="polite" className="field-hint" style={{ margin: 0 }}>
+          <span
+            role="status"
+            aria-live="polite"
+            className="field-hint"
+            style={{ margin: 0, display: "inline-flex", alignItems: "center", gap: "var(--space-2)" }}
+          >
+            <span className="sync-spinner" aria-hidden="true" />
             {progress}
           </span>
         )}
