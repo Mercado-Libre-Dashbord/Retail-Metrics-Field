@@ -574,7 +574,7 @@ describe("recalculate", () => {
     });
 
     const result = await withScope({ accountId: account.id }, (client) =>
-      recalculate(client, account.id, false, 0, true)
+      recalculate(client, account.id, false, 0, false)
     );
     expect(result).toEqual({ done: true, nextOffset: null });
 

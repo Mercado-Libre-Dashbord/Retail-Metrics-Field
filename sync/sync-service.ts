@@ -758,7 +758,16 @@ async function reallocateAdsCosts(
 
       const base = idx * cols;
       const placeholders = Array.from({ length: cols }, (_, c) => `$${base + c + 1}`);
-      valueRows.push(`(${placeholders[0]}::bigint, ${placeholders.slice(1).join(", ")})`);
+      // Sin un cast explícito acá, Postgres no tiene de dónde sacar el tipo
+      // de cada columna del VALUES (todas son parámetros, ningún literal
+      // tipado) y termina resolviéndolas como texto — recién ahí, al
+      // asignarlas a columnas double precision en el UPDATE, tira "column
+      // ... is of type double precision but expression is of type text".
+      // Nunca apareció en los tests porque mockean db.query entero: solo se
+      // ve contra un Postgres real, que es donde pasó en producción.
+      const casts = ["bigint", "double precision", "double precision", "double precision", "double precision"];
+      if (hasIva) casts.push("double precision");
+      valueRows.push(`(${placeholders.map((p, c) => `${p}::${casts[c]}`).join(", ")})`);
     });
 
     await db.query(
