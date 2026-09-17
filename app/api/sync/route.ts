@@ -5,6 +5,7 @@ import { syncProductsPage, syncOrders, syncAds, syncFullStock, syncBillingCharge
 import { appliesIva, setOrdersSyncedThrough } from "@/db/accounts";
 import { listOrdersPage } from "@/mcp/tools";
 import { resolveCurrentAccount } from "@/lib/current-account";
+import { MlApiError } from "@/mcp/ml-client";
 
 export const runtime = "nodejs";
 /** Techo del plan Hobby. Aun así el historial va por lotes: ver abajo. */
@@ -221,6 +222,17 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(result);
   } catch (err) {
+    if (err instanceof MlApiError && err.status === 429) {
+      // Mercado Libre sigue limitando la velocidad después de los reintentos
+      // internos de mlFetch (ver mcp/ml-client.ts) — es transitorio y no se
+      // perdió ningún avance (el checkpoint del lote sigue valiendo), así que
+      // se devuelve un status distinto de un error genérico para que
+      // SyncButton lo reintente solo, igual que ya hace con un 504.
+      return NextResponse.json(
+        { error: "Mercado Libre está limitando la velocidad de sincronización en este momento. Reintentando…" },
+        { status: 429 }
+      );
+    }
     return NextResponse.json({ error: (err as Error).message }, { status: 500 });
   }
 }

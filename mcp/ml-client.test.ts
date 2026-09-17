@@ -66,14 +66,14 @@ describe("mlFetch", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("gives up after one retry and throws MlApiError on a second 429", async () => {
+  it("gives up after exhausting retries and throws a 429 MlApiError when ML keeps rate-limiting", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValue({ ok: false, status: 429, headers: { get: () => "0" }, text: async () => "rate limited" });
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(mlFetch("/users/me", "token123")).rejects.toBeInstanceOf(MlApiError);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await expect(mlFetch("/users/me", "token123")).rejects.toMatchObject({ status: 429 });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 });
 

@@ -6,6 +6,15 @@ export class MlApiError extends Error {
   }
 }
 
+/**
+ * Un solo reintento no alcanzaba: en una cuenta grande, ML puede seguir
+ * devolviendo 429 más de una vez seguida bajo carga real (visto en
+ * producción en /orders/search). Con backoff creciente da más margen para
+ * que el límite se libere solo, sin gastar todo el presupuesto de 60s de la
+ * función en un único llamado.
+ */
+const MAX_429_RETRIES = 3;
+
 export async function mlFetch(
   path: string,
   accessToken: string,
@@ -16,11 +25,19 @@ export async function mlFetch(
     ...init,
     headers: { ...(init.headers || {}), Authorization: `Bearer ${accessToken}` },
   });
-  if (res.status === 429 && retryCount < 1) {
+  if (res.status === 429 && retryCount < MAX_429_RETRIES) {
     const retryAfterHeader = (res as any).headers?.get?.("Retry-After");
-    const waitMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : 1000;
+    const retryAfterMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : NaN;
+    const backoffMs = Math.min(1000 * 2 ** retryCount, 4000);
+    const waitMs = Number.isFinite(retryAfterMs) ? Math.min(retryAfterMs, 5000) : backoffMs;
     await new Promise((resolve) => setTimeout(resolve, waitMs));
     return mlFetch(path, accessToken, init, retryCount + 1);
+  }
+  if (res.status === 429) {
+    // Se agotaron los reintentos: el mensaje técnico de ML ("local_rate_limited")
+    // queda en el mensaje para los logs, pero quien llama (la ruta de sync)
+    // decide qué mostrarle al vendedor a partir del status 429.
+    throw new MlApiError(429, `ML API error 429 on ${path}: ${await extractMlErrorMessage(res)}`);
   }
   if (!res.ok) {
     throw new MlApiError(res.status, `ML API error ${res.status} on ${path}: ${await extractMlErrorMessage(res)}`);

@@ -723,13 +723,26 @@ export interface ProductAdsGranularityProbe {
   advertiserFound: boolean;
   campaignsFound: number;
   /**
-   * Costo de la MISMA campaña pedido en dos ventanas de un solo día,
-   * distintas entre sí. Si de verdad difieren (no es la misma cifra
-   * repetida), confirma que se puede pedir el gasto por día con el
-   * endpoint que YA usamos (campaigns/search) achicando date_from/date_to
-   * — sin necesitar ningún endpoint nuevo ni sin confirmar.
+   * Costo de la MISMA campaña pedido en tres ventanas de un solo día bien
+   * separadas entre sí (3, 6 y 25 días atrás) — no solo dos días
+   * adyacentes, porque un gasto idéntico en dos días consecutivos puede ser
+   * pura coincidencia (o el presupuesto configurado, no el gasto real de
+   * ESE día). Si las tres difieren de verdad entre sí Y ninguna coincide
+   * con `campaignBudget`, confirma que se puede pedir el gasto por día con
+   * el endpoint que YA usamos (campaigns/search) achicando
+   * date_from/date_to — sin necesitar ningún endpoint nuevo.
    */
-  dailyWindowTest: { dateA: string; costA: number | null; dateB: string; costB: number | null; differ: boolean } | null;
+  campaignBudget: number | null;
+  dailyWindowTest: {
+    dateA: string; costA: number | null;
+    dateB: string; costB: number | null;
+    dateC: string; costC: number | null;
+    allDiffer: boolean;
+    /** true si algún costo coincide justo con el presupuesto configurado —
+     * mala señal: sugeriría que el campo devuelve el presupuesto, no el
+     * gasto real de esa ventana puntual. */
+    matchesBudget: boolean;
+  } | null;
   /**
    * Intentos sobre rutas de nivel-ítem (costo por publicación puntual) SIN
    * CONFIRMAR contra documentación real — no hay acceso a
@@ -768,14 +781,16 @@ export async function probeProductAdsGranularity(
   );
   const campaigns = campaignsRes.results ?? [];
   if (campaigns.length === 0) {
-    return { advertiserFound: true, campaignsFound: 0, dailyWindowTest: null, itemLevelAttempts: [] };
+    return { advertiserFound: true, campaignsFound: 0, campaignBudget: null, dailyWindowTest: null, itemLevelAttempts: [] };
   }
 
   const campaignId = String(campaigns[0].id);
+  const campaignBudget = typeof campaigns[0].budget === "number" ? campaigns[0].budget : null;
   const today = new Date();
   const rangeEnd = dateStr(today);
   const dateA = dateStr(new Date(today.getTime() - 3 * 86400000));
   const dateB = dateStr(new Date(today.getTime() - 6 * 86400000));
+  const dateC = dateStr(new Date(today.getTime() - 25 * 86400000));
 
   async function costOnDay(date: string): Promise<number | null> {
     try {
@@ -788,7 +803,7 @@ export async function probeProductAdsGranularity(
       return null;
     }
   }
-  const [costA, costB] = await Promise.all([costOnDay(dateA), costOnDay(dateB)]);
+  const [costA, costB, costC] = await Promise.all([costOnDay(dateA), costOnDay(dateB), costOnDay(dateC)]);
 
   const candidatePaths = [
     `${base}/campaigns/${campaignId}/items?date_from=${dateA}&date_to=${rangeEnd}&metrics=cost`,
@@ -815,10 +830,16 @@ export async function probeProductAdsGranularity(
     }
   }
 
+  const costs = [costA, costB, costC];
+  const knownCosts = costs.filter((c): c is number => c !== null);
+  const allDiffer = knownCosts.length === 3 && new Set(knownCosts).size === 3;
+  const matchesBudget = campaignBudget !== null && knownCosts.some((c) => c === campaignBudget);
+
   return {
     advertiserFound: true,
     campaignsFound: campaigns.length,
-    dailyWindowTest: { dateA, costA, dateB, costB, differ: costA !== null && costB !== null && costA !== costB },
+    campaignBudget,
+    dailyWindowTest: { dateA, costA, dateB, costB, dateC, costC, allDiffer, matchesBudget },
     itemLevelAttempts,
   };
 }

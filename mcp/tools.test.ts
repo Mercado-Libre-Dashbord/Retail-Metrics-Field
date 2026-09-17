@@ -647,18 +647,20 @@ describe("probeProductAdsGranularity", () => {
     expect(await probeProductAdsGranularity("acc1")).toEqual({
       advertiserFound: true,
       campaignsFound: 0,
+      campaignBudget: null,
       dailyWindowTest: null,
       itemLevelAttempts: [],
     });
     expect(vi.mocked(mlFetch)).toHaveBeenCalledTimes(2);
   });
 
-  it("detects when the same campaign's cost genuinely differs between two single-day windows, and reports item-level 404s as not confirmed", async () => {
+  it("detects when the same campaign's cost genuinely differs across three far-apart single-day windows and none matches the configured budget, and reports item-level 404s as not confirmed", async () => {
     vi.mocked(mlFetch)
       .mockResolvedValueOnce({ advertisers: [{ advertiser_id: 999, site_id: "MLA" }] }) // getAdvertiserId
-      .mockResolvedValueOnce({ results: [{ id: 1, name: "Campaña 1", status: "active", budget: 5000 }] }) // listCampaigns
+      .mockResolvedValueOnce({ results: [{ id: 1, name: "Campaña 1", status: "active", budget: 5000 }] }) // campaigns/search
       .mockResolvedValueOnce({ results: [{ id: 1, metrics: { cost: 300 } }] }) // costOnDay dateA
       .mockResolvedValueOnce({ results: [{ id: 1, metrics: { cost: 150 } }] }) // costOnDay dateB
+      .mockResolvedValueOnce({ results: [{ id: 1, metrics: { cost: 700 } }] }) // costOnDay dateC
       .mockRejectedValueOnce(new MlApiError(404, "not_found")) // candidate path 1
       .mockRejectedValueOnce(new MlApiError(404, "not_found")) // candidate path 2
       .mockRejectedValueOnce(new MlApiError(404, "not_found")); // candidate path 3
@@ -668,7 +670,8 @@ describe("probeProductAdsGranularity", () => {
     expect(result).toMatchObject({
       advertiserFound: true,
       campaignsFound: 1,
-      dailyWindowTest: { costA: 300, costB: 150, differ: true },
+      campaignBudget: 5000,
+      dailyWindowTest: { costA: 300, costB: 150, costC: 700, allDiffer: true, matchesBudget: false },
     });
     if ("itemLevelAttempts" in result) {
       expect(result.itemLevelAttempts).toHaveLength(3);
@@ -679,12 +682,31 @@ describe("probeProductAdsGranularity", () => {
     }
   });
 
+  it("flags matchesBudget when a sampled day's cost equals the campaign's configured budget", async () => {
+    vi.mocked(mlFetch)
+      .mockResolvedValueOnce({ advertisers: [{ advertiser_id: 999, site_id: "MLA" }] })
+      .mockResolvedValueOnce({ results: [{ id: 1, name: "Campaña 1", status: "active", budget: 5000 }] })
+      .mockResolvedValueOnce({ results: [{ id: 1, metrics: { cost: 5000 } }] }) // costOnDay dateA — igual al presupuesto
+      .mockResolvedValueOnce({ results: [{ id: 1, metrics: { cost: 5000 } }] }) // costOnDay dateB
+      .mockResolvedValueOnce({ results: [{ id: 1, metrics: { cost: 5000 } }] }) // costOnDay dateC
+      .mockRejectedValueOnce(new MlApiError(404, "not_found"))
+      .mockRejectedValueOnce(new MlApiError(404, "not_found"))
+      .mockRejectedValueOnce(new MlApiError(404, "not_found"));
+
+    const result = await probeProductAdsGranularity("acc1");
+
+    expect(result).toMatchObject({
+      dailyWindowTest: { allDiffer: false, matchesBudget: true },
+    });
+  });
+
   it("reports an item-level path as a real lead when it doesn't 404", async () => {
     vi.mocked(mlFetch)
       .mockResolvedValueOnce({ advertisers: [{ advertiser_id: 999, site_id: "MLA" }] })
       .mockResolvedValueOnce({ results: [{ id: 1, name: "Campaña 1", status: "active", budget: 5000 }] })
       .mockResolvedValueOnce({ results: [] }) // costOnDay dateA — sin coincidencia
       .mockResolvedValueOnce({ results: [] }) // costOnDay dateB
+      .mockResolvedValueOnce({ results: [] }) // costOnDay dateC
       .mockResolvedValueOnce({ results: [{ item_id: "MLA1", cost: 50 }] }) // candidate path 1: ¡responde algo real!
       .mockRejectedValueOnce(new MlApiError(404, "not_found"))
       .mockRejectedValueOnce(new MlApiError(404, "not_found"));

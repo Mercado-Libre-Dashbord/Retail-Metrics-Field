@@ -73,7 +73,10 @@ export function SyncButton() {
     // funcionó, sin perder nada: el estado (scroll_id / fecha+offset) sigue
     // valiendo. Se reintenta igual que un corte de red en vez de mostrar un
     // error de una.
-    if (res.status === 504 && attempt < 2) {
+    // Un 429 es Mercado Libre limitando la velocidad después de que mlFetch
+    // ya reintentó puertas adentro (ver mcp/ml-client.ts) — mismo caso: nada
+    // se perdió, así que se reintenta en vez de cortar la sincronización.
+    if ((res.status === 504 || res.status === 429) && attempt < 2) {
       await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
       return call(body, attempt + 1);
     }

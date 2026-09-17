@@ -24,6 +24,7 @@ import { syncOrders, syncProductsPage, syncFullStock, recalculate, pendingOrderI
 import { listOrdersPage } from "@/mcp/tools";
 import { resolveCurrentAccount } from "@/lib/current-account";
 import { setOrdersSyncedThrough } from "@/db/accounts";
+import { MlApiError } from "@/mcp/ml-client";
 
 /** El route lee `full` del body; los tests que no lo pasan mandan uno vacío. */
 function req(body: unknown = {}) {
@@ -354,5 +355,19 @@ describe("POST /api/sync", () => {
 
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "boom" });
+  });
+
+  it("returns a 429 with a friendly, retryable message when ML keeps rate-limiting after mlFetch's own retries", async () => {
+    // El bug real: un 429 de ML terminaba mostrado en crudo en la pantalla de
+    // Resumen ("ML API error 429 on /orders/search?...: local_rate_limited").
+    // Con esto, SyncButton lo distingue de un error genérico (mismo trato que
+    // ya le da a un 504) y no se le muestra texto técnico al vendedor.
+    vi.mocked(resolveCurrentAccount).mockResolvedValue({ id: "acc1", mlSellerId: "S1", otherTaxRate: 0, taxCondition: "responsable_inscripto" } as any);
+    vi.mocked(withScope).mockRejectedValue(new MlApiError(429, "ML API error 429 on /orders/search: local_rate_limited"));
+
+    const res = await POST(req());
+
+    expect(res.status).toBe(429);
+    expect(await res.json()).not.toMatchObject({ error: expect.stringContaining("local_rate_limited") });
   });
 });
