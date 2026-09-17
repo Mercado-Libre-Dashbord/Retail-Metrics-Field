@@ -753,6 +753,29 @@ export interface ProductAdsGranularityProbe {
    * real para seguir. Nunca hay que asumir que existen solo por probarlas.
    */
   itemLevelAttempts: { path: string; ok: boolean; status?: number; sampleKeys?: string[]; error?: string }[];
+  /**
+   * Si algún itemLevelAttempt dio ok:true, valida dos cosas que un "200 con
+   * datos" no garantiza por sí solo:
+   * 1. Que el filtro realmente filtra por campaña (si ML ignora un parámetro
+   *    que no reconoce en vez de rechazarlo, un query mal armado puede devolver
+   *    TODOS los ítems del advertiser como si hubiera funcionado).
+   * 2. Que el costo por ítem es gasto real medido, no una repetición del
+   *    presupuesto — mismo chequeo que dailyWindowTest, pero a nivel ítem:
+   *    si todos los ítems muestran el mismo costo, o el costo de un ítem no
+   *    cambia entre dos días bien distintos, es sospechoso.
+   */
+  itemMetricsCheck: {
+    path: string;
+    itemsReturned: number;
+    /** Cuántos de los ítems devueltos tienen campaign_id distinto al pedido — 0 es lo esperable si el filtro funciona. */
+    itemsWithOtherCampaignId: number;
+    dateA: string;
+    dateB: string;
+    /** Costo por item_id en cada ventana, para los primeros ítems devueltos. */
+    perItem: { itemId: string; costA: number | null; costB: number | null }[];
+    allItemsSameCost: boolean;
+    anyItemCostDiffersByDay: boolean;
+  } | null;
 }
 
 /**
@@ -781,7 +804,14 @@ export async function probeProductAdsGranularity(
   );
   const campaigns = campaignsRes.results ?? [];
   if (campaigns.length === 0) {
-    return { advertiserFound: true, campaignsFound: 0, campaignBudget: null, dailyWindowTest: null, itemLevelAttempts: [] };
+    return {
+      advertiserFound: true,
+      campaignsFound: 0,
+      campaignBudget: null,
+      dailyWindowTest: null,
+      itemLevelAttempts: [],
+      itemMetricsCheck: null,
+    };
   }
 
   const campaignId = String(campaigns[0].id);
@@ -844,12 +874,55 @@ export async function probeProductAdsGranularity(
   const allDiffer = knownCosts.length === 3 && new Set(knownCosts).size === 3;
   const matchesBudget = campaignBudget !== null && knownCosts.some((c) => c === campaignBudget);
 
+  // Un 200 con datos no alcanza: puede ser que ML haya ignorado un filtro que
+  // no reconoce y devuelto TODOS los ítems del advertiser (no solo los de
+  // esta campaña), o que el costo por ítem sea una repetición del
+  // presupuesto en vez de gasto medido de verdad — mismo riesgo que
+  // dailyWindowTest, a nivel ítem. Se valida con la primera ruta que
+  // funcionó, en dos ventanas de un solo día bien separadas (las mismas
+  // dateA/dateB de arriba).
+  const workingAttempt = itemLevelAttempts.find((a) => a.ok);
+  let itemMetricsCheck: ProductAdsGranularityProbe["itemMetricsCheck"] = null;
+  if (workingAttempt) {
+    const singleDayPath = (date: string) => workingAttempt.path.replace(`date_from=${dateA}&date_to=${rangeEnd}`, `date_from=${date}&date_to=${date}`);
+    async function itemsOnDay(date: string): Promise<{ itemId: string; campaignId: string | null; cost: number | null }[]> {
+      try {
+        const res = await mlFetch(singleDayPath(date), token, { headers: { "Api-Version": "2" } });
+        return (res.results ?? []).map((it: any) => ({
+          itemId: String(it.item_id),
+          campaignId: it.campaign_id != null ? String(it.campaign_id) : null,
+          cost: typeof it.metrics?.cost === "number" ? it.metrics.cost : null,
+        }));
+      } catch {
+        return [];
+      }
+    }
+    const [itemsA, itemsB] = await Promise.all([itemsOnDay(dateA), itemsOnDay(dateB)]);
+    const itemsWithOtherCampaignId = itemsA.filter((it) => it.campaignId !== null && it.campaignId !== campaignId).length;
+    const costsByIdB = new Map(itemsB.map((it) => [it.itemId, it.cost]));
+    const perItem = itemsA.slice(0, 10).map((it) => ({ itemId: it.itemId, costA: it.cost, costB: costsByIdB.get(it.itemId) ?? null }));
+    const knownItemCosts = perItem.map((p) => p.costA).filter((c): c is number => c !== null);
+    const allItemsSameCost = knownItemCosts.length > 1 && new Set(knownItemCosts).size === 1;
+    const anyItemCostDiffersByDay = perItem.some((p) => p.costA !== null && p.costB !== null && p.costA !== p.costB);
+    itemMetricsCheck = {
+      path: workingAttempt.path,
+      itemsReturned: itemsA.length,
+      itemsWithOtherCampaignId,
+      dateA,
+      dateB,
+      perItem,
+      allItemsSameCost,
+      anyItemCostDiffersByDay,
+    };
+  }
+
   return {
     advertiserFound: true,
     campaignsFound: campaigns.length,
     campaignBudget,
     dailyWindowTest: { dateA, costA, dateB, costB, dateC, costC, allDiffer, matchesBudget },
     itemLevelAttempts,
+    itemMetricsCheck,
   };
 }
 

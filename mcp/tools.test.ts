@@ -650,6 +650,7 @@ describe("probeProductAdsGranularity", () => {
       campaignBudget: null,
       dailyWindowTest: null,
       itemLevelAttempts: [],
+      itemMetricsCheck: null,
     });
     expect(vi.mocked(mlFetch)).toHaveBeenCalledTimes(2);
   });
@@ -700,7 +701,7 @@ describe("probeProductAdsGranularity", () => {
     });
   });
 
-  it("reports an item-level path as a real lead when it doesn't 404", async () => {
+  it("reports an item-level path as a real lead when it doesn't 404, and validates it with a real per-item, per-day comparison", async () => {
     vi.mocked(mlFetch)
       .mockResolvedValueOnce({ advertisers: [{ advertiser_id: 999, site_id: "MLA" }] })
       .mockResolvedValueOnce({ results: [{ id: 1, name: "Campaña 1", status: "active", budget: 5000 }] })
@@ -709,12 +710,74 @@ describe("probeProductAdsGranularity", () => {
       .mockResolvedValueOnce({ results: [] }) // costOnDay dateC
       .mockResolvedValueOnce({ results: [{ item_id: "MLA1", cost: 50 }] }) // candidate path 1: ¡responde algo real!
       .mockRejectedValueOnce(new MlApiError(404, "not_found"))
-      .mockRejectedValueOnce(new MlApiError(404, "not_found"));
+      .mockRejectedValueOnce(new MlApiError(404, "not_found"))
+      // itemMetricsCheck: re-pide la ruta que funcionó en dos días de un solo
+      // día, con costos reales que cambian por ítem y por día.
+      .mockResolvedValueOnce({
+        results: [
+          { item_id: "MLA1", campaign_id: 1, metrics: { cost: 30 } },
+          { item_id: "MLA2", campaign_id: 1, metrics: { cost: 20 } },
+        ],
+      })
+      .mockResolvedValueOnce({
+        results: [
+          { item_id: "MLA1", campaign_id: 1, metrics: { cost: 45 } },
+          { item_id: "MLA2", campaign_id: 1, metrics: { cost: 15 } },
+        ],
+      });
 
     const result = await probeProductAdsGranularity("acc1");
 
     if ("itemLevelAttempts" in result) {
       expect(result.itemLevelAttempts[0]).toMatchObject({ ok: true, sampleKeys: ["item_id", "cost"] });
+      expect(result.itemMetricsCheck).toMatchObject({
+        itemsReturned: 2,
+        itemsWithOtherCampaignId: 0,
+        allItemsSameCost: false,
+        anyItemCostDiffersByDay: true,
+        perItem: [
+          { itemId: "MLA1", costA: 30, costB: 45 },
+          { itemId: "MLA2", costA: 20, costB: 15 },
+        ],
+      });
+    } else {
+      throw new Error("expected itemLevelAttempts in result");
+    }
+  });
+
+  it("flags a filter that doesn't really filter, and per-item costs that never change, as red flags in itemMetricsCheck", async () => {
+    vi.mocked(mlFetch)
+      .mockResolvedValueOnce({ advertisers: [{ advertiser_id: 999, site_id: "MLA" }] })
+      .mockResolvedValueOnce({ results: [{ id: 1, name: "Campaña 1", status: "active", budget: 5000 }] })
+      .mockResolvedValueOnce({ results: [] })
+      .mockResolvedValueOnce({ results: [] })
+      .mockResolvedValueOnce({ results: [] })
+      .mockResolvedValueOnce({ results: [{ item_id: "MLA1", cost: 50 }] })
+      .mockRejectedValueOnce(new MlApiError(404, "not_found"))
+      .mockRejectedValueOnce(new MlApiError(404, "not_found"))
+      // Ambos días devuelven exactamente lo mismo, y un ítem viene de OTRA
+      // campaña — las dos malas señales que un simple ok:true no detecta.
+      .mockResolvedValueOnce({
+        results: [
+          { item_id: "MLA1", campaign_id: 1, metrics: { cost: 25 } },
+          { item_id: "MLA2", campaign_id: 999, metrics: { cost: 25 } },
+        ],
+      })
+      .mockResolvedValueOnce({
+        results: [
+          { item_id: "MLA1", campaign_id: 1, metrics: { cost: 25 } },
+          { item_id: "MLA2", campaign_id: 999, metrics: { cost: 25 } },
+        ],
+      });
+
+    const result = await probeProductAdsGranularity("acc1");
+
+    if ("itemLevelAttempts" in result) {
+      expect(result.itemMetricsCheck).toMatchObject({
+        itemsWithOtherCampaignId: 1,
+        allItemsSameCost: true,
+        anyItemCostDiffersByDay: false,
+      });
     } else {
       throw new Error("expected itemLevelAttempts in result");
     }
