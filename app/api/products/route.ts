@@ -218,3 +218,30 @@ export async function PATCH(request: NextRequest) {
     ...(result.thresholdError ? { warning: result.thresholdError } : {}),
   });
 }
+
+/**
+ * Borra TODO el historial de costos de un producto (no solo el último). Un
+ * costo cargado mal y corregido después seguía afectando la ganancia de las
+ * ventas viejas: sin ningún costo con fecha anterior a la venta,
+ * getCostEntryAtDate usa el PRIMER costo cargado como mejor estimación —
+ * que quedaba siendo el erróneo, no el corregido, aunque se hubiera cargado
+ * uno nuevo encima. Borrando el historial entero, el próximo costo que se
+ * cargue vuelve a ser "el primero" y se aplica bien a todo el historial.
+ */
+export async function DELETE(request: NextRequest) {
+  const account = await resolveCurrentAccount();
+  if (!account) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
+
+  const productId = request.nextUrl.searchParams.get("productId");
+  if (!productId) {
+    return NextResponse.json({ error: "productId es requerido" }, { status: 400 });
+  }
+
+  const itemsUpdated = await withScope({ accountId: account.id }, async (client) => {
+    await client.query(`DELETE FROM product_costs WHERE account_id = $1 AND product_id = $2`, [account.id, productId]);
+    const hasIva = await hasColumn(client, "order_items", "iva_applied");
+    return recalculateProduct(client, account.id, productId, hasIva, account.otherTaxRate, appliesIva(account.taxCondition));
+  });
+
+  return NextResponse.json({ ok: true, itemsUpdated });
+}

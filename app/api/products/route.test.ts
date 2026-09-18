@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("@/db/client", () => ({ withScope: vi.fn((ctx: unknown, fn: (client: unknown) => unknown) => fn({ query: vi.fn() })) }));
 vi.mock("@/lib/current-account", () => ({ resolveCurrentAccount: vi.fn() }));
 
-import { GET, PATCH } from "./route";
+import { GET, PATCH, DELETE } from "./route";
 import { withScope } from "@/db/client";
 import { resolveCurrentAccount } from "@/lib/current-account";
 import { resetColumnCache } from "@/db/schema-capabilities";
@@ -330,5 +330,66 @@ describe("GET /api/products", () => {
 
     expect(body.find((p: any) => p.id === "MLA1").currentCostUsd).toBeCloseTo(5000 / 1450);
     expect(body.find((p: any) => p.id === "MLA2").currentCostUsd).toBeNull();
+  });
+});
+
+describe("DELETE /api/products", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetColumnCache();
+    vi.mocked(resolveCurrentAccount).mockResolvedValue(account);
+  });
+
+  it("returns 401 when there is no active account", async () => {
+    vi.mocked(resolveCurrentAccount).mockResolvedValue(null);
+    const res = await DELETE({ nextUrl: new URL("http://x/api/products?productId=MLA1") } as any);
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 400 when productId is missing", async () => {
+    const res = await DELETE({ nextUrl: new URL("http://x/api/products") } as any);
+    expect(res.status).toBe(400);
+  });
+
+  it("borra TODO el historial de costos del producto y recalcula sus ventas", async () => {
+    // El bug real que arregla: un costo cargado mal (ej. un cero de más) y
+    // corregido después seguía afectando la ganancia de ventas viejas —
+    // getCostEntryAtDate usa el PRIMER costo cargado como mejor estimación
+    // cuando ninguno tiene fecha anterior a la venta, y ese primer costo
+    // seguía siendo el erróneo. Borrar el historial entero deja que el
+    // próximo costo cargado sea "el primero" de nuevo.
+    const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes("information_schema.columns")) {
+        return { rows: [{ table_name: "order_items", column_name: "iva_applied" }] };
+      }
+      if (sql.includes("FROM product_costs")) {
+        return { rows: [] }; // ya sin costos: se acaban de borrar
+      }
+      if (sql.includes("FROM order_items oi JOIN orders o")) {
+        return {
+          rows: [
+            {
+              id: 7, productid: "MLA1", quantity: 2, datecreated: "2026-02-01T00:00:00Z",
+              unitprice: 1000, mlcommission: 130, shippingcost: 0, adscostallocated: 0,
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
+
+    const res = await DELETE({ nextUrl: new URL("http://x/api/products?productId=MLA1") } as any);
+
+    expect(await res.json()).toEqual({ ok: true, itemsUpdated: 1 });
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("DELETE FROM product_costs"),
+      ["acc1", "MLA1"]
+    );
+    // Sin costos, la línea vuelve a "sin costo cargado" (cost_applied null).
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("UPDATE order_items SET cost_applied"),
+      expect.arrayContaining([null, 7])
+    );
   });
 });

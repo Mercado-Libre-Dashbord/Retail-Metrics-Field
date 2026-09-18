@@ -219,6 +219,16 @@ export default function ProductosPage() {
   const [noAccount, setNoAccount] = useState(false);
   const [loadError, setLoadError] = useState("");
 
+  // Un costo cargado mal (típico: un cero de más) y corregido después seguía
+  // afectando la ganancia de las ventas VIEJAS: sin ningún costo con fecha
+  // anterior a la venta, el cálculo usa el PRIMER costo cargado como mejor
+  // estimación (ver getCostEntryAtDate) — que quedaba siendo el erróneo, no
+  // el corregido. Borrar el historial entero y cargarlo de nuevo hace que el
+  // nuevo costo sea el único (y por lo tanto el "primero") — confirmación en
+  // dos pasos, mismo patrón que borrar una cuenta en /admin.
+  const [confirmingDeleteCostId, setConfirmingDeleteCostId] = useState<string | null>(null);
+  const [deletingCostId, setDeletingCostId] = useState<string | null>(null);
+
   // Costo en edición, en las DOS monedas a la vez: escribir en una recalcula
   // la otra con el tipo de cambio de abajo, así nunca queda ambigüedad sobre
   // en qué moneda se está guardando un número (un botón "ARS/USD" al lado de
@@ -488,6 +498,29 @@ export default function ProductosPage() {
       load();
     } finally {
       setSavingId(null);
+    }
+  }
+
+  async function deleteCost(productId: string) {
+    setErrors((prev) => ({ ...prev, [productId]: "" }));
+    setDeletingCostId(productId);
+    try {
+      const res = await fetch(`/api/products?productId=${encodeURIComponent(productId)}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setErrors((prev) => ({ ...prev, [productId]: data.error ?? "No se pudo eliminar el costo." }));
+        setConfirmingDeleteCostId(null);
+        return;
+      }
+      setCostDraft((prev) => {
+        const next = { ...prev };
+        delete next[productId];
+        return next;
+      });
+      setConfirmingDeleteCostId(null);
+      load();
+    } finally {
+      setDeletingCostId(null);
     }
   }
 
@@ -765,6 +798,39 @@ export default function ProductosPage() {
                           {savingId === p.id ? "…" : "Guardar"}
                         </button>
                       </div>
+                      {confirmingDeleteCostId === p.id ? (
+                        <div style={{ display: "flex", gap: "var(--space-1)", alignItems: "center", flexWrap: "wrap" }}>
+                          <span className="field-hint" style={{ margin: 0 }}>¿Eliminar el costo cargado?</span>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            style={{ color: "var(--negative)" }}
+                            onClick={() => deleteCost(p.id)}
+                            disabled={deletingCostId === p.id}
+                          >
+                            {deletingCostId === p.id ? "Eliminando…" : "Sí, eliminar"}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => setConfirmingDeleteCostId(null)}
+                            disabled={deletingCostId === p.id}
+                          >
+                            Cancelar
+                          </button>
+                        </div>
+                      ) : (
+                        p.currentCost !== null && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => setConfirmingDeleteCostId(p.id)}
+                            title="Borra el costo cargado para poder cargarlo de nuevo desde cero"
+                          >
+                            Eliminar costo
+                          </button>
+                        )
+                      )}
                       {errors[p.id] && <p className="field-error">{errors[p.id]}</p>}
                     </div>
                   </td>
