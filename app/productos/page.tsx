@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NoAccountState } from "../NoAccountState";
 
 interface Product {
@@ -107,39 +107,69 @@ function LowStockPanel({ products }: { products: Product[] }) {
 }
 
 /**
- * Con un catálogo de miles de productos, cargar costos en orden alfabético
- * significa cargarlos todos antes de que el número de ganancia neta empiece
- * a acercarse a la realidad. Ordenar por lo que más vende (o por lo que hace
- * más que no vende) deja priorizar dónde cargar el costo primero rinde más.
+ * Ordenamiento por columna, igual que hacer clic en el encabezado de una
+ * columna en Excel: cada columna sortable tiene su propio menú con "de
+ * menor a mayor" / "de mayor a menor" (o A→Z / Z→A para texto). Reemplaza al
+ * viejo selector único "Ordenar por" — cada opción de ahí era, en los
+ * hechos, ordenar por una de estas columnas en una dirección puntual
+ * (nombre A-Z, más/menos vendidos = Vendidas desc/asc, etc.), así que nada
+ * se pierde: ahora se elige la columna Y la dirección por separado, como en
+ * una planilla.
  */
-type SortMode = "name" | "mostSold" | "leastSold" | "recentSale" | "oldestSale";
+type SortKey = "title" | "currentPrice" | "effectiveStock" | "fullStockValue" | "currentCost" | "marginPct" | "unitsSold" | "lastSaleDate" | "totalProfit";
+type SortDirection = "asc" | "desc";
 
-const SORT_LABELS: Record<SortMode, string> = {
-  name: "Nombre (A-Z)",
-  mostSold: "Más vendidos primero",
-  leastSold: "Menos vendidos primero",
-  recentSale: "Vendidos más recientemente primero",
-  oldestSale: "Hace más tiempo sin vender primero",
-};
-
-function sortProducts(products: Product[], mode: SortMode): Product[] {
-  const sorted = [...products];
-  switch (mode) {
-    case "mostSold":
-      return sorted.sort((a, b) => b.unitsSold - a.unitsSold);
-    case "leastSold":
-      return sorted.sort((a, b) => a.unitsSold - b.unitsSold);
-    case "recentSale":
-      // Los que nunca vendieron van al final: no hay fecha más "vieja" que
-      // no tener ninguna venta todavía.
-      return sorted.sort((a, b) => (b.lastSaleDate ?? "").localeCompare(a.lastSaleDate ?? ""));
-    case "oldestSale":
-      // Acá los que nunca vendieron van primero — son, en los hechos, los
-      // que hace más tiempo (siempre) que no se mueven.
-      return sorted.sort((a, b) => (a.lastSaleDate ?? "").localeCompare(b.lastSaleDate ?? ""));
-    default:
-      return sorted;
+function sortValue(p: Product, key: SortKey): string | number | null {
+  switch (key) {
+    case "title":
+      return p.title.toLowerCase();
+    case "currentPrice":
+      return p.currentPrice;
+    case "effectiveStock":
+      return p.effectiveStock;
+    case "fullStockValue":
+      return p.fullStockValue;
+    case "currentCost":
+      return p.currentCost;
+    case "marginPct":
+      return p.marginPct;
+    case "unitsSold":
+      return p.unitsSold;
+    case "lastSaleDate":
+      return p.lastSaleDate; // ISO: ordena bien como texto.
+    case "totalProfit":
+      return p.totalProfit;
   }
+}
+
+/**
+ * Los vacíos (sin costo cargado, sin margen porque no hay costo, nunca
+ * vendido) van siempre al final, en cualquier dirección — mismo criterio
+ * que usa Excel al ordenar una columna con celdas en blanco: un producto
+ * "sin dato" no es ni el más chico ni el más grande, así que no debería
+ * aparecer arriba de todo solo por ordenar de mayor a menor.
+ */
+function compareForSort(a: string | number | null, b: string | number | null, direction: SortDirection): number {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  const raw = typeof a === "string" && typeof b === "string" ? a.localeCompare(b, "es") : (a as number) - (b as number);
+  return direction === "asc" ? raw : -raw;
+}
+
+function sortProducts(products: Product[], key: SortKey, direction: SortDirection): Product[] {
+  return [...products].sort((a, b) => compareForSort(sortValue(a, key), sortValue(b, key), direction));
+}
+
+/** Filtro "por nombre" del encabezado de Producto — también matchea SKU e
+ * id de publicación, para encontrar un producto puntual sin tener que saber
+ * el título exacto. */
+function filterByName(products: Product[], query: string): Product[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return products;
+  return products.filter(
+    (p) => p.title.toLowerCase().includes(q) || p.id.toLowerCase().includes(q) || (p.sku ?? "").toLowerCase().includes(q)
+  );
 }
 
 /** Filtro por "vendido en los últimos X días" — en días de calendario, no
@@ -206,9 +236,59 @@ function filterProductsSoldWithin(
   return products.filter((p) => p.lastSaleDate !== null && new Date(p.lastSaleDate).getTime() >= cutoff);
 }
 
+/**
+ * Encabezado de columna con menú de orden, igual que hacer clic en la
+ * flechita de una columna en Excel: un menú chico con las dos direcciones
+ * posibles ("de menor a mayor" / "de mayor a menor", o A→Z / Z→A para
+ * texto). Usa <details> nativo en vez de manejar abierto/cerrado a mano:
+ * es la forma más simple de tener un menú desplegable sin un listener
+ * global de "clic afuera para cerrar".
+ */
+function SortableHeader({
+  label, sortKey, activeKey, direction, onSort, ascLabel, descLabel, numeric,
+}: {
+  label: string;
+  sortKey: SortKey;
+  activeKey: SortKey;
+  direction: SortDirection;
+  onSort: (key: SortKey, direction: SortDirection) => void;
+  ascLabel: string;
+  descLabel: string;
+  numeric?: boolean;
+}) {
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const isActive = activeKey === sortKey;
+
+  function choose(dir: SortDirection) {
+    onSort(sortKey, dir);
+    if (detailsRef.current) detailsRef.current.open = false;
+  }
+
+  return (
+    <th className={numeric ? "num" : undefined}>
+      <details ref={detailsRef} className="col-sort">
+        <summary>
+          {label}
+          {isActive && <span aria-hidden="true"> {direction === "asc" ? "▲" : "▼"}</span>}
+        </summary>
+        <div className="col-sort-menu">
+          <button type="button" onClick={() => choose("asc")}>
+            {ascLabel}
+          </button>
+          <button type="button" onClick={() => choose("desc")}>
+            {descLabel}
+          </button>
+        </div>
+      </details>
+    </th>
+  );
+}
+
 export default function ProductosPage() {
   const [products, setProducts] = useState<Product[] | null>(null);
-  const [sortMode, setSortMode] = useState<SortMode>("name");
+  const [sortKey, setSortKey] = useState<SortKey>("title");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+  const [nameFilter, setNameFilter] = useState("");
   const [soldWithin, setSoldWithin] = useState<SoldWithinMode>("all");
   // Rango de fechas para "Rango personalizado" — se pide solo cuando las dos
   // puntas están elegidas (ver filterProductsSoldWithin y load()).
@@ -525,8 +605,14 @@ export default function ProductosPage() {
   }
 
   const customRange = customFrom && customTo ? { from: customFrom, to: customTo } : undefined;
-  const filteredProducts = products ? filterProductsSoldWithin(products, soldWithin, customRange) : null;
-  const sortedProducts = filteredProducts ? sortProducts(filteredProducts, sortMode) : null;
+  const soldWithinFiltered = products ? filterProductsSoldWithin(products, soldWithin, customRange) : null;
+  const nameFiltered = soldWithinFiltered ? filterByName(soldWithinFiltered, nameFilter) : null;
+  const sortedProducts = nameFiltered ? sortProducts(nameFiltered, sortKey, sortDirection) : null;
+
+  function toggleSort(key: SortKey, direction: SortDirection) {
+    setSortKey(key);
+    setSortDirection(direction);
+  }
 
   return (
     <div>
@@ -541,19 +627,20 @@ export default function ProductosPage() {
       {products && products.length > 0 && (
         <>
           <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", marginBottom: "var(--space-2)", flexWrap: "wrap" }}>
-            <label htmlFor="sort-products" className="field-hint" style={{ margin: 0 }}>
-              Ordenar por
+            <label htmlFor="search-products" className="field-hint" style={{ margin: 0 }}>
+              Buscar producto
             </label>
-            <select
-              id="sort-products"
-              value={sortMode}
-              onChange={(e) => setSortMode(e.target.value as SortMode)}
-              style={{ padding: "6px 8px" }}
-            >
-              {(Object.keys(SORT_LABELS) as SortMode[]).map((mode) => (
-                <option key={mode} value={mode}>{SORT_LABELS[mode]}</option>
-              ))}
-            </select>
+            <input
+              id="search-products"
+              type="search"
+              placeholder="Nombre, SKU o ID de publicación"
+              value={nameFilter}
+              onChange={(e) => setNameFilter(e.target.value)}
+              style={{ padding: "6px 8px", minWidth: 220 }}
+            />
+            <span className="field-hint" style={{ margin: 0 }}>
+              Para ordenar por precio, costo, margen, etc., hacé clic en el encabezado de esa columna.
+            </span>
             <label htmlFor="sold-within" className="field-hint" style={{ margin: 0 }}>
               Vendidos en
             </label>
@@ -650,6 +737,17 @@ export default function ProductosPage() {
       )}
       {sortedProducts === null ? (
         <p className="empty-state">Cargando productos…</p>
+      ) : sortedProducts.length === 0 && nameFilter.trim() !== "" ? (
+        <div className="empty-state">
+          <p style={{ margin: 0, fontWeight: 600, color: "var(--text)" }}>
+            Ningún producto coincide con &quot;{nameFilter}&quot;.
+          </p>
+          <p style={{ margin: "var(--space-2) 0 0" }}>
+            <button type="button" className="btn btn-secondary btn-sm" onClick={() => setNameFilter("")}>
+              Borrar búsqueda
+            </button>
+          </p>
+        </div>
       ) : sortedProducts.length === 0 && products && products.length > 0 ? (
         <div className="empty-state">
           <p style={{ margin: 0, fontWeight: 600, color: "var(--text)" }}>
@@ -670,16 +768,43 @@ export default function ProductosPage() {
           <table>
             <thead>
               <tr>
-                <th>Producto</th>
-                <th className="num">Precio</th>
-                <th className="num">Stock</th>
-                <th className="num">Valor en Full</th>
-                <th className="num">Costo (ARS)</th>
+                <SortableHeader
+                  label="Producto" sortKey="title" activeKey={sortKey} direction={sortDirection} onSort={toggleSort}
+                  ascLabel="Ordenar A → Z" descLabel="Ordenar Z → A"
+                />
+                <SortableHeader
+                  label="Precio" sortKey="currentPrice" activeKey={sortKey} direction={sortDirection} onSort={toggleSort}
+                  ascLabel="De menor a mayor" descLabel="De mayor a menor" numeric
+                />
+                <SortableHeader
+                  label="Stock" sortKey="effectiveStock" activeKey={sortKey} direction={sortDirection} onSort={toggleSort}
+                  ascLabel="De menor a mayor" descLabel="De mayor a menor" numeric
+                />
+                <SortableHeader
+                  label="Valor en Full" sortKey="fullStockValue" activeKey={sortKey} direction={sortDirection} onSort={toggleSort}
+                  ascLabel="De menor a mayor" descLabel="De mayor a menor" numeric
+                />
+                <SortableHeader
+                  label="Costo (ARS)" sortKey="currentCost" activeKey={sortKey} direction={sortDirection} onSort={toggleSort}
+                  ascLabel="De menor a mayor" descLabel="De mayor a menor" numeric
+                />
                 <th className="num">Costo (US$)</th>
-                <th className="num">Margen</th>
-                <th className="num">Vendidas</th>
-                <th>Última venta</th>
-                <th className="num">Beneficio</th>
+                <SortableHeader
+                  label="Margen" sortKey="marginPct" activeKey={sortKey} direction={sortDirection} onSort={toggleSort}
+                  ascLabel="De menor a mayor" descLabel="De mayor a menor" numeric
+                />
+                <SortableHeader
+                  label="Vendidas" sortKey="unitsSold" activeKey={sortKey} direction={sortDirection} onSort={toggleSort}
+                  ascLabel="De menor a mayor" descLabel="De mayor a menor" numeric
+                />
+                <SortableHeader
+                  label="Última venta" sortKey="lastSaleDate" activeKey={sortKey} direction={sortDirection} onSort={toggleSort}
+                  ascLabel="Más antigua primero" descLabel="Más reciente primero"
+                />
+                <SortableHeader
+                  label="Beneficio" sortKey="totalProfit" activeKey={sortKey} direction={sortDirection} onSort={toggleSort}
+                  ascLabel="De menor a mayor" descLabel="De mayor a menor" numeric
+                />
                 <th>Actualizar costo</th>
                 <th>ML</th>
               </tr>
