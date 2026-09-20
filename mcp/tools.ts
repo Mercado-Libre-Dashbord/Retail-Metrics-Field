@@ -617,6 +617,78 @@ function eachDateInRange(from: string, to: string): string[] {
   return days;
 }
 
+/**
+ * Cuántas publicaciones pide por página a ads/search. Confirmado con una
+ * cuenta real: sin límite explícito, ML devuelve 50 — se deja explícito acá
+ * para no depender de un default que puede cambiar sin aviso.
+ */
+const ADS_ITEMS_PAGE_SIZE = 50;
+
+/**
+ * Costo REAL por publicación (no por campaña) de un rango, sumado por
+ * item_id. El parámetro campaign_id no filtra de verdad — confirmado con
+ * una cuenta real: las tres variantes de sintaxis probadas (campaign_id,
+ * campaign_ids, filters[campaign_id]) devuelven publicaciones de OTRAS
+ * campañas igual — así que en vez de pelear con un filtro que ML ignora,
+ * se suman TODAS las publicaciones que aparezcan, sea cual sea su campaña:
+ * es exactamente lo que hace falta para tener el gasto real de la cuenta
+ * entera por publicación, no por campaña puntual.
+ *
+ * Paginado: un catálogo con Ads activo en muchas publicaciones no entra en
+ * una sola página de 50.
+ */
+async function fetchItemAdsTotals(
+  base: string,
+  token: string,
+  campaignId: string,
+  dateFrom: string,
+  dateTo: string
+): Promise<Map<string, number>> {
+  const totals = new Map<string, number>();
+  let offset = 0;
+  let sawAnyItem = false;
+  let sawAnyCost = false;
+  let sample: unknown = null;
+  // Techo de seguridad: si la paginación viniera mal (o ML no manda paging),
+  // esto no puede quedar pidiendo para siempre.
+  for (let page = 0; page < 200; page++) {
+    const res = await listOrEmpty(
+      () =>
+        mlFetch(
+          `${base}/ads/search?campaign_id=${campaignId}&date_from=${dateFrom}&date_to=${dateTo}&metrics=cost&limit=${ADS_ITEMS_PAGE_SIZE}&offset=${offset}`,
+          token,
+          { headers: { "Api-Version": "2" } }
+        ),
+      { results: [] }
+    );
+    const results = res.results ?? [];
+    for (const item of results) {
+      sawAnyItem = true;
+      sample = sample ?? item;
+      const itemId = item?.item_id != null ? String(item.item_id) : null;
+      const cost = typeof item?.metrics?.cost === "number" ? item.metrics.cost : null;
+      if (!itemId || cost === null) continue;
+      sawAnyCost = true;
+      totals.set(itemId, (totals.get(itemId) ?? 0) + cost);
+    }
+    offset += results.length;
+    const total = res.paging?.total;
+    if (results.length === 0 || (typeof total === "number" && offset >= total)) break;
+  }
+
+  // Diagnóstico: si hubo publicaciones en el rango pero ninguna trae un
+  // costo numérico, la API volvió a cambiar de forma. Se loguean nada más
+  // que los NOMBRES de los campos (no montos ni textos) para corregir con
+  // evidencia real en vez de otra suposición.
+  if (sawAnyItem && !sawAnyCost) {
+    console.warn(
+      `Product Ads: hubo publicaciones en ${dateFrom}..${dateTo} sin gasto reconocible. ` +
+      `Claves de la primera: ${sample && typeof sample === "object" ? Object.keys(sample).join(", ") : "(sin datos)"}.`
+    );
+  }
+  return totals;
+}
+
 export async function getAdsSpend(
   accountId: string,
   sellerId: string,
@@ -639,6 +711,10 @@ export async function getAdsSpend(
 
   const rows: { productId: string | null; date: string; amount: number }[] = [];
   for (const window of splitIntoWindows(from, dateTo)) {
+    // Solo hace falta un campaign_id real para el query de ads/search — ver
+    // el comentario de fetchItemAdsTotals: el valor no filtra nada, pero el
+    // endpoint lo pide igual. Sin ninguna campaña en este tramo, no hay nada
+    // que pedir.
     const campaigns = await listOrEmpty(
       () =>
         mlFetch(
@@ -648,38 +724,23 @@ export async function getAdsSpend(
         ),
       { results: [] }
     );
-    const results = campaigns.results ?? [];
+    const campaignResults = campaigns.results ?? [];
+    if (campaignResults.length === 0) continue;
+    const campaignId = String(campaignResults[0].id);
 
-    // Confirmado con un log real de producción (no era una suposición: la
-    // primera versión asumía "metrics_by_day" y nunca trajo nada). Cada
-    // campaña trae "metrics: { cost }", un total agregado de TODO el rango
-    // pedido — ML no lo abre por día ni por publicación acá. Sin esa
-    // discriminación, se reparte el total en partes iguales entre los días
-    // del rango y se guarda a nivel cuenta (product_id null), igual que la
-    // publicidad que se carga a mano: entra al Ad Spend/MER/ROAS de la
-    // cuenta, pero por ahora no se puede descontar de la ganancia neta de
-    // una venta puntual — no hay forma de saber qué publicación generó ese
-    // gasto.
-    const totalCost = results.reduce((sum: number, c: any) => sum + Number(c.metrics?.cost ?? 0), 0);
-    if (totalCost > 0) {
+    // Costo real por publicación de TODO el rango (ML tampoco lo discrimina
+    // por día acá) repartido en partes iguales entre los días del rango —
+    // igual que antes se hacía a nivel cuenta, ahora a nivel publicación:
+    // mucho más preciso para saber qué producto conviene seguir pagando.
+    const itemTotals = await fetchItemAdsTotals(base, token, campaignId, window.from, window.to);
+    if (itemTotals.size > 0) {
       const days = eachDateInRange(window.from, window.to);
-      const perDay = totalCost / days.length;
-      for (const day of days) {
-        rows.push({ productId: null, date: day, amount: perDay });
+      for (const [productId, totalCost] of itemTotals) {
+        const perDay = totalCost / days.length;
+        for (const day of days) {
+          rows.push({ productId, date: day, amount: perDay });
+        }
       }
-    }
-
-    // Diagnóstico: si hay campañas en el rango pero ninguna trae un costo
-    // numérico, la API volvió a cambiar de forma. Se loguean nada más que los
-    // NOMBRES de los campos (no montos ni textos) para corregir con evidencia
-    // real en vez de otra suposición.
-    const noneHasCost = results.length > 0 && results.every((c: any) => typeof c.metrics?.cost !== "number");
-    if (noneHasCost) {
-      const sample = results[0] ?? {};
-      console.warn(
-        `Product Ads: ${results.length} campaña(s) en ${window.from}..${window.to} sin gasto reconocible. ` +
-        `Claves de la primera campaña: ${Object.keys(sample).join(", ")}.`
-      );
     }
   }
   return rows;

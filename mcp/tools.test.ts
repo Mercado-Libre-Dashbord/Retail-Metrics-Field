@@ -581,36 +581,71 @@ describe("getAdsSpend", () => {
     expect(await getAdsSpend("acc1", "123", haceDias(30), haceDias(1))).toEqual([]);
   });
 
-  it("resolves the advertiser id and site id before listing campaigns", async () => {
+  it("trae el costo REAL por publicación (no por campaña) y lo reparte por día dentro del rango", async () => {
     vi.mocked(mlFetch)
       .mockResolvedValueOnce({ advertisers: [{ advertiser_id: 999, site_id: "MLA" }] })
-      .mockResolvedValueOnce({ results: [{ metrics: { cost: 100 } }] });
+      .mockResolvedValueOnce({ results: [{ id: 1, metrics: { cost: 100 } }] }) // campaigns/search: solo para sacar un campaignId
+      .mockResolvedValueOnce({ results: [{ item_id: "MLA1", metrics: { cost: 60 } }, { item_id: "MLA2", metrics: { cost: 40 } }] }); // ads/search
 
     const rows = await getAdsSpend("acc1", "123", haceDias(2), haceDias(1));
 
-    // Confirmado con un log real de producción: ML da un total agregado del
-    // rango completo por campaña ("metrics.cost"), no un desglose por día ni
-    // por publicación. Se reparte en partes iguales entre los días del rango,
-    // sin producto asociado (product_id null), igual que la publicidad que se
-    // carga a mano.
-    expect(rows).toEqual([
-      { productId: null, date: haceDias(2), amount: 50 },
-      { productId: null, date: haceDias(1), amount: 50 },
-    ]);
-    expect(vi.mocked(mlFetch).mock.calls[1][0]).toBe(
-      `/marketplace/advertising/MLA/advertisers/999/product_ads/campaigns/search?date_from=${haceDias(2)}&date_to=${haceDias(1)}&metrics=cost`
+    // Ventana de 2 días: cada publicación reparte su costo real en partes
+    // iguales entre esos días — ML tampoco discrimina por día en este
+    // endpoint, pero ahora al menos es por PUBLICACIÓN, no por toda la cuenta.
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        { productId: "MLA1", date: haceDias(2), amount: 30 },
+        { productId: "MLA1", date: haceDias(1), amount: 30 },
+        { productId: "MLA2", date: haceDias(2), amount: 20 },
+        { productId: "MLA2", date: haceDias(1), amount: 20 },
+      ])
     );
-    expect(vi.mocked(mlFetch).mock.calls[1][2]).toEqual(expect.objectContaining({ headers: { "Api-Version": "2" } }));
+    expect(rows).toHaveLength(4);
+    expect(vi.mocked(mlFetch).mock.calls[2][0]).toBe(
+      `/marketplace/advertising/MLA/advertisers/999/product_ads/ads/search?campaign_id=1&date_from=${haceDias(2)}&date_to=${haceDias(1)}&metrics=cost&limit=50&offset=0`
+    );
+    expect(vi.mocked(mlFetch).mock.calls[2][2]).toEqual(expect.objectContaining({ headers: { "Api-Version": "2" } }));
   });
 
-  it("suma el costo de todas las campañas del rango antes de repartirlo", async () => {
+  it("suma el costo de la misma publicación si aparece más de una vez (ej. en más de una campaña)", async () => {
     vi.mocked(mlFetch)
       .mockResolvedValueOnce({ advertisers: [{ advertiser_id: 999, site_id: "MLA" }] })
-      .mockResolvedValueOnce({ results: [{ metrics: { cost: 60 } }, { metrics: { cost: 40 } }] });
+      .mockResolvedValueOnce({ results: [{ id: 1, metrics: { cost: 100 } }] })
+      .mockResolvedValueOnce({ results: [{ item_id: "MLA1", metrics: { cost: 60 } }, { item_id: "MLA1", metrics: { cost: 40 } }] });
 
     const rows = await getAdsSpend("acc1", "123", haceDias(1), haceDias(1));
 
-    expect(rows).toEqual([{ productId: null, date: haceDias(1), amount: 100 }]);
+    expect(rows).toEqual([{ productId: "MLA1", date: haceDias(1), amount: 100 }]);
+  });
+
+  it("pagina ads/search hasta agotar el total, sumando el costo entre páginas", async () => {
+    vi.mocked(mlFetch)
+      .mockResolvedValueOnce({ advertisers: [{ advertiser_id: 999, site_id: "MLA" }] })
+      .mockResolvedValueOnce({ results: [{ id: 1, metrics: { cost: 100 } }] })
+      .mockResolvedValueOnce({ results: [{ item_id: "MLA1", metrics: { cost: 10 } }], paging: { total: 2 } })
+      .mockResolvedValueOnce({ results: [{ item_id: "MLA2", metrics: { cost: 20 } }], paging: { total: 2 } });
+
+    const rows = await getAdsSpend("acc1", "123", haceDias(1), haceDias(1));
+
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        { productId: "MLA1", date: haceDias(1), amount: 10 },
+        { productId: "MLA2", date: haceDias(1), amount: 20 },
+      ])
+    );
+    const adsCalls = vi.mocked(mlFetch).mock.calls.filter((c) => String(c[0]).includes("ads/search"));
+    expect(adsCalls.map((c) => new URL(`https://x${c[0]}`).searchParams.get("offset"))).toEqual(["0", "1"]);
+  });
+
+  it("no pide ads/search cuando no hay ninguna campaña en el tramo", async () => {
+    vi.mocked(mlFetch)
+      .mockResolvedValueOnce({ advertisers: [{ advertiser_id: 999, site_id: "MLA" }] })
+      .mockResolvedValueOnce({ results: [] });
+
+    const rows = await getAdsSpend("acc1", "123", haceDias(1), haceDias(1));
+
+    expect(rows).toEqual([]);
+    expect(vi.mocked(mlFetch)).toHaveBeenCalledTimes(2);
   });
 
   it("parte un historial largo en ventanas cortas en vez de comerse un 400", async () => {
@@ -1022,38 +1057,40 @@ describe("getStoreVisits", () => {
   });
 });
 
-describe("getAdsSpend con campañas sin gasto reconocible", () => {
+describe("getAdsSpend con publicaciones sin gasto reconocible", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("avisa con las claves reales de la respuesta cuando hay campañas pero ninguna aporta gasto", async () => {
-    // Es el caso real que encontramos: la pantalla de Campañas mostraba
-    // presupuestos reales, pero Ad Spend daba $0. Si el día de mañana ML
-    // vuelve a cambiar la forma de la respuesta, este aviso va a decir cuál
-    // es el campo real en vez de quedar en silencio total.
+  it("avisa con las claves reales de la respuesta cuando hay publicaciones pero ninguna aporta gasto", async () => {
+    // Mismo caso real que antes (la pantalla de Campañas mostraba
+    // presupuestos reales, pero Ad Spend daba $0), ahora a nivel publicación:
+    // si el día de mañana ML vuelve a cambiar la forma de "ads/search", este
+    // aviso va a decir cuál es el campo real en vez de quedar en silencio.
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.mocked(mlFetch)
       .mockResolvedValueOnce({ advertisers: [{ advertiser_id: 999, site_id: "MLA" }] })
-      .mockResolvedValueOnce({ results: [{ id: "C1", name: "Campaña real", status: "active", budget: 20000 }] });
+      .mockResolvedValueOnce({ results: [{ id: "C1", name: "Campaña real", status: "active", budget: 20000 }] })
+      .mockResolvedValueOnce({ results: [{ item_id: "MLA1", title: "Producto" }] }); // sin metrics.cost
 
     const rows = await getAdsSpend("acc1", "123", haceDias(10), haceDias(1));
 
     expect(rows).toEqual([]);
     const warned = warn.mock.calls.map((c) => String(c[0])).join("\n");
-    expect(warned).toContain("campaña(s)");
-    expect(warned).toContain("Claves de la primera campaña: id, name, status, budget");
+    expect(warned).toContain("publicaciones");
+    expect(warned).toContain("Claves de la primera: item_id, title");
   });
 
-  it("no avisa si la campaña trae metrics.cost, aunque el gasto real sea cero", async () => {
-    // Un cero real (la campaña no gastó nada en el rango) no es lo mismo que
-    // el campo no venir: eso sí sería una API que cambió de forma otra vez.
+  it("no avisa si la publicación trae metrics.cost, aunque el gasto real sea cero", async () => {
+    // Un cero real (la publicación no gastó nada en el rango) no es lo mismo
+    // que el campo no venir: eso sí sería una API que cambió de forma otra vez.
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.mocked(mlFetch)
       .mockResolvedValueOnce({ advertisers: [{ advertiser_id: 999, site_id: "MLA" }] })
-      .mockResolvedValueOnce({ results: [{ id: "C1", metrics: { cost: 0 } }] });
+      .mockResolvedValueOnce({ results: [{ id: "C1" }] })
+      .mockResolvedValueOnce({ results: [{ item_id: "MLA1", metrics: { cost: 0 } }] });
 
-    const rows = await getAdsSpend("acc1", "123", haceDias(10), haceDias(1));
+    const rows = await getAdsSpend("acc1", "123", haceDias(1), haceDias(1));
 
-    expect(rows).toEqual([]);
+    expect(rows).toEqual([{ productId: "MLA1", date: haceDias(1), amount: 0 }]);
     expect(warn).not.toHaveBeenCalled();
   });
 });

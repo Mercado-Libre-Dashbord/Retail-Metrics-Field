@@ -32,6 +32,28 @@ interface Campaign {
   budget: number;
 }
 
+interface AdsProductPerformance {
+  productId: string;
+  title: string;
+  revenue: number;
+  adSpend: number;
+  netProfit: number;
+  roas: number | null;
+  recommendation: "pausar" | "mantener" | "aumentar";
+}
+
+const RECOMMENDATION_LABEL: Record<AdsProductPerformance["recommendation"], string> = {
+  pausar: "Pausar",
+  mantener: "Mantener",
+  aumentar: "Aumentar",
+};
+
+const RECOMMENDATION_BADGE: Record<AdsProductPerformance["recommendation"], string> = {
+  pausar: "badge-cancelled",
+  mantener: "badge-other",
+  aumentar: "badge-paid",
+};
+
 function fmt(n: number) {
   return n.toLocaleString("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 0 });
 }
@@ -93,6 +115,7 @@ export default function CampanasPage() {
   const [campaigns, setCampaigns] = useState<Campaign[] | null>(null);
   const [campaignsError, setCampaignsError] = useState("");
   const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [adsPerformance, setAdsPerformance] = useState<AdsProductPerformance[] | null>(null);
 
   const { from, to } = rangeForPeriod(period, customFrom, customTo);
   const activeCampaigns = campaigns?.filter((c) => c.status === "active").length ?? 0;
@@ -105,6 +128,10 @@ export default function CampanasPage() {
     fetch(`/api/summary?groupBy=day&from=${from}&to=${to}`).then((r) => {
       if (r.status === 401) return;
       r.json().then(setDaily);
+    });
+    fetch(`/api/campaigns/products?from=${from}&to=${to}`).then((r) => {
+      if (r.status === 401) return;
+      r.json().then(setAdsPerformance);
     });
   }
 
@@ -308,6 +335,63 @@ export default function CampanasPage() {
           </table>
         </div>
       ) : null}
+
+      <h2 className="section-title">
+        Rendimiento de Ads por publicación
+        <KpiInfo>
+          Compara la publicidad real que gastó cada publicación contra la ganancia neta que dejó — para decidir a
+          cuál seguir pagando, a cuál sacarle presupuesto y a cuál ponerle más plata, no solo mirar el total de la
+          cuenta. Solo cubre los últimos ~90 días: es el límite que da Mercado Libre para el gasto por publicación
+          puntual, no una limitación nuestra. <strong>Pausar</strong>: la ganancia (ya con Ads descontado) es
+          negativa. <strong>Aumentar</strong>: sin publicidad este producto dejaría bastante más que el doble de lo
+          que gasta en Ads — hay margen de sobra para invertir más. <strong>Mantener</strong>: da ganancia, pero la
+          publicidad ya se lleva una porción grande de esa ganancia.
+        </KpiInfo>
+      </h2>
+      {adsPerformance === null ? (
+        <p className="empty-state">Cargando…</p>
+      ) : adsPerformance.length === 0 ? (
+        <div className="empty-state">
+          <p style={{ margin: 0, fontWeight: 600, color: "var(--text)" }}>
+            Sin gasto de Ads por publicación en este período.
+          </p>
+          <p style={{ margin: "var(--space-2) 0 0" }}>
+            Puede ser que no hayas usado Ads en estas fechas, o que el período elegido quede fuera de los últimos
+            ~90 días (el límite que da Mercado Libre para este dato).
+          </p>
+        </div>
+      ) : (
+        <div className="table-wrap table-scroll" style={{ marginBottom: "var(--space-5)" }}>
+          <table>
+            <thead>
+              <tr>
+                <th>Producto</th>
+                <th className="num">Publicidad</th>
+                <th className="num">Facturación</th>
+                <th className="num">Ganancia neta</th>
+                <th className="num">ROAS</th>
+                <th>Recomendación</th>
+              </tr>
+            </thead>
+            <tbody>
+              {adsPerformance.map((p) => (
+                <tr key={p.productId}>
+                  <td>{p.title}</td>
+                  <td className="num">{fmt(p.adSpend)}</td>
+                  <td className="num">{fmt(p.revenue)}</td>
+                  <td className={`num ${p.netProfit < 0 ? "missing-cost" : ""}`}>{fmt(p.netProfit)}</td>
+                  <td className="num">{p.roas === null ? "—" : p.roas.toFixed(2)}</td>
+                  <td>
+                    <span className={`badge ${RECOMMENDATION_BADGE[p.recommendation]}`}>
+                      {RECOMMENDATION_LABEL[p.recommendation]}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       <h2 className="section-title">Cargar publicidad externa</h2>
       <form className="ad-form" onSubmit={submitAdSpend} noValidate>

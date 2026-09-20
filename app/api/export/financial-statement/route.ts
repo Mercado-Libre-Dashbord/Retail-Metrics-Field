@@ -4,6 +4,7 @@ import { withScope } from "@/db/client";
 import { hasColumn } from "@/db/schema-capabilities";
 import { resolveCurrentAccount } from "@/lib/current-account";
 import { revenueStatusFilter } from "@/lib/order-status";
+import { recommendAdsAction } from "@/lib/ads-recommendation";
 
 export const runtime = "nodejs";
 /** Movimientos puede tener decenas de miles de filas (todo el historial). */
@@ -219,6 +220,7 @@ const PRODUCT_COLUMNS: { header: string; key: string; width: number; fmt?: strin
   { header: "IVA", key: "iva", width: 14, fmt: CURRENCY_FMT, sum: true },
   { header: "Ganancia neta", key: "netProfit", width: 16, fmt: CURRENCY_FMT, sum: true },
   { header: "Margen neto", key: "marginPct", width: 12, fmt: PCT_FMT },
+  { header: "Recomendación de Ads", key: "adsRecommendation", width: 20 },
 ];
 
 function addProductSheet(workbook: ExcelJS.Workbook, products: ProductRow[]) {
@@ -243,7 +245,17 @@ function addProductSheet(workbook: ExcelJS.Workbook, products: ProductRow[]) {
     })),
     rows: products.map((p) => {
       const marginPct = p.revenue > 0 ? p.netProfit / p.revenue : 0;
-      return PRODUCT_COLUMNS.map((c) => (c.key === "marginPct" ? marginPct : p[c.key as keyof ProductRow]));
+      // Sin gasto en Ads no hay nada que recomendar — y con "aumentar" acá
+      // se prestaría a leerse como "ponele Ads a esto", que no es lo que se
+      // quiso decir (ver recommendAdsAction: con adSpend=0 y margen
+      // positivo, la cuenta siempre daría "aumentar").
+      const adsRecommendation =
+        p.adSpend > 0
+          ? { pausar: "Pausar", mantener: "Mantener", aumentar: "Aumentar" }[recommendAdsAction(p.netProfit, p.adSpend)]
+          : "Sin datos de Ads";
+      return PRODUCT_COLUMNS.map((c) =>
+        c.key === "marginPct" ? marginPct : c.key === "adsRecommendation" ? adsRecommendation : p[c.key as keyof ProductRow]
+      );
     }),
   });
 

@@ -143,11 +143,16 @@ describe("GET /api/export/financial-statement", () => {
     expect(anual.getRow(3).getCell("D").value).toBe(1500);
   });
 
-  it("builds the Por Producto sheet sorted by net profit, as a real filterable Table", async () => {
+  it("builds the Por Producto sheet sorted by net profit, as a real filterable Table, with an Ads recommendation per row", async () => {
     const query = mockQuery({
       products: [
+        // Sin Ads dejaría 2640 (2440 + 200) — la publicidad es menos de la
+        // mitad de eso: conviene invertir más.
         { productId: "MLA1", title: "El más rentable", orders: 3, units: 5, revenue: 5000, commission: 500, shipping: 100, adSpend: 200, cost: 1500, otherTax: 50, iva: 210, netProfit: 2440 },
-        { productId: "MLA2", title: "El menos rentable", orders: 1, units: 1, revenue: 100, commission: 13, shipping: 10, adSpend: 5, cost: 30, otherTax: 1, iva: 4, netProfit: 37 },
+        // Ganancia negativa con Ads adentro: hay que pausarlo.
+        { productId: "MLA2", title: "Pierde con Ads", orders: 1, units: 1, revenue: 100, commission: 13, shipping: 10, adSpend: 50, cost: 30, otherTax: 1, iva: 4, netProfit: -8 },
+        // Nunca tuvo Ads: no hay nada que recomendar.
+        { productId: "MLA3", title: "Sin publicidad", orders: 1, units: 1, revenue: 300, commission: 39, shipping: 0, adSpend: 0, cost: 100, otherTax: 3, iva: 12, netProfit: 146 },
       ],
     });
     vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
@@ -156,11 +161,16 @@ describe("GET /api/export/financial-statement", () => {
     const sheet = wb.getWorksheet("Por Producto")!;
 
     expect(sheet.getRow(1).getCell("A").value).toBe("Producto");
+    expect(sheet.getRow(1).getCell("N").value).toBe("Recomendación de Ads");
     expect(sheet.getRow(2).getCell("A").value).toBe("El más rentable");
     expect(sheet.getRow(2).getCell("E").value).toBe(5000); // revenue
     expect(sheet.getRow(2).getCell("L").value).toBe(2440); // netProfit
-    expect(sheet.getRow(3).getCell("A").value).toBe("El menos rentable");
-    const totalsRow = sheet.getRow(4);
+    expect(sheet.getRow(2).getCell("N").value).toBe("Aumentar");
+    const pierdeRow = [2, 3, 4].map((r) => sheet.getRow(r)).find((r) => r.getCell("A").value === "Pierde con Ads")!;
+    expect(pierdeRow.getCell("N").value).toBe("Pausar");
+    const sinAdsRow = [2, 3, 4].map((r) => sheet.getRow(r)).find((r) => r.getCell("A").value === "Sin publicidad")!;
+    expect(sinAdsRow.getCell("N").value).toBe("Sin datos de Ads");
+    const totalsRow = sheet.getRow(5);
     expect(totalsRow.getCell("A").value).toBe("TOTAL");
     expectSubtotalFormula(totalsRow.getCell("E"), "TablaPorProducto", "Facturación bruta");
   });
