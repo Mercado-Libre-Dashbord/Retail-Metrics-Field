@@ -101,5 +101,28 @@ describe("healRecentCostEdits (Postgres real)", () => {
 
     expect(pending.sort()).toEqual(["DOS", "NUEVA"]);
   });
+
+  it("pendingOrderIds vuelve a pedir las órdenes con envío cargado para corregir envíos inexistentes o duplicados", async () => {
+    const { withScope } = await import("@/db/client");
+    const { createAccount } = await import("@/db/accounts");
+    const { pendingOrderIds } = await import("./sync-service");
+
+    const account = await withScope({ isAdmin: true }, (client) =>
+      createAccount(client, "Cuenta envío", `envio.${nanoid(6)}@example.com`)
+    );
+
+    const pending = await withScope({ accountId: account.id }, async (client) => {
+      for (const [id, shipping] of [["SIN_ENVIO", 0], ["CON_ENVIO", 8250]] as const) {
+        await client.query(`INSERT INTO orders (account_id, id, date_created, status, sync_version) VALUES ($1, $2, now(), 'paid', 2)`, [account.id, id]);
+        await client.query(
+          `INSERT INTO order_items (account_id, order_id, product_id, unit_price, quantity, ml_commission, shipping_cost) VALUES ($1, $2, 'MLA1', 12591, 1, 3244, $3)`,
+          [account.id, id, shipping]
+        );
+      }
+      return pendingOrderIds(client, account.id, ["SIN_ENVIO", "CON_ENVIO"]);
+    });
+
+    expect(pending).toEqual(["CON_ENVIO"]);
+  });
 });
 

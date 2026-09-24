@@ -10,6 +10,7 @@ import {
   listProducts,
   getOrderDetail,
   resolveLineCommissions,
+  sellerCostFromShipmentCosts,
   listOrders,
   listOrdersPage,
   listUnansweredQuestions,
@@ -1212,5 +1213,63 @@ describe("resolveLineCommissions", () => {
     });
     expect(r.basis).toBe("per_unit");
     expect(r.evidence).toBe(true);
+  });
+});
+
+describe("sellerCostFromShipmentCosts", () => {
+  it("toma lo que paga el vendedor (senders[].cost), no el costo total del envío", () => {
+    expect(sellerCostFromShipmentCosts({ gross_amount: 8250, receiver: { cost: 0 }, senders: [{ cost: 4125 }] }, "1")).toBe(4125);
+  });
+
+  it("si el envío lo pagó el comprador, al vendedor le cuesta 0 aunque gross_amount diga 8250", () => {
+    expect(sellerCostFromShipmentCosts({ gross_amount: 8250, receiver: { cost: 8250 }, senders: [{ cost: 0 }] }, "1")).toBe(0);
+  });
+
+  it("nunca usa gross_amount como costo del vendedor cuando falta el dato del vendedor", () => {
+    expect(sellerCostFromShipmentCosts({ gross_amount: 8250, receiver: { cost: 8250 } }, "1")).toBe(0);
+  });
+
+  it("sigue entendiendo el formato viejo sender.cost", () => {
+    expect(sellerCostFromShipmentCosts({ gross_amount: 8250, sender: { cost: 3000 } }, "1")).toBe(3000);
+  });
+});
+
+describe("getOrderDetail en un carrito (pack)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("reparte un solo envío entre las órdenes del carrito según lo facturado", async () => {
+    vi.mocked(mlFetch).mockImplementation(async (path: string) => {
+      if (path === "/orders/A") {
+        return {
+          id: "A", date_created: "2026-08-06T12:00:00Z", status: "paid", total_amount: 12591, pack_id: 77,
+          shipping: { id: 900 }, order_items: [{ item: { id: "MLA1" }, unit_price: 12591, quantity: 1, sale_fee: 3244.77 }],
+        };
+      }
+      if (path === "/shipments/900/costs") return { gross_amount: 8250, senders: [{ cost: 8250 }] };
+      if (path === "/packs/77") return { id: 77, orders: [{ id: "A" }, { id: "B" }] };
+      if (path === "/orders/B") return { id: "B", total_amount: 37773 };
+      throw new Error("inesperado " + path);
+    });
+
+    const order = await getOrderDetail("acc1", "A");
+
+    // 12591 / (12591 + 37773) = 25% del envío, no el 100%.
+    expect(order.items[0].shippingCost).toBeCloseTo(8250 * (12591 / (12591 + 37773)), 2);
+  });
+
+  it("si no se puede leer el pack, la orden se queda con el envío entero", async () => {
+    vi.mocked(mlFetch).mockImplementation(async (path: string) => {
+      if (path === "/orders/A") {
+        return {
+          id: "A", date_created: "2026-08-06T12:00:00Z", status: "paid", total_amount: 1000, pack_id: 77,
+          shipping: { id: 900 }, order_items: [{ item: { id: "MLA1" }, unit_price: 1000, quantity: 1, sale_fee: 130 }],
+        };
+      }
+      if (path === "/shipments/900/costs") return { senders: [{ cost: 500 }] };
+      throw new Error("sin permiso");
+    });
+
+    const order = await getOrderDetail("acc1", "A");
+    expect(order.items[0].shippingCost).toBe(500);
   });
 });

@@ -10,14 +10,17 @@ import { hasColumn } from "@/db/schema-capabilities";
  * saltean, que es lo que hace que un solo botón pueda recorrer todo el
  * historial sin tardar minutos cada vez.
  */
-export const ORDER_SYNC_VERSION = 2;
+export const ORDER_SYNC_VERSION = 3;
 /**
- * La versión 2 solo cambia cómo se calcula la comisión de líneas con más de
- * una unidad (ver resolveLineCommissions en mcp/tools.ts). Una orden v1 cuyas
- * líneas son todas de 1 unidad ya está bien: no hace falta volver a pedírsela
- * a ML, lo que en cuentas grandes serían miles de llamadas para nada.
+ * Qué cambió en cada versión, para volver a pedirle a ML solo las órdenes que
+ * de verdad pueden haber quedado mal (en cuentas grandes, reprocesar todo
+ * serían miles de llamadas para nada):
+ * - v2: comisión de líneas con más de una unidad (resolveLineCommissions).
+ * - v3: envío — ya no se toma gross_amount como costo del vendedor, y en un
+ *   carrito el envío se reparte entre sus órdenes. Solo pueden estar mal las
+ *   órdenes que tienen envío cargado.
  */
-const ORDER_SYNC_VERSION_SINGLE_UNIT_OK = 1;
+const ORDER_SYNC_VERSION_MULTI_UNIT_FIX = 2;
 
 export interface SyncResult {
   productsSynced: number;
@@ -164,9 +167,12 @@ export async function pendingOrderIds(
     `SELECT o.id FROM orders o
       WHERE o.account_id = $1 AND o.id = ANY($2::text[])
         AND (o.sync_version >= $3
-             OR (o.sync_version >= $4 AND NOT EXISTS (
-                   SELECT 1 FROM order_items oi WHERE oi.account_id = o.account_id AND oi.order_id = o.id AND oi.quantity > 1)))`,
-    [accountId, orderIds, ORDER_SYNC_VERSION, ORDER_SYNC_VERSION_SINGLE_UNIT_OK]
+             OR (o.sync_version >= 1
+                 AND NOT EXISTS (
+                   SELECT 1 FROM order_items oi WHERE oi.account_id = o.account_id AND oi.order_id = o.id AND oi.shipping_cost > 0)
+                 AND (o.sync_version >= $4 OR NOT EXISTS (
+                   SELECT 1 FROM order_items oi WHERE oi.account_id = o.account_id AND oi.order_id = o.id AND oi.quantity > 1))))`,
+    [accountId, orderIds, ORDER_SYNC_VERSION, ORDER_SYNC_VERSION_MULTI_UNIT_FIX]
   );
   const upToDate = new Set(result.rows.map((r) => String(r.id)));
   return orderIds.filter((id) => !upToDate.has(id));
