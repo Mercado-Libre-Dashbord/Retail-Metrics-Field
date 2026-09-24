@@ -352,6 +352,53 @@ export async function getShipmentSellerCost(accountId: string, shipmentId: strin
   }
 }
 
+/**
+ * Sin evidencia en la orden, `sale_fee` se toma como cargo POR UNIDAD (hay que
+ * multiplicarlo por la cantidad). Antes se tomaba como el total de la línea:
+ * en ventas de 2+ unidades eso descontaba la comisión de una sola unidad e
+ * inflaba la ganancia neta.
+ */
+export const SALE_FEE_DEFAULT_PER_UNIT = true;
+
+export type SaleFeeBasis = "per_unit" | "per_line";
+
+/**
+ * Comisión total de cada línea de la orden. La documentación de ML no dice si
+ * `order_items[].sale_fee` es por unidad o por línea, y en ventas de una
+ * unidad da lo mismo — solo importa con cantidad > 1. Para no depender de una
+ * suposición, se contrasta contra lo que ML efectivamente cobró: la suma de
+ * `payments[].marketplace_fee` de los pagos aprobados. Se usa solo si esos
+ * pagos corresponden únicamente a esta orden (la suma cobrada coincide con el
+ * total de la orden) — en un carrito, un mismo pago puede cubrir varias.
+ */
+export function resolveLineCommissions(order: any): { commissions: number[]; basis: SaleFeeBasis; evidence: boolean } {
+  const items: any[] = order.order_items ?? [];
+  const perUnit = items.map((oi) => Number(oi.sale_fee ?? 0) * Number(oi.quantity ?? 1));
+  const perLine = items.map((oi) => Number(oi.sale_fee ?? 0));
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+  const defaultBasis: SaleFeeBasis = SALE_FEE_DEFAULT_PER_UNIT ? "per_unit" : "per_line";
+  const pick = (basis: SaleFeeBasis) => (basis === "per_unit" ? perUnit : perLine);
+
+  // Con todas las líneas de 1 unidad las dos lecturas son idénticas.
+  if (!items.some((oi) => Number(oi.quantity ?? 1) > 1)) return { commissions: perLine, basis: defaultBasis, evidence: false };
+
+  const approved = (order.payments ?? []).filter((p: any) => p?.status === "approved");
+  const charged = sum(approved.map((p: any) => Number(p?.marketplace_fee)));
+  const paid = sum(approved.map((p: any) => Number(p?.transaction_amount)));
+  const orderTotal = Number(order.total_amount ?? 0);
+  const paymentIsOnlyThisOrder = approved.length > 0 && orderTotal > 0 && Math.abs(paid - orderTotal) <= orderTotal * 0.01;
+  if (!paymentIsOnlyThisOrder || !Number.isFinite(charged) || charged <= 0) {
+    return { commissions: pick(defaultBasis), basis: defaultBasis, evidence: false };
+  }
+  const basis: SaleFeeBasis = Math.abs(charged - sum(perUnit)) <= Math.abs(charged - sum(perLine)) ? "per_unit" : "per_line";
+  // Queda en los logs de Vercel: es la forma de confirmar con datos reales
+  // qué lectura de sale_fee es la correcta, sin adivinar.
+  console.info(
+    `Comisión multi-unidad orden ${order.id}: marketplace_fee=${charged}, sale_fee×cantidad=${sum(perUnit)}, sale_fee=${sum(perLine)} → ${basis}`
+  );
+  return { commissions: pick(basis), basis, evidence: true };
+}
+
 export async function getOrderDetail(accountId: string, orderId: string): Promise<MlOrder> {
   const token = await getValidAccessToken(accountId);
   const order = await mlFetch(`/orders/${orderId}`, token);
@@ -364,6 +411,7 @@ export async function getOrderDetail(accountId: string, orderId: string): Promis
   // descontaba el envío dos veces. Se reparte proporcional a lo facturado por
   // línea (y en partes iguales si la orden facturó 0).
   const items = order.order_items ?? [];
+  const { commissions } = resolveLineCommissions(order);
   const orderRevenue = items.reduce((sum: number, oi: any) => sum + Number(oi.unit_price) * Number(oi.quantity), 0);
 
   return {
@@ -371,7 +419,7 @@ export async function getOrderDetail(accountId: string, orderId: string): Promis
     dateCreated: order.date_created,
     status: order.status,
     buyerTotal: order.total_amount,
-    items: items.map((oi: any) => {
+    items: items.map((oi: any, idx: number) => {
       const lineRevenue = Number(oi.unit_price) * Number(oi.quantity);
       const share = orderRevenue > 0 ? lineRevenue / orderRevenue : 1 / (items.length || 1);
       return {
@@ -379,7 +427,8 @@ export async function getOrderDetail(accountId: string, orderId: string): Promis
         productTitle: String(oi.item.title ?? oi.item.id),
         unitPrice: oi.unit_price,
         quantity: oi.quantity,
-        mlCommission: oi.sale_fee ?? 0,
+        // Comisión TOTAL de la línea (no por unidad): ver resolveLineCommissions.
+        mlCommission: commissions[idx],
         shippingCost: orderShippingCost * share,
       };
     }),

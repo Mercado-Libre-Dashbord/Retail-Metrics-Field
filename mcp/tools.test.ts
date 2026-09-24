@@ -9,6 +9,7 @@ vi.mock("./auth", () => ({ getValidAccessToken: vi.fn().mockResolvedValue("token
 import {
   listProducts,
   getOrderDetail,
+  resolveLineCommissions,
   listOrders,
   listOrdersPage,
   listUnansweredQuestions,
@@ -382,7 +383,8 @@ describe("getOrderDetail", () => {
     const order = await getOrderDetail("acc1", "999");
     // Sin título en la respuesta de ML, el id es el fallback: preferimos un
     // nombre feo antes que una ficha de producto sin nombre.
-    expect(order.items).toEqual([{ productId: "MLA1", productTitle: "MLA1", unitPrice: 500, quantity: 2, mlCommission: 65, shippingCost: 0 }]);
+    // Sin pagos para contrastar, sale_fee se toma por unidad: 65 × 2.
+    expect(order.items).toEqual([{ productId: "MLA1", productTitle: "MLA1", unitPrice: 500, quantity: 2, mlCommission: 130, shippingCost: 0 }]);
     // Sin shipment no se pide /shipments/.../costs.
     expect(vi.mocked(mlFetch)).toHaveBeenCalledTimes(1);
   });
@@ -1174,5 +1176,41 @@ describe("getFullStock", () => {
 
     expect(rows.map((r) => r.inventoryId).sort()).toEqual([...ids].sort());
     expect(mlFetch).toHaveBeenCalledTimes(25);
+  });
+});
+
+describe("resolveLineCommissions", () => {
+  const base = { id: 1, total_amount: 1000, order_items: [{ unit_price: 500, quantity: 2, sale_fee: 65 }] };
+
+  it("con líneas de 1 unidad usa sale_fee tal cual, sin mirar los pagos", () => {
+    const r = resolveLineCommissions({ ...base, order_items: [{ unit_price: 1000, quantity: 1, sale_fee: 130 }] });
+    expect(r).toMatchObject({ commissions: [130], evidence: false });
+  });
+
+  it("si lo cobrado en los pagos coincide con sale_fee × cantidad, es por unidad", () => {
+    const r = resolveLineCommissions({ ...base, payments: [{ status: "approved", transaction_amount: 1000, marketplace_fee: 130 }] });
+    expect(r).toEqual({ commissions: [130], basis: "per_unit", evidence: true });
+  });
+
+  it("si lo cobrado coincide con sale_fee solo, es por línea", () => {
+    const r = resolveLineCommissions({ ...base, payments: [{ status: "approved", transaction_amount: 1000, marketplace_fee: 65 }] });
+    expect(r).toEqual({ commissions: [65], basis: "per_line", evidence: true });
+  });
+
+  it("ignora pagos que cubren más que esta orden (carrito) y usa la lectura por defecto", () => {
+    const r = resolveLineCommissions({ ...base, payments: [{ status: "approved", transaction_amount: 3000, marketplace_fee: 65 }] });
+    expect(r).toEqual({ commissions: [130], basis: "per_unit", evidence: false });
+  });
+
+  it("no cuenta pagos rechazados", () => {
+    const r = resolveLineCommissions({
+      ...base,
+      payments: [
+        { status: "rejected", transaction_amount: 1000, marketplace_fee: 65 },
+        { status: "approved", transaction_amount: 1000, marketplace_fee: 130 },
+      ],
+    });
+    expect(r.basis).toBe("per_unit");
+    expect(r.evidence).toBe(true);
   });
 });

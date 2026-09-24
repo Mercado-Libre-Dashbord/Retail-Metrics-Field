@@ -10,6 +10,7 @@ import { NoAccountState } from "./NoAccountState";
 import { PeriodBar } from "./PeriodBar";
 import { Period, rangeForPeriod, toDateStr } from "@/lib/period";
 import { countsAsRevenue } from "@/lib/order-status";
+import { interpretCommissionCheck, type CommissionCheckInput } from "@/lib/commission-check";
 
 interface PreviousTotals {
   orders: number;
@@ -62,6 +63,7 @@ interface BillingBucket {
 
 interface Billing {
   available: boolean;
+  commissionCheck?: CommissionCheckInput | null;
   buckets: BillingBucket[];
   total: number;
   charges?: number;
@@ -1064,6 +1066,15 @@ export default function HomePage() {
               </tbody>
             </table>
           </div>
+          {billing.commissionCheck && (() => {
+            const verdict = interpretCommissionCheck(billing.commissionCheck);
+            return (
+              <div className={verdict.status === "ok" ? "check-box check-ok" : "check-box check-warn"} role="status">
+                <strong>{verdict.status === "ok" ? "✓ " : "⚠ "}{verdict.title}</strong>
+                <p>{verdict.detail}</p>
+              </div>
+            );
+          })()}
           <details className="explain-box">
             <summary>¿Qué es esta tabla?</summary>
             <p>

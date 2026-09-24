@@ -55,4 +55,28 @@ describe("GET /api/billing", () => {
     const body = await (await GET(request)).json();
     expect(body).toEqual({ available: false, buckets: [], total: 0 });
   });
+
+  it("concilia la comisión orden por orden contra lo que descontó la app", async () => {
+    const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes("information_schema.columns")) return { rows: [{ table_name: "billing_charges", column_name: "detail_id" }] };
+      if (sql.includes("FROM order_items")) {
+        return { rows: [{ orderId: "O1", commission: 1000, multiUnit: false }, { orderId: "O2", commission: 500, multiUnit: true }] };
+      }
+      return {
+        rows: [
+          { orderId: "O1", concept: "Comisión por venta", detailType: null, detailSubType: null, amount: 1210 },
+          { orderId: "O2", concept: "Comisión por venta", detailType: null, detailSubType: null, amount: 605 },
+          { orderId: "O1", concept: "Mercado Envios charge", detailType: null, detailSubType: null, amount: 900 },
+        ],
+      };
+    });
+    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
+
+    const body = await (await GET(request)).json();
+
+    expect(body.commissionCheck).toMatchObject({ orders: 2, billed: 1815, calculated: 1500, multiUnitOrders: 1, ivaIsCost: false });
+    expect(body.commissionCheck.ratio).toBeCloseTo(1.21);
+    expect(body.commissionCheck.multiUnitRatio).toBeCloseTo(1.21);
+  });
 });
+

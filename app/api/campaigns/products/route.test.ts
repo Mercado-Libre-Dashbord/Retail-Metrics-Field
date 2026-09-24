@@ -34,7 +34,8 @@ describe("GET /api/campaigns/products", () => {
     const body = await (await GET(req())).json();
 
     expect(body).toEqual([
-      { productId: "MLA1", title: "Mochila", revenue: 12591, adSpend: 453.69, netProfit: -6332.46, roas: 12591 / 453.69, recommendation: "pausar" },
+      { productId: "MLA1", title: "Mochila", revenue: 12591, adSpend: 453.69, netProfit: -6332.46, roas: 12591 / 453.69,
+        acos: 453.69 / 12591, breakevenAcos: (-6332.46 + 453.69) / 12591, maxAdSpend: 0, recommendation: "pausar" },
     ]);
   });
 

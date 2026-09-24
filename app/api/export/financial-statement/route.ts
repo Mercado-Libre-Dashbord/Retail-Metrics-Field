@@ -4,7 +4,7 @@ import { withScope } from "@/db/client";
 import { hasColumn } from "@/db/schema-capabilities";
 import { resolveCurrentAccount } from "@/lib/current-account";
 import { revenueStatusFilter } from "@/lib/order-status";
-import { recommendAdsAction } from "@/lib/ads-recommendation";
+import { recommendAdsAction, acosMetrics } from "@/lib/ads-recommendation";
 
 export const runtime = "nodejs";
 /** Movimientos puede tener decenas de miles de filas (todo el historial). */
@@ -220,6 +220,8 @@ const PRODUCT_COLUMNS: { header: string; key: string; width: number; fmt?: strin
   { header: "IVA", key: "iva", width: 14, fmt: CURRENCY_FMT, sum: true },
   { header: "Ganancia neta", key: "netProfit", width: 16, fmt: CURRENCY_FMT, sum: true },
   { header: "Margen neto", key: "marginPct", width: 12, fmt: PCT_FMT },
+  { header: "ACOS", key: "acos", width: 10, fmt: PCT_FMT },
+  { header: "ACOS de equilibrio", key: "breakevenAcos", width: 18, fmt: PCT_FMT },
   { header: "Recomendación de Ads", key: "adsRecommendation", width: 20 },
 ];
 
@@ -253,9 +255,17 @@ function addProductSheet(workbook: ExcelJS.Workbook, products: ProductRow[]) {
         p.adSpend > 0
           ? { pausar: "Pausar", mantener: "Mantener", aumentar: "Aumentar" }[recommendAdsAction(p.netProfit, p.adSpend)]
           : "Sin datos de Ads";
-      return PRODUCT_COLUMNS.map((c) =>
-        c.key === "marginPct" ? marginPct : c.key === "adsRecommendation" ? adsRecommendation : p[c.key as keyof ProductRow]
-      );
+      // Misma cuenta que la pantalla de Campañas (ver acosMetrics). Sin
+      // gasto en Ads el ACOS queda vacío, no en 0%: no es que la publicidad
+      // rinda perfecto, es que no hubo.
+      const { acos, breakevenAcos } = acosMetrics(p.revenue, p.netProfit, p.adSpend);
+      const derived: Record<string, unknown> = {
+        marginPct,
+        adsRecommendation,
+        acos: p.adSpend > 0 ? acos : null,
+        breakevenAcos,
+      };
+      return PRODUCT_COLUMNS.map((c) => (c.key in derived ? derived[c.key] : p[c.key as keyof ProductRow]));
     }),
   });
 

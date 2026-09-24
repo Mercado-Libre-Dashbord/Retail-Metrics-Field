@@ -161,15 +161,19 @@ describe("GET /api/export/financial-statement", () => {
     const sheet = wb.getWorksheet("Por Producto")!;
 
     expect(sheet.getRow(1).getCell("A").value).toBe("Producto");
-    expect(sheet.getRow(1).getCell("N").value).toBe("Recomendación de Ads");
+    expect(sheet.getRow(1).getCell("N").value).toBe("ACOS");
+    expect(sheet.getRow(1).getCell("O").value).toBe("ACOS de equilibrio");
+    expect(sheet.getRow(1).getCell("P").value).toBe("Recomendación de Ads");
     expect(sheet.getRow(2).getCell("A").value).toBe("El más rentable");
     expect(sheet.getRow(2).getCell("E").value).toBe(5000); // revenue
     expect(sheet.getRow(2).getCell("L").value).toBe(2440); // netProfit
-    expect(sheet.getRow(2).getCell("N").value).toBe("Aumentar");
+    expect(sheet.getRow(2).getCell("P").value).toBe("Aumentar");
     const pierdeRow = [2, 3, 4].map((r) => sheet.getRow(r)).find((r) => r.getCell("A").value === "Pierde con Ads")!;
-    expect(pierdeRow.getCell("N").value).toBe("Pausar");
+    expect(pierdeRow.getCell("P").value).toBe("Pausar");
     const sinAdsRow = [2, 3, 4].map((r) => sheet.getRow(r)).find((r) => r.getCell("A").value === "Sin publicidad")!;
-    expect(sinAdsRow.getCell("N").value).toBe("Sin datos de Ads");
+    expect(sinAdsRow.getCell("P").value).toBe("Sin datos de Ads");
+    // Sin gasto en Ads, el ACOS queda vacío (no 0%, que se leería como "rinde perfecto").
+    expect(sinAdsRow.getCell("N").value).toBeNull();
     const totalsRow = sheet.getRow(5);
     expect(totalsRow.getCell("A").value).toBe("TOTAL");
     expectSubtotalFormula(totalsRow.getCell("E"), "TablaPorProducto", "Facturación bruta");

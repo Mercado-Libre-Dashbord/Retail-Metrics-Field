@@ -17,3 +17,27 @@ export function recommendAdsAction(netProfit: number, adSpend: number): AdsRecom
   if (marginBeforeAds > 0 && adSpend < marginBeforeAds * 0.5) return "aumentar";
   return "mantener";
 }
+
+export interface AcosMetrics {
+  /** Publicidad ÷ facturación del producto. Mercado Libre no separa qué
+   * ventas vinieron puntualmente de un anuncio, así que se mide contra TODA la
+   * facturación de la publicación (técnicamente un TACOS por producto). */
+  acos: number | null;
+  /** Hasta qué ACOS la publicidad todavía no se come la ganancia: el margen
+   * antes de Ads (ya con comisión, envío, costo e impuestos) sobre la
+   * facturación. Por encima de este número, cada venta con Ads pierde plata.
+   * Negativo = el producto pierde aun sin publicidad. */
+  breakevenAcos: number | null;
+  /** Lo máximo que se podría haber gastado en Ads en el período sin quedar
+   * en pérdida (el margen antes de Ads). 0 si ni sin Ads da ganancia. */
+  maxAdSpend: number;
+}
+
+export function acosMetrics(revenue: number, netProfit: number, adSpend: number): AcosMetrics {
+  const marginBeforeAds = netProfit + adSpend;
+  return {
+    acos: revenue > 0 ? adSpend / revenue : null,
+    breakevenAcos: revenue > 0 ? marginBeforeAds / revenue : null,
+    maxAdSpend: Math.max(0, marginBeforeAds),
+  };
+}

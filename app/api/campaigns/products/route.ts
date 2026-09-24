@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withScope } from "@/db/client";
 import { resolveCurrentAccount } from "@/lib/current-account";
 import { revenueStatusFilter } from "@/lib/order-status";
-import { recommendAdsAction, type AdsRecommendation } from "@/lib/ads-recommendation";
+import { recommendAdsAction, acosMetrics, type AdsRecommendation } from "@/lib/ads-recommendation";
 
 export const runtime = "nodejs";
 
@@ -15,6 +15,10 @@ export interface AdsProductPerformance {
   /** Facturación ÷ Publicidad. Null sin gasto (no debería pasar: la
    * consulta ya filtra a productos con adSpend > 0). */
   roas: number | null;
+  /** Ver acosMetrics en lib/ads-recommendation.ts. */
+  acos: number | null;
+  breakevenAcos: number | null;
+  maxAdSpend: number;
   recommendation: AdsRecommendation;
 }
 
@@ -67,6 +71,7 @@ export async function GET(request: NextRequest) {
       adSpend,
       netProfit,
       roas: adSpend > 0 ? revenue / adSpend : null,
+      ...acosMetrics(revenue, netProfit, adSpend),
       recommendation: recommendAdsAction(netProfit, adSpend),
     };
   });

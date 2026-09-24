@@ -78,4 +78,28 @@ describe("healRecentCostEdits (Postgres real)", () => {
 
     expect(healed).toEqual([]);
   });
+
+  it("pendingOrderIds solo vuelve a pedir órdenes viejas con alguna línea de más de una unidad", async () => {
+    const { withScope } = await import("@/db/client");
+    const { createAccount } = await import("@/db/accounts");
+    const { pendingOrderIds } = await import("./sync-service");
+
+    const account = await withScope({ isAdmin: true }, (client) =>
+      createAccount(client, "Cuenta comisión", `comision.${nanoid(6)}@example.com`)
+    );
+
+    const pending = await withScope({ accountId: account.id }, async (client) => {
+      for (const [id, qty] of [["UNA", 1], ["DOS", 2]] as const) {
+        await client.query(`INSERT INTO orders (account_id, id, date_created, status, sync_version) VALUES ($1, $2, now(), 'paid', 1)`, [account.id, id]);
+        await client.query(
+          `INSERT INTO order_items (account_id, order_id, product_id, unit_price, quantity, ml_commission, shipping_cost) VALUES ($1, $2, 'MLA1', 100, $3, 13, 0)`,
+          [account.id, id, qty]
+        );
+      }
+      return pendingOrderIds(client, account.id, ["UNA", "DOS", "NUEVA"]);
+    });
+
+    expect(pending.sort()).toEqual(["DOS", "NUEVA"]);
+  });
 });
+
