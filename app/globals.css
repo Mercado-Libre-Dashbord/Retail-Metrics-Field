@@ -1107,3 +1107,31 @@ table th.num { font-variant-numeric: tabular-nums; }
 /* La caja de explicación deja de parecer un bloque de código y pasa a ser una
    nota al pie: está para quien la busca, no para competir con los datos. */
 .explain-box { border-radius: var(--radius-md); }
+
+/* Productos: panel de pérdida con acciones y desglose del beneficio */
+.missing-cost-list li.loss-row { align-items: center; }
+.loss-actions { display: flex; align-items: center; gap: var(--space-2); flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+.loss-twins { color: var(--negative); font-weight: 600; }
+.twins-toggle { display: flex; align-items: center; gap: 6px; margin: 0; max-width: 260px; line-height: 1.3; }
+.link-num {
+  background: none; border: none; padding: 0; font: inherit; color: inherit; cursor: pointer;
+  text-decoration: underline dotted; text-underline-offset: 3px; font-variant-numeric: tabular-nums;
+}
+.link-num:hover { text-decoration-style: solid; }
+.breakdown-panel {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md, 12px);
+  padding: var(--space-4); margin-bottom: var(--space-4); display: flex; flex-direction: column; gap: var(--space-3);
+}
+.breakdown-head { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--space-3); }
+.breakdown-title { margin: 0; font-size: 16px; line-height: 1.3; }
+.breakdown-note { margin: 0; font-size: 13px; padding: 8px 12px; border-radius: 8px; background: var(--surface-2, #f1f0ec); }
+.breakdown-waterfall { width: 100%; max-width: 560px; border-collapse: collapse; font-size: 13px; }
+.breakdown-waterfall th { text-align: left; font-size: 11px; color: var(--text-dim); font-weight: 600; padding: 4px 8px; }
+.breakdown-waterfall td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.breakdown-waterfall .num { text-align: right; font-variant-numeric: tabular-nums; }
+.breakdown-waterfall tr.breakdown-biggest td { font-weight: 700; }
+.breakdown-waterfall tr.breakdown-total td { font-weight: 700; border-bottom: none; border-top: 2px solid var(--text); }
+@media (max-width: 640px) {
+  .missing-cost-list li.loss-row { flex-direction: column; align-items: stretch; }
+  .loss-actions { justify-content: flex-start; }
+}

@@ -3,7 +3,7 @@ import { withScope } from "@/db/client";
 import { hasColumn } from "@/db/schema-capabilities";
 import { resolveCurrentAccount } from "@/lib/current-account";
 import { revenueStatusFilter } from "@/lib/order-status";
-import { recalculateProduct } from "@/sync/sync-service";
+import { recalculateProduct, healRecentCostEdits } from "@/sync/sync-service";
 import { appliesIva } from "@/db/accounts";
 
 export const runtime = "nodejs";
@@ -35,6 +35,20 @@ export async function GET(request: NextRequest) {
     const costFxCol = hasCostFx
       ? `(SELECT exchange_rate FROM product_costs pc WHERE pc.account_id = p.account_id AND pc.product_id = p.id ORDER BY pc.valid_from DESC LIMIT 1) as "currentCostExchangeRate",`
       : `NULL::double precision as "currentCostExchangeRate",`;
+    // Antes de leer el beneficio, se corrigen las ventas de productos con un
+    // costo editado hace poco que hayan quedado con el costo viejo aplicado
+    // (ver healRecentCostEdits). Si falla, se muestra lo que hay: nunca debe
+    // tirar abajo la pantalla entera.
+    try {
+      await client.query("SAVEPOINT heal_costs");
+      const hasIva = await hasColumn(client, "order_items", "iva_applied");
+      await healRecentCostEdits(client, account.id, hasIva, account.otherTaxRate, appliesIva(account.taxCondition));
+      await client.query("RELEASE SAVEPOINT heal_costs");
+    } catch (err) {
+      console.warn("No se pudieron recalcular costos editados recientemente:", (err as Error).message);
+      await client.query("ROLLBACK TO SAVEPOINT heal_costs").catch(() => {});
+    }
+
     const result = await client.query(
       `SELECT p.id, p.title, p.sku, p.current_price as "currentPrice", p.stock,
               ${thumbnailColumn} as thumbnail,

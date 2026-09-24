@@ -53,7 +53,17 @@ function fmtUsd(n: number) {
  * estar perdiendo plata en la práctica si el envío gratis o la comisión real
  * se comieron más de lo esperado — eso es lo que esta alerta agarra.
  */
-function NegativeMarginPanel({ products }: { products: Product[] }) {
+function NegativeMarginPanel({
+  products,
+  sameTitleCount,
+  onShowBreakdown,
+  onGoTo,
+}: {
+  products: Product[];
+  sameTitleCount: (p: Product) => number;
+  onShowBreakdown: (p: Product) => void;
+  onGoTo: (p: Product) => void;
+}) {
   const losing = products
     .filter((p) => p.negativeMargin)
     .sort((a, b) => (a.avgProfitPerUnit ?? 0) - (b.avgProfitPerUnit ?? 0));
@@ -62,18 +72,198 @@ function NegativeMarginPanel({ products }: { products: Product[] }) {
     <div className="missing-cost-panel" role="status">
       <p className="missing-cost-head">
         <strong>{losing.length} producto(s) vendiéndose a pérdida real.</strong> En promedio, cada unidad vendida
-        dejó una ganancia neta negativa (ya con comisión, envío e impuestos reales descontados).
+        dejó una ganancia neta negativa (ya con comisión, envío e impuestos reales descontados). Tocá{" "}
+        <em>Ver desglose</em> para ver de dónde sale la pérdida, venta por venta.
       </p>
       <ul className="missing-cost-list">
-        {losing.slice(0, 10).map((p) => (
-          <li key={p.id}>
-            <span className="missing-cost-title">{p.title}</span>
-            <span className="missing-cost-units missing-cost">{fmt(p.avgProfitPerUnit ?? 0)} / unidad</span>
-          </li>
-        ))}
+        {losing.slice(0, 10).map((p) => {
+          const twins = sameTitleCount(p);
+          return (
+            <li key={p.id} className="loss-row">
+              <span className="missing-cost-title">
+                {p.title}
+                <span className="cell-sub">
+                  Publicación {p.id}
+                  {twins > 1 && (
+                    <span className="loss-twins"> · Hay {twins} publicaciones con este nombre: revisá que el costo esté cargado en esta</span>
+                  )}
+                </span>
+              </span>
+              <span className="loss-actions">
+                <span className="missing-cost-units missing-cost">{fmt(p.avgProfitPerUnit ?? 0)} / unidad</span>
+                <button type="button" className="btn btn-secondary btn-sm" onClick={() => onShowBreakdown(p)}>
+                  Ver desglose
+                </button>
+                <button type="button" className="btn btn-secondary btn-sm" onClick={() => onGoTo(p)}>
+                  Ir al producto
+                </button>
+              </span>
+            </li>
+          );
+        })}
       </ul>
       {losing.length > 10 && <p className="missing-cost-foot">Y {losing.length - 10} más.</p>}
     </div>
+  );
+}
+
+interface BreakdownSale {
+  orderId: string;
+  date: string;
+  quantity: number;
+  revenue: number;
+  commission: number;
+  shipping: number;
+  ads: number;
+  cost: number | null;
+  costPerUnit: number | null;
+  taxes: number;
+  iva: number;
+  netProfit: number | null;
+}
+
+interface ProductBreakdown {
+  productId: string;
+  unitsSold: number;
+  totals: { revenue: number; commission: number; shipping: number; ads: number; cost: number; taxes: number; iva: number; netProfit: number };
+  healed: number;
+  sales: BreakdownSale[];
+}
+
+/**
+ * De dónde sale el beneficio de una publicación: venta − cada descuento,
+ * por unidad promedio y venta por venta. Es la forma de comprobar a simple
+ * vista qué costo se aplicó y qué se está comiendo la ganancia (envío,
+ * comisión, publicidad), sin tener que bajar un Excel.
+ */
+function BreakdownPanel({
+  product,
+  data,
+  loading,
+  error,
+  onClose,
+}: {
+  product: Product;
+  data: ProductBreakdown | null;
+  loading: boolean;
+  error: string;
+  onClose: () => void;
+}) {
+  const units = data?.unitsSold ?? 0;
+  const perUnit = (n: number) => (units > 0 ? n / units : 0);
+  const lines: { label: string; value: number; sign: 1 | -1 }[] = data
+    ? [
+        { label: "Venta", value: data.totals.revenue, sign: 1 },
+        { label: "Comisión ML", value: data.totals.commission, sign: -1 },
+        { label: "Envío", value: data.totals.shipping, sign: -1 },
+        { label: "Publicidad", value: data.totals.ads, sign: -1 },
+        { label: "Costo del producto", value: data.totals.cost, sign: -1 },
+        { label: "Otros impuestos", value: data.totals.taxes, sign: -1 },
+        { label: "IVA a pagar", value: data.totals.iva, sign: -1 },
+      ]
+    : [];
+  const biggest = lines.filter((l) => l.sign === -1).sort((a, b) => b.value - a.value)[0];
+  return (
+    <section className="breakdown-panel" aria-label={`Desglose de ${product.title}`}>
+      <div className="breakdown-head">
+        <div style={{ minWidth: 0 }}>
+          <h2 className="breakdown-title">{product.title}</h2>
+          <span className="cell-sub">
+            Publicación {product.id} · costo cargado hoy:{" "}
+            {product.currentCost === null ? "ninguno" : fmt(product.currentCost)}
+          </span>
+        </div>
+        <button type="button" className="btn btn-secondary btn-sm" onClick={onClose}>
+          Cerrar
+        </button>
+      </div>
+      {loading && <p className="field-hint">Cargando desglose…</p>}
+      {error && <p className="field-error">{error}</p>}
+      {data && !loading && (
+        <>
+          {data.healed > 0 && (
+            <p className="breakdown-note">
+              Se corrigieron {data.healed} venta(s) que tenían aplicado un costo viejo. El beneficio de abajo ya usa el
+              costo cargado hoy.
+            </p>
+          )}
+          {units === 0 ? (
+            <p className="field-hint">Esta publicación no tiene ventas en el período elegido.</p>
+          ) : (
+            <>
+              <table className="breakdown-waterfall">
+                <thead>
+                  <tr>
+                    <th />
+                    <th className="num">Por unidad</th>
+                    <th className="num">Total ({units} u.)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {lines.map((l) => (
+                    <tr key={l.label} className={biggest && l === biggest && l.value > 0 ? "breakdown-biggest" : ""}>
+                      <td>{l.sign === -1 ? `− ${l.label}` : l.label}</td>
+                      <td className="num">{fmt(perUnit(l.value))}</td>
+                      <td className="num">{fmt(l.value)}</td>
+                    </tr>
+                  ))}
+                  <tr className="breakdown-total">
+                    <td>= Beneficio</td>
+                    <td className={`num ${data.totals.netProfit < 0 ? "missing-cost" : ""}`}>{fmt(perUnit(data.totals.netProfit))}</td>
+                    <td className={`num ${data.totals.netProfit < 0 ? "missing-cost" : ""}`}>{fmt(data.totals.netProfit)}</td>
+                  </tr>
+                </tbody>
+              </table>
+              {biggest && biggest.value > 0 && (
+                <p className="field-hint">
+                  Lo que más pesa: <strong>{biggest.label}</strong> ({fmt(perUnit(biggest.value))} por unidad,{" "}
+                  {data.totals.revenue > 0 ? `${((biggest.value / data.totals.revenue) * 100).toFixed(0)}%` : "—"} de la venta).
+                </p>
+              )}
+              <div className="table-wrap table-scroll table-compact">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Fecha</th>
+                      <th>Orden</th>
+                      <th className="num">Cant.</th>
+                      <th className="num">Venta</th>
+                      <th className="num">Comisión</th>
+                      <th className="num">Envío</th>
+                      <th className="num">Publicidad</th>
+                      <th className="num">Costo unit. aplicado</th>
+                      <th className="num">Impuestos + IVA</th>
+                      <th className="num">Beneficio</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.sales.slice(0, 30).map((sale) => (
+                      <tr key={`${sale.orderId}-${sale.date}`}>
+                        <td>{new Date(sale.date).toLocaleDateString("es-AR")}</td>
+                        <td>{sale.orderId}</td>
+                        <td className="num">{sale.quantity}</td>
+                        <td className="num">{fmt(sale.revenue)}</td>
+                        <td className="num">{fmt(sale.commission)}</td>
+                        <td className="num">{fmt(sale.shipping)}</td>
+                        <td className="num">{fmt(sale.ads)}</td>
+                        <td className={`num ${sale.costPerUnit === null ? "missing-cost" : ""}`}>
+                          {sale.costPerUnit === null ? "Sin costo" : fmt(sale.costPerUnit)}
+                        </td>
+                        <td className="num">{fmt(sale.taxes + sale.iva)}</td>
+                        <td className={`num ${sale.netProfit !== null && sale.netProfit < 0 ? "missing-cost" : ""}`}>
+                          {sale.netProfit === null ? "—" : fmt(sale.netProfit)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {data.sales.length > 30 && <p className="field-hint">Mostrando las 30 ventas más recientes de {data.sales.length}.</p>}
+            </>
+          )}
+        </>
+      )}
+    </section>
   );
 }
 
@@ -309,6 +499,21 @@ export default function ProductosPage() {
   const [confirmingDeleteCostId, setConfirmingDeleteCostId] = useState<string | null>(null);
   const [deletingCostId, setDeletingCostId] = useState<string | null>(null);
 
+  // Desglose "de dónde sale el beneficio" de una publicación puntual.
+  const [breakdownFor, setBreakdownFor] = useState<Product | null>(null);
+  const [breakdown, setBreakdown] = useState<ProductBreakdown | null>(null);
+  const [breakdownLoading, setBreakdownLoading] = useState(false);
+  const [breakdownError, setBreakdownError] = useState("");
+  const breakdownRef = useRef<HTMLDivElement | null>(null);
+
+  // Mercado Libre usa un ID distinto por publicación aunque el título sea
+  // idéntico (catálogo + publicación propia, relanzadas, etc.). Cargar el
+  // costo en una y no en la otra dejaba la pérdida "sin corregir" en la otra,
+  // y parecía que el beneficio no se actualizaba. Por defecto, el costo (y su
+  // borrado) se aplica a todas las publicaciones con el mismo nombre; se
+  // puede destildar por fila si de verdad son productos distintos.
+  const [applyToTwins, setApplyToTwins] = useState<Record<string, boolean>>({});
+
   // Costo en edición, en las DOS monedas a la vez: escribir en una recalcula
   // la otra con el tipo de cambio de abajo, así nunca queda ambigüedad sobre
   // en qué moneda se está guardando un número (un botón "ARS/USD" al lado de
@@ -422,18 +627,20 @@ export default function ProductosPage() {
   const [mlErrors, setMlErrors] = useState<Record<string, string>>({});
   const [mlSavingId, setMlSavingId] = useState<string | null>(null);
 
+  // "Último mes completo" y "Rango personalizado" necesitan que
+  // Vendidas/Beneficio vengan acotados a ESE período, no a todo el
+  // historial — si no, un producto que también vendió después mostraría
+  // números mezclados con ventas de otro momento.
+  function periodParams(): Record<string, string> {
+    if (soldWithin === "lastFullMonth") return lastFullMonthRange();
+    if (soldWithin === "custom" && customFrom && customTo) return { from: customFrom, to: customTo };
+    return {};
+  }
+
   function load() {
     setLoadError("");
-    // "Último mes completo" y "Rango personalizado" necesitan que
-    // Vendidas/Beneficio vengan acotados a ESE período, no a todo el
-    // historial — si no, un producto que también vendió después mostraría
-    // números mezclados con ventas de otro momento.
-    let query = "";
-    if (soldWithin === "lastFullMonth") {
-      query = `?${new URLSearchParams(lastFullMonthRange())}`;
-    } else if (soldWithin === "custom" && customFrom && customTo) {
-      query = `?${new URLSearchParams({ from: customFrom, to: customTo })}`;
-    }
+    const params = new URLSearchParams(periodParams()).toString();
+    const query = params ? `?${params}` : "";
     fetch(`/api/products${query}`)
       .then(async (r) => {
         if (r.status === 401) { setNoAccount(true); return; }
@@ -453,6 +660,45 @@ export default function ProductosPage() {
   // y "Rango personalizado" traigan los números acotados a ese período en vez
   // de a todo el historial.
   useEffect(load, [soldWithin, customFrom, customTo]);
+
+  function titleKey(title: string) {
+    return title.trim().toLowerCase().replace(/\s+/g, " ");
+  }
+
+  const productsByTitle = new Map<string, Product[]>();
+  for (const p of products ?? []) {
+    const key = titleKey(p.title);
+    productsByTitle.set(key, [...(productsByTitle.get(key) ?? []), p]);
+  }
+
+  function twinsOf(p: Product): Product[] {
+    return (productsByTitle.get(titleKey(p.title)) ?? []).filter((other) => other.id !== p.id);
+  }
+
+  function showBreakdown(p: Product) {
+    setBreakdownFor(p);
+    setBreakdown(null);
+    setBreakdownError("");
+    setBreakdownLoading(true);
+    const params = new URLSearchParams({ productId: p.id, ...periodParams() });
+    fetch(`/api/products/breakdown?${params}`)
+      .then(async (r) => {
+        if (!r.ok) throw new Error(String(r.status));
+        const data: ProductBreakdown = await r.json();
+        setBreakdown(data);
+        // Si el servidor tuvo que corregir ventas con un costo viejo, la
+        // tabla de abajo quedó desactualizada: se vuelve a pedir.
+        if (data.healed > 0) load();
+      })
+      .catch(() => setBreakdownError("No se pudo cargar el desglose. Probá de nuevo."))
+      .finally(() => setBreakdownLoading(false));
+    setTimeout(() => breakdownRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+  }
+
+  function goToProduct(p: Product) {
+    setNameFilter(p.id);
+    setTimeout(() => document.getElementById(`cost-ars-${p.id}`)?.focus(), 50);
+  }
 
   if (noAccount) {
     return (
@@ -570,6 +816,21 @@ export default function ProductosPage() {
         setErrors((prev) => ({ ...prev, [productId]: data.error ?? "No se pudo guardar el costo." }));
         return;
       }
+      const twins = product && applyToTwins[productId] !== false ? twinsOf(product) : [];
+      for (const twin of twins) {
+        const res = await patchProduct({
+          productId: twin.id,
+          cost: rawCost,
+          exchangeRate: hasValidRate ? rate : null,
+          costCurrency: lastEditedCurrency[productId] ?? "ARS",
+        });
+        if (!res.ok) {
+          setErrors((prev) => ({
+            ...prev,
+            [productId]: `Se guardó acá, pero no en la publicación ${twin.id}: ${res.data.error ?? "error desconocido"}.`,
+          }));
+        }
+      }
       setCostDraft((prev) => {
         const next = { ...prev };
         delete next[productId];
@@ -585,12 +846,17 @@ export default function ProductosPage() {
     setErrors((prev) => ({ ...prev, [productId]: "" }));
     setDeletingCostId(productId);
     try {
-      const res = await fetch(`/api/products?productId=${encodeURIComponent(productId)}`, { method: "DELETE" });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setErrors((prev) => ({ ...prev, [productId]: data.error ?? "No se pudo eliminar el costo." }));
-        setConfirmingDeleteCostId(null);
-        return;
+      const product = products?.find((p) => p.id === productId);
+      const twins = product && applyToTwins[productId] !== false ? twinsOf(product).filter((t) => t.currentCost !== null) : [];
+      for (const id of [productId, ...twins.map((t) => t.id)]) {
+        const res = await fetch(`/api/products?productId=${encodeURIComponent(id)}`, { method: "DELETE" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setErrors((prev) => ({ ...prev, [productId]: data.error ?? `No se pudo eliminar el costo de ${id}.` }));
+          setConfirmingDeleteCostId(null);
+          load();
+          return;
+        }
       }
       setCostDraft((prev) => {
         const next = { ...prev };
@@ -622,7 +888,25 @@ export default function ProductosPage() {
         (IIBB, internos) se configura una sola vez en <a href="/configuracion">Configuración</a>.
       </p>
       {loadError && <p className="field-error" role="alert" style={{ marginBottom: "var(--space-3)" }}>{loadError}</p>}
-      {products && <NegativeMarginPanel products={products} />}
+      {products && (
+        <NegativeMarginPanel
+          products={products}
+          sameTitleCount={(p) => twinsOf(p).length + 1}
+          onShowBreakdown={showBreakdown}
+          onGoTo={goToProduct}
+        />
+      )}
+      <div ref={breakdownRef}>
+        {breakdownFor && (
+          <BreakdownPanel
+            product={products?.find((p) => p.id === breakdownFor.id) ?? breakdownFor}
+            data={breakdown}
+            loading={breakdownLoading}
+            error={breakdownError}
+            onClose={() => setBreakdownFor(null)}
+          />
+        )}
+      </div>
       {products && <LowStockPanel products={products} />}
       {products && products.length > 0 && (
         <>
@@ -821,7 +1105,13 @@ export default function ProductosPage() {
                       )}
                       <span style={{ minWidth: 0 }}>
                         <span className="cell-title" title={p.title}>{p.title}</span>
-                        {p.sku && <span className="cell-sub">SKU {p.sku}</span>}
+                        <span className="cell-sub">
+                          {p.id}
+                          {p.sku ? ` · SKU ${p.sku}` : ""}
+                          {twinsOf(p).length > 0 && (
+                            <span className="loss-twins"> · {twinsOf(p).length + 1} publicaciones con este nombre</span>
+                          )}
+                        </span>
                       </span>
                     </span>
                   </td>
@@ -877,7 +1167,13 @@ export default function ProductosPage() {
                   <td className="num">{p.unitsSold}</td>
                   <td>{p.lastSaleDate ? new Date(p.lastSaleDate).toLocaleDateString("es-AR") : "Nunca"}</td>
                   <td className={`num ${p.negativeMargin ? "missing-cost" : ""}`}>
-                    {p.totalProfit.toFixed(2)}
+                    {p.unitsSold > 0 ? (
+                      <button type="button" className="link-num" onClick={() => showBreakdown(p)} title="Ver de dónde sale este beneficio">
+                        {p.totalProfit.toFixed(2)}
+                      </button>
+                    ) : (
+                      p.totalProfit.toFixed(2)
+                    )}
                     {p.negativeMargin && (
                       <>
                         {" "}
@@ -955,6 +1251,16 @@ export default function ProductosPage() {
                             Eliminar costo
                           </button>
                         )
+                      )}
+                      {twinsOf(p).length > 0 && (
+                        <label className="field-hint twins-toggle">
+                          <input
+                            type="checkbox"
+                            checked={applyToTwins[p.id] !== false}
+                            onChange={(e) => setApplyToTwins((prev) => ({ ...prev, [p.id]: e.target.checked }))}
+                          />
+                          Aplicar también a {twinsOf(p).length === 1 ? "la otra publicación" : `las otras ${twinsOf(p).length} publicaciones`} con este nombre
+                        </label>
                       )}
                       {errors[p.id] && <p className="field-error">{errors[p.id]}</p>}
                     </div>

@@ -493,6 +493,48 @@ export async function recalculateProduct(
   return itemsResult.rows.length;
 }
 
+/**
+ * Red de seguridad para "cargué el costo nuevo y el beneficio no cambió":
+ * busca ventas cuyo costo aplicado no es el que corresponde según lo cargado
+ * hoy (mismo criterio que getCostEntryAtDate: el último vigente a la fecha
+ * de la venta, o el primero cargado si la venta es anterior a todos), solo
+ * entre productos con un costo cargado hace poco — así es barato
+ * aunque la cuenta tenga decenas de miles de ventas — y las recalcula.
+ */
+export async function healRecentCostEdits(
+  db: QueryExecutor,
+  accountId: string,
+  hasIva: boolean,
+  otherTaxRate = 0,
+  appliesIva = true,
+  sinceDays = 14
+): Promise<string[]> {
+  const stale = await db.query<{ productid: string }>(
+    `SELECT DISTINCT oi.product_id as productId
+       FROM order_items oi JOIN orders o ON o.account_id = oi.account_id AND o.id = oi.order_id
+      WHERE oi.account_id = $1
+        AND oi.product_id IN (
+          SELECT product_id FROM product_costs
+           WHERE account_id = $1 AND valid_from >= now() - ($2::int * interval '1 day')
+        )
+        AND oi.cost_applied IS DISTINCT FROM COALESCE(
+          (SELECT pc.cost FROM product_costs pc
+            WHERE pc.account_id = oi.account_id AND pc.product_id = oi.product_id AND pc.valid_from <= o.date_created
+            ORDER BY pc.valid_from DESC LIMIT 1),
+          (SELECT pc.cost FROM product_costs pc
+            WHERE pc.account_id = oi.account_id AND pc.product_id = oi.product_id
+            ORDER BY pc.valid_from ASC LIMIT 1)
+        )
+      LIMIT 50`,
+    [accountId, sinceDays]
+  );
+  const ids = stale.rows.map((r) => r.productid);
+  for (const productId of ids) {
+    await recalculateProduct(db, accountId, productId, hasIva, otherTaxRate, appliesIva);
+  }
+  return ids;
+}
+
 export async function recalculate(
   db: QueryExecutor,
   accountId: string,
@@ -699,16 +741,19 @@ async function reallocateAdsCosts(
   // si cargás el costo de un producto después, las ventas viejas de ese
   // producto nunca se reinsertan — sin esto, se quedarían con cost_applied
   // congelado en null para siempre en vez de tomar el costo recién cargado.
-  const costsResult = await db.query<{ productid: string; cost: number; tax: number; validfrom: string | Date }>(
-    `SELECT product_id as productId, cost, tax, valid_from as validFrom FROM product_costs WHERE account_id = $1`,
-    [accountId]
-  );
-  const costsByProduct = new Map<string, { cost: number; tax: number; validFrom: string }[]>();
-  for (const row of costsResult.rows) {
-    const list = costsByProduct.get(row.productid) ?? [];
-    list.push({ cost: Number(row.cost), tax: Number(row.tax), validFrom: new Date(row.validfrom).toISOString() });
-    costsByProduct.set(row.productid, list);
-  }
+  const loadCostsByProduct = async () => {
+    const costsResult = await db.query<{ productid: string; cost: number; tax: number; validfrom: string | Date }>(
+      `SELECT product_id as productId, cost, tax, valid_from as validFrom FROM product_costs WHERE account_id = $1`,
+      [accountId]
+    );
+    const byProduct = new Map<string, { cost: number; tax: number; validFrom: string }[]>();
+    for (const row of costsResult.rows) {
+      const list = byProduct.get(row.productid) ?? [];
+      list.push({ cost: Number(row.cost), tax: Number(row.tax), validFrom: new Date(row.validfrom).toISOString() });
+      byProduct.set(row.productid, list);
+    }
+    return byProduct;
+  };
 
   let i = offset;
   while (i < items.length) {
@@ -716,6 +761,13 @@ async function reallocateAdsCosts(
     // agotado al entrar: evita quedar en un ciclo de "no avanzó nada" si a
     // quien llama se le ocurre pasar un deadline ya vencido.
     if (i > offset && Date.now() >= deadline) break;
+
+    // Los costos se releen en CADA lote, no una sola vez al arrancar: esta
+    // pasada puede durar decenas de segundos, y si el vendedor corrige un
+    // costo mientras tanto, un lote armado con la foto vieja pisaba el
+    // recálculo recién hecho — el margen mostraba el costo nuevo pero el
+    // beneficio quedaba congelado con el viejo.
+    const costsByProduct = await loadCostsByProduct();
 
     const batch = items.slice(i, i + batchSize);
     const values: unknown[] = [];
