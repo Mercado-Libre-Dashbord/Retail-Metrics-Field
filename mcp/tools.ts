@@ -637,22 +637,34 @@ const ADS_ITEMS_PAGE_SIZE = 50;
  * Paginado: un catálogo con Ads activo en muchas publicaciones no entra en
  * una sola página de 50.
  */
+/** Cuántas páginas de ads/search se piden a la vez (ver fetchItemAdsTotals). */
+const ADS_PAGES_CONCURRENCY = 5;
+/** Techo de páginas por tramo: si la paginación viniera mal, no pide para siempre. */
+const ADS_MAX_PAGES = 200;
+
+/** El paso de Ads se pasó de su presupuesto de tiempo: ver getAdsSpend. */
+export class AdsTimeBudgetError extends Error {
+  constructor() {
+    super("Mercado Ads tardó más que el tiempo disponible para este paso del sync");
+    this.name = "AdsTimeBudgetError";
+  }
+}
+
 async function fetchItemAdsTotals(
   base: string,
   token: string,
   campaignId: string,
   dateFrom: string,
-  dateTo: string
+  dateTo: string,
+  deadline: number = Number.POSITIVE_INFINITY
 ): Promise<Map<string, number>> {
   const totals = new Map<string, number>();
-  let offset = 0;
   let sawAnyItem = false;
   let sawAnyCost = false;
   let sample: unknown = null;
-  // Techo de seguridad: si la paginación viniera mal (o ML no manda paging),
-  // esto no puede quedar pidiendo para siempre.
-  for (let page = 0; page < 200; page++) {
-    const res = await listOrEmpty(
+
+  const fetchPage = (offset: number) =>
+    listOrEmpty(
       () =>
         mlFetch(
           `${base}/ads/search?campaign_id=${campaignId}&date_from=${dateFrom}&date_to=${dateTo}&metrics=cost&limit=${ADS_ITEMS_PAGE_SIZE}&offset=${offset}`,
@@ -661,6 +673,7 @@ async function fetchItemAdsTotals(
         ),
       { results: [] }
     );
+  const consume = (res: any) => {
     const results = res.results ?? [];
     for (const item of results) {
       sawAnyItem = true;
@@ -671,9 +684,34 @@ async function fetchItemAdsTotals(
       sawAnyCost = true;
       totals.set(itemId, (totals.get(itemId) ?? 0) + cost);
     }
-    offset += results.length;
-    const total = res.paging?.total;
-    if (results.length === 0 || (typeof total === "number" && offset >= total)) break;
+    return results.length as number;
+  };
+
+  // ads/search devuelve TODAS las publicaciones de la cuenta (el filtro por
+  // campaña se ignora), así que en un catálogo grande son decenas de
+  // páginas. Pedidas de a una, en serie, el paso de Ads del sync no entraba
+  // en los 60 s de la función y el sync quedaba en 504 para siempre. Con la
+  // primera página se sabe el total; el resto se pide de a varias a la vez.
+  const first = await fetchPage(0);
+  const firstCount = consume(first);
+  const total = typeof first.paging?.total === "number" ? first.paging.total : null;
+  if (firstCount > 0 && total !== null) {
+    const offsets: number[] = [];
+    for (let off = firstCount; off < total && offsets.length < ADS_MAX_PAGES - 1; off += ADS_ITEMS_PAGE_SIZE) offsets.push(off);
+    for (let i = 0; i < offsets.length; i += ADS_PAGES_CONCURRENCY) {
+      if (Date.now() > deadline) throw new AdsTimeBudgetError();
+      const pages = await Promise.all(offsets.slice(i, i + ADS_PAGES_CONCURRENCY).map(fetchPage));
+      pages.forEach(consume);
+    }
+  } else if (firstCount > 0) {
+    // Sin paging.total: se sigue en serie hasta una página vacía o incompleta.
+    let offset = firstCount;
+    for (let page = 1; page < ADS_MAX_PAGES; page++) {
+      if (Date.now() > deadline) throw new AdsTimeBudgetError();
+      const n = consume(await fetchPage(offset));
+      offset += n;
+      if (n < ADS_ITEMS_PAGE_SIZE) break;
+    }
   }
 
   // Diagnóstico: si hubo publicaciones en el rango pero ninguna trae un
@@ -693,7 +731,9 @@ export async function getAdsSpend(
   accountId: string,
   sellerId: string,
   dateFrom: string,
-  dateTo: string
+  dateTo: string,
+  /** Hasta cuándo se puede seguir pidiendo; pasado eso tira AdsTimeBudgetError. */
+  deadline: number = Number.POSITIVE_INFINITY
 ): Promise<{ productId: string | null; date: string; amount: number }[]> {
   const advertiser = await getAdvertiserId(accountId);
   if (!advertiser) return [];
@@ -711,6 +751,7 @@ export async function getAdsSpend(
 
   const rows: { productId: string | null; date: string; amount: number }[] = [];
   for (const window of splitIntoWindows(from, dateTo)) {
+    if (Date.now() > deadline) throw new AdsTimeBudgetError();
     // Solo hace falta un campaign_id real para el query de ads/search — ver
     // el comentario de fetchItemAdsTotals: el valor no filtra nada, pero el
     // endpoint lo pide igual. Sin ninguna campaña en este tramo, no hay nada
@@ -732,10 +773,14 @@ export async function getAdsSpend(
     // por día acá) repartido en partes iguales entre los días del rango —
     // igual que antes se hacía a nivel cuenta, ahora a nivel publicación:
     // mucho más preciso para saber qué producto conviene seguir pagando.
-    const itemTotals = await fetchItemAdsTotals(base, token, campaignId, window.from, window.to);
+    const itemTotals = await fetchItemAdsTotals(base, token, campaignId, window.from, window.to, deadline);
     if (itemTotals.size > 0) {
       const days = eachDateInRange(window.from, window.to);
       for (const [productId, totalCost] of itemTotals) {
+        // La mayoría de las publicaciones que devuelve ads/search no gastó
+        // nada: guardarles una fila en $0 por día solo multiplicaba las
+        // escrituras del sync (cientos de publicaciones × 85 días).
+        if (!(totalCost > 0)) continue;
         const perDay = totalCost / days.length;
         for (const day of days) {
           rows.push({ productId, date: day, amount: perDay });
