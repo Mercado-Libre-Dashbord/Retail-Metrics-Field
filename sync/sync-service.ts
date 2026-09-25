@@ -268,6 +268,11 @@ export async function syncOrders(
   return synced;
 }
 
+/** Tiempo máximo para pedirle el gasto a Mercado Ads dentro del paso de Ads. */
+const ADS_FETCH_BUDGET_MS = 40_000;
+/** Filas de ads_spend por INSERT. */
+const ADS_INSERT_BATCH = 5_000;
+
 export async function syncAds(
   db: QueryExecutor,
   accountId: string,
@@ -276,17 +281,27 @@ export async function syncAds(
 ): Promise<number> {
   try {
     const dateTo = new Date().toISOString().slice(0, 10);
-    const adsRows = await getAdsSpend(accountId, sellerId, sinceIso.slice(0, 10), dateTo);
+    // Se deja margen dentro de los 60 s de la función para borrar y guardar.
+    // Si Mercado Ads no llega a contestar a tiempo, se corta ANTES de borrar
+    // nada: el sync sigue con los datos de publicidad anteriores en vez de
+    // quedar en 504 en cada reintento.
+    const adsRows = await getAdsSpend(accountId, sellerId, sinceIso.slice(0, 10), dateTo, Date.now() + ADS_FETCH_BUDGET_MS);
     // Solo borra filas de Mercado Ads: las cargadas a mano (Meta/Google/TikTok)
     // tienen otro channel y no deben tocarse en un re-sync de ML.
     await db.query(
       `DELETE FROM ads_spend WHERE account_id = $1 AND channel = 'mercado_ads' AND date >= $2::date AND date <= $3::date`,
       [accountId, sinceIso.slice(0, 10), dateTo]
     );
-    for (const row of adsRows) {
+    // Una fila por publicación por día son miles de filas: antes se escribían
+    // de a una (una ida y vuelta a la base cada una) y solo eso ya se comía
+    // el tiempo de la función. Ahora, un INSERT por tanda con arrays.
+    for (let i = 0; i < adsRows.length; i += ADS_INSERT_BATCH) {
+      const batch = adsRows.slice(i, i + ADS_INSERT_BATCH);
       await db.query(
-        `INSERT INTO ads_spend (account_id, product_id, date, amount, channel) VALUES ($1, $2, $3, $4, 'mercado_ads')`,
-        [accountId, row.productId, row.date, row.amount]
+        `INSERT INTO ads_spend (account_id, product_id, date, amount, channel)
+         SELECT $1, p, d, a, 'mercado_ads'
+           FROM unnest($2::text[], $3::date[], $4::double precision[]) AS t(p, d, a)`,
+        [accountId, batch.map((r) => r.productId), batch.map((r) => r.date), batch.map((r) => r.amount)]
       );
     }
     return adsRows.length;

@@ -10,6 +10,7 @@ import {
   listProducts,
   getOrderDetail,
   resolveLineCommissions,
+  AdsTimeBudgetError,
   sellerCostFromShipmentCosts,
   listOrders,
   listOrdersPage,
@@ -1093,8 +1094,42 @@ describe("getAdsSpend con publicaciones sin gasto reconocible", () => {
 
     const rows = await getAdsSpend("acc1", "123", haceDias(1), haceDias(1));
 
-    expect(rows).toEqual([{ productId: "MLA1", date: haceDias(1), amount: 0 }]);
+    // Sin gasto no se guarda ninguna fila (solo multiplicaban escrituras).
+    expect(rows).toEqual([]);
     expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+describe("getAdsSpend con catálogos grandes", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("pide todas las páginas de ads/search y guarda solo las publicaciones que gastaron", async () => {
+    vi.mocked(mlFetch).mockImplementation(async (path: string) => {
+      if (path.startsWith("/advertising/advertisers")) return { advertisers: [{ advertiser_id: 999, site_id: "MLA" }] };
+      if (path.includes("/campaigns/search")) return { results: [{ id: "C1" }] };
+      const offset = Number(/offset=(\d+)/.exec(path)?.[1] ?? 0);
+      // 120 publicaciones en 3 páginas; solo la MLA60 gastó algo.
+      const results = Array.from({ length: Math.min(50, 120 - offset) }, (_, k) => {
+        const id = `MLA${offset + k}`;
+        return { item_id: id, metrics: { cost: id === "MLA60" ? 300 : 0 } };
+      });
+      return { results, paging: { total: 120 } };
+    });
+
+    const rows = await getAdsSpend("acc1", "123", haceDias(2), haceDias(1));
+
+    expect(rows.map((r) => r.productId)).toEqual(["MLA60", "MLA60"]);
+    expect(rows.reduce((sum, r) => sum + r.amount, 0)).toBeCloseTo(300);
+  });
+
+  it("corta con AdsTimeBudgetError si se pasa del tiempo, sin devolver datos a medias", async () => {
+    vi.mocked(mlFetch).mockImplementation(async (path: string) => {
+      if (path.startsWith("/advertising/advertisers")) return { advertisers: [{ advertiser_id: 999, site_id: "MLA" }] };
+      if (path.includes("/campaigns/search")) return { results: [{ id: "C1" }] };
+      return { results: [{ item_id: "MLA1", metrics: { cost: 10 } }], paging: { total: 500 } };
+    });
+
+    await expect(getAdsSpend("acc1", "123", haceDias(2), haceDias(1), Date.now() - 1)).rejects.toThrow(AdsTimeBudgetError);
   });
 });
 
