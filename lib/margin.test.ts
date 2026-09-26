@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeProductMargin, saleFeeAtPrice } from "./margin";
+import { computeProductMargin, saleFeeAtPrice, resolveEstimatedShipping, shippingCalibration } from "./margin";
 
 const base = { otherTaxRate: 0, appliesIva: false, realized: null, estimate: null };
 
@@ -80,5 +80,43 @@ describe("saleFeeAtPrice", () => {
   it("si el precio cambió, reescala la parte porcentual y conserva la fija", () => {
     // 1800 − 1095 = 705 variable sobre 5000 = 14,1% → a 6000: 846 + 1095.
     expect(saleFeeAtPrice({ price: 5000, saleFee: 1800, fixedFee: 1095, shippingCost: 0 }, 6000)).toBeCloseTo(1941);
+  });
+});
+
+describe("resolveEstimatedShipping", () => {
+  it("usa lo que ML le cobró de envío en sus ventas anteriores antes que el costo de lista", () => {
+    expect(resolveEstimatedShipping({ freeShipping: true, listCost: 12000, history: { perUnit: 6400, units: 5 }, calibration: 0.5 }))
+      .toEqual({ cost: 6400, source: "ventas" });
+  });
+
+  it("si nunca vendió, corrige el costo de lista con lo que paga la cuenta en otros productos", () => {
+    const r = resolveEstimatedShipping({ freeShipping: true, listCost: 12000, history: null, calibration: 0.55 });
+    expect(r.source).toBe("ajustado");
+    expect(r.cost).toBeCloseTo(6600);
+  });
+
+  it("sin ventas ni ajuste, cae al costo de lista", () => {
+    expect(resolveEstimatedShipping({ freeShipping: true, listCost: 12000, history: null, calibration: null }))
+      .toEqual({ cost: 12000, source: "lista" });
+  });
+
+  it("si hoy la publicación no ofrece envío gratis, el envío es 0 aunque antes lo haya pagado el vendedor", () => {
+    expect(resolveEstimatedShipping({ freeShipping: false, listCost: 12000, history: { perUnit: 6400, units: 5 }, calibration: null }))
+      .toEqual({ cost: 0, source: "sin_envio" });
+  });
+});
+
+describe("shippingCalibration", () => {
+  it("es la relación entre lo pagado de verdad y el costo de lista", () => {
+    const pairs = [
+      { historyPerUnit: 5000, listCost: 10000 },
+      { historyPerUnit: 3000, listCost: 6000 },
+      { historyPerUnit: 4000, listCost: 8000 },
+    ];
+    expect(shippingCalibration(pairs)).toBeCloseTo(0.5);
+  });
+
+  it("con menos de 3 productos para comparar no ajusta", () => {
+    expect(shippingCalibration([{ historyPerUnit: 5000, listCost: 10000 }])).toBeNull();
   });
 });

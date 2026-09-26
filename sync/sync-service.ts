@@ -653,7 +653,11 @@ export async function healStaleCosts(
      SELECT oi.product_id as productId
        FROM order_items oi
        LEFT JOIN latest l ON l.product_id = oi.product_id
-      WHERE oi.account_id = $1 AND oi.cost_applied IS DISTINCT FROM l.cost
+      WHERE oi.account_id = $1
+        AND (oi.cost_applied IS DISTINCT FROM l.cost
+             -- Ventas calculadas con IVA descontado cuando ya no corresponde
+             -- (ver deductsIvaFromProfit): también quedaron desactualizadas.
+             ${hasIva && !appliesIva ? "OR COALESCE(oi.iva_applied, 0) <> 0" : ""})
       GROUP BY oi.product_id
       LIMIT $2`,
     [accountId, limit]

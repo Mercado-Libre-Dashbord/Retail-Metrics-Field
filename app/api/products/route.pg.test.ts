@@ -100,4 +100,52 @@ describe("Productos: margen y beneficio de punta a punta (Postgres real)", () =>
     p = await list();
     expect(p.BANDEJA.totalProfit).toBeCloseTo(5841 - 2186 - 600 - 3000);
   });
+
+  it("el envío estimado sale de las ventas anteriores del producto y el IVA no se descuenta aunque la cuenta sea Responsable Inscripto", async () => {
+    const { withScope } = await import("@/db/client");
+    const { createAccount } = await import("@/db/accounts");
+    const { resolveCurrentAccount } = await import("@/lib/current-account");
+    const { GET, PATCH } = await import("./route");
+
+    const created = await withScope({ isAdmin: true }, (client) =>
+      createAccount(client, "Cuenta RI", `ri.${nanoid(6)}@example.com`)
+    );
+    const account = { ...created, otherTaxRate: 0, taxCondition: "responsable_inscripto" as const };
+    vi.mocked(resolveCurrentAccount).mockResolvedValue(account as any);
+
+    await withScope({ accountId: account.id }, async (client) => {
+      await client.query(
+        `INSERT INTO products (account_id, id, title, current_price, stock, updated_at, category_id, listing_type_id, free_shipping,
+                               est_price, est_sale_fee, est_fixed_fee, est_shipping_cost, est_updated_at)
+         VALUES ($1,'MOCHILA','Mochila',12591,3,now(),'MLA1','gold_special',true, 12591, 3244, 0, 8250, now())`,
+        [account.id]
+      );
+      // Una venta vieja (fuera del período que se va a pedir), donde ML le cobró $4.100 de envío,
+      // calculada con la versión anterior (con IVA descontado).
+      await client.query(`INSERT INTO orders (account_id, id, date_created, status) VALUES ($1,'O1','2026-03-01','paid')`, [account.id]);
+      await client.query(
+        `INSERT INTO order_items (account_id, order_id, product_id, unit_price, quantity, ml_commission, shipping_cost, ads_cost_allocated, cost_applied, iva_applied, net_profit)
+         VALUES ($1,'O1','MOCHILA',12591,1,3244,4100,0,6975,-300,-3428)`,
+        [account.id]
+      );
+      await client.query(`INSERT INTO product_costs (account_id, product_id, cost, valid_from) VALUES ($1,'MOCHILA',6975,now())`, [account.id]);
+    });
+
+    // Período sin ventas: el margen es estimado, con el envío de la venta anterior (no el de lista).
+    const res = await GET({ nextUrl: new URL("http://x/api/products?from=2026-09-01&to=2026-09-30") } as any);
+    const [mochila] = await res.json();
+    expect(mochila.margin.kind).toBe("estimado");
+    expect(mochila.margin.shippingSource).toBe("ventas");
+    expect(mochila.margin.perUnit.shipping).toBe(4100);
+    expect(mochila.margin.perUnit.iva).toBe(0);
+    expect(mochila.margin.perUnit.net).toBe(12591 - 3244 - 4100 - 6975);
+
+    // La venta vieja quedó recalculada sin IVA descontado (autocorrección al abrir Productos).
+    const sale = await withScope({ accountId: account.id }, async (client) =>
+      (await client.query(`SELECT iva_applied, net_profit FROM order_items WHERE account_id = $1`, [account.id])).rows[0]
+    );
+    expect(Number(sale.iva_applied)).toBe(0);
+    expect(Number(sale.net_profit)).toBeCloseTo(12591 - 3244 - 4100 - 6975);
+    void PATCH;
+  });
 });

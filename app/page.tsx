@@ -978,7 +978,7 @@ export default function HomePage() {
           <div className="value"><KpiValue>{summary ? fmt(summary.aov) : "-"}</KpiValue></div>
         </div>
         <div className="kpi-card">
-          <div className="kpi-card-head"><KpiIcon name="profit" /><span className="label">Ganancia neta</span><KpiInfo>Facturación − comisión de Mercado Libre − envío − publicidad − costo del producto − IVA − otros impuestos. Si a un producto le falta el costo cargado, sus ventas quedan afuera de este número: no se inventa un valor.</KpiInfo></div>
+          <div className="kpi-card-head"><KpiIcon name="profit" /><span className="label">Ganancia neta</span><KpiInfo>Facturación − comisión de Mercado Libre − envío − publicidad − costo del producto − otros impuestos. No descuenta IVA: eso lo liquidás vos. Si a un producto le falta el costo cargado, sus ventas quedan afuera de este número: no se inventa un valor.</KpiInfo></div>
           <div className="value"><KpiValue>{summary ? fmt(summary.netProfit) : "-"}</KpiValue></div>
           {summary && <DeltaPill current={summary.netProfit} previous={summary.previous?.netProfit} />}
         </div>

@@ -28,8 +28,22 @@ export interface MarginBreakdown {
   net: number;
 }
 
+/**
+ * De dónde sale el envío de un margen estimado:
+ * - "ventas": promedio de lo que Mercado Libre le cobró al vendedor en las
+ *   últimas ventas de ESE producto (el dato más fiel: ya incluye la
+ *   bonificación por reputación y el peso real del paquete).
+ * - "ajustado": el producto nunca vendió; costo de envío gratis que informa
+ *   ML, corregido con cuánto paga de verdad esta cuenta frente a ese número
+ *   en los productos que sí vendieron.
+ * - "lista": ni eso hay; el costo que informa ML tal cual (puede quedar alto).
+ * - "sin_envio": la publicación no ofrece envío gratis, lo paga el comprador.
+ */
+export type ShippingSource = "ventas" | "ajustado" | "lista" | "sin_envio";
+
 export interface ProductMargin {
   kind: MarginKind;
+  shippingSource?: ShippingSource | null;
   /** Ganancia neta ÷ precio (0,25 = 25%). */
   pct: number;
   perUnit: MarginBreakdown;
@@ -60,6 +74,7 @@ export interface ChargeEstimate {
   fixedFee: number | null;
   /** Null = no se sabe (con envío gratis, falta el dato). */
   shippingCost: number | null;
+  shippingSource?: ShippingSource | null;
 }
 
 export interface MarginInput {
@@ -118,6 +133,7 @@ export function computeProductMargin(input: MarginInput): ProductMargin | null {
     const net = price - fee - ship - cost - taxes - iva;
     return {
       kind: "estimado",
+      shippingSource: shipping === null ? null : input.estimate?.shippingSource ?? null,
       pct: net / price,
       perUnit: { price, commission: fee, shipping: ship, ads: 0, cost, taxes, iva, net },
       missingShipping: shipping === null,
@@ -131,4 +147,46 @@ export function computeProductMargin(input: MarginInput): ProductMargin | null {
     perUnit: { price, commission: 0, shipping: 0, ads: 0, cost, taxes, iva: 0, net },
     missingShipping: false,
   };
+}
+
+export interface ShippingHistory {
+  /** Envío promedio por unidad que ML le cobró al vendedor en sus últimas ventas. */
+  perUnit: number;
+  units: number;
+}
+
+/**
+ * Envío por unidad para el margen estimado, del dato más fiel al menos fiel
+ * (ver ShippingSource). Si la publicación hoy no ofrece envío gratis, el
+ * envío lo paga el comprador: 0, aunque antes lo haya pagado el vendedor.
+ */
+export function resolveEstimatedShipping(input: {
+  freeShipping: boolean | null;
+  listCost: number | null;
+  history: ShippingHistory | null;
+  /** Cuánto paga de verdad la cuenta frente al costo de lista de ML (ver shippingCalibration). */
+  calibration: number | null;
+}): { cost: number | null; source: ShippingSource | null } {
+  if (input.freeShipping === false) return { cost: 0, source: "sin_envio" };
+  if (input.history && input.history.units > 0) return { cost: input.history.perUnit, source: "ventas" };
+  if (input.freeShipping === true && input.listCost !== null) {
+    return input.calibration !== null
+      ? { cost: input.listCost * input.calibration, source: "ajustado" }
+      : { cost: input.listCost, source: "lista" };
+  }
+  return { cost: null, source: null };
+}
+
+/**
+ * Relación entre lo que la cuenta pagó de envío en sus ventas y el costo de
+ * lista que informa ML, sobre los productos que tienen los dos datos. Sirve
+ * para corregir la estimación de los que nunca vendieron (bonificación por
+ * reputación, etc.). Null con menos de 3 productos para comparar: con tan
+ * pocos, el ajuste sería ruido.
+ */
+export function shippingCalibration(pairs: { historyPerUnit: number; listCost: number }[]): number | null {
+  const usable = pairs.filter((p) => p.listCost > 0 && p.historyPerUnit >= 0);
+  if (usable.length < 3) return null;
+  const ratio = usable.reduce((s, p) => s + p.historyPerUnit, 0) / usable.reduce((s, p) => s + p.listCost, 0);
+  return Math.min(1.2, Math.max(0.2, ratio));
 }

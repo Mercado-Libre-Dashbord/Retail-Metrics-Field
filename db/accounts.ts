@@ -38,6 +38,19 @@ export function appliesIva(taxCondition: TaxCondition): boolean {
   return taxCondition === "responsable_inscripto";
 }
 
+/**
+ * Si la ganancia neta (de cada venta, del producto y el margen) descuenta el
+ * saldo de IVA. Hoy NO, para ningún régimen, por pedido explícito de los
+ * vendedores: el IVA lo liquidan ellos (o su contador) y saben exactamente
+ * cuánto pagan; una estimación nuestra con supuestos (costo con factura A,
+ * crédito de cada cargo de ML) les movía el margen y los números dejaban de
+ * coincidir con los suyos. Un solo lugar para cambiarlo si algún día se
+ * vuelve una opción por cuenta.
+ */
+export function deductsIvaFromProfit(_taxCondition: TaxCondition): boolean {
+  return false;
+}
+
 interface AccountRow {
   id: string;
   name: string;

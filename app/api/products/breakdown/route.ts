@@ -3,7 +3,7 @@ import { withScope } from "@/db/client";
 import { hasColumn } from "@/db/schema-capabilities";
 import { resolveCurrentAccount } from "@/lib/current-account";
 import { revenueStatusFilter } from "@/lib/order-status";
-import { appliesIva } from "@/db/accounts";
+import { deductsIvaFromProfit } from "@/db/accounts";
 import { recalculateProduct } from "@/sync/sync-service";
 import { getCurrentCostEntry } from "@/sync/profitability";
 
@@ -106,7 +106,7 @@ export async function GET(request: NextRequest) {
       return Math.abs(expected - applied) > 0.005;
     }).length;
     if (stale > 0) {
-      await recalculateProduct(client, account.id, productId, hasIva, account.otherTaxRate, appliesIva(account.taxCondition));
+      await recalculateProduct(client, account.id, productId, hasIva, account.otherTaxRate, deductsIvaFromProfit(account.taxCondition));
       rows = await loadSales();
     }
 

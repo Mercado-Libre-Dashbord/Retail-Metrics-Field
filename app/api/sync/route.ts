@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withScope } from "@/db/client";
 import { hasColumn } from "@/db/schema-capabilities";
 import { syncProductsPage, syncOrders, syncAds, syncFullStock, syncBillingCharges, recalculate, pendingOrderIds, backfillMissingProducts, syncProductEstimates } from "@/sync/sync-service";
-import { appliesIva, setOrdersSyncedThrough } from "@/db/accounts";
+import { deductsIvaFromProfit, setOrdersSyncedThrough } from "@/db/accounts";
 import { listOrdersPage } from "@/mcp/tools";
 import { resolveCurrentAccount } from "@/lib/current-account";
 import { MlApiError } from "@/mcp/ml-client";
@@ -157,7 +157,7 @@ export async function POST(request: NextRequest) {
           }
           case "recalc": {
             const { done, nextOffset } = await recalculate(
-              client, account.id, hasIva, account.otherTaxRate, appliesIva(account.taxCondition), recalcOffset
+              client, account.id, hasIva, account.otherTaxRate, deductsIvaFromProfit(account.taxCondition), recalcOffset
             );
             if (!done) {
               return { ...zeroed, done: false, finalized: false, finalizeStep: "recalc" as FinalizeStep, recalcOffset: nextOffset ?? 0 };
@@ -182,7 +182,7 @@ export async function POST(request: NextRequest) {
         const today = new Date().toISOString().slice(0, 10);
         const page = await listOrdersPage(account.id, sellerId, from, today, offset, ORDERS_PER_BATCH);
         const pending = await pendingOrderIds(client, account.id, page.ids);
-        const ordersSynced = await syncOrders(client, account.id, pending, hasIva, account.otherTaxRate, appliesIva(account.taxCondition));
+        const ordersSynced = await syncOrders(client, account.id, pending, hasIva, account.otherTaxRate, deductsIvaFromProfit(account.taxCondition));
 
         return {
           done: page.done,

@@ -4,8 +4,8 @@ import { hasColumn } from "@/db/schema-capabilities";
 import { resolveCurrentAccount } from "@/lib/current-account";
 import { revenueStatusFilter } from "@/lib/order-status";
 import { recalculateProduct, healStaleCosts } from "@/sync/sync-service";
-import { appliesIva } from "@/db/accounts";
-import { computeProductMargin } from "@/lib/margin";
+import { deductsIvaFromProfit } from "@/db/accounts";
+import { computeProductMargin, resolveEstimatedShipping, shippingCalibration, type ShippingHistory } from "@/lib/margin";
 
 export const runtime = "nodejs";
 
@@ -48,7 +48,7 @@ export async function GET(request: NextRequest) {
       // Con tope de tiempo: la pantalla no puede quedar esperando. Lo que no
       // entre se corrige en la próxima carga o en el próximo Sincronizar
       // (el recálculo del sync aplica el costo vigente a todas las ventas).
-      await healStaleCosts(client, account.id, hasIva, account.otherTaxRate, appliesIva(account.taxCondition), 50, Date.now() + HEAL_TIME_BUDGET_MS);
+      await healStaleCosts(client, account.id, hasIva, account.otherTaxRate, deductsIvaFromProfit(account.taxCondition), 50, Date.now() + HEAL_TIME_BUDGET_MS);
       await client.query("RELEASE SAVEPOINT heal_costs");
     } catch (err) {
       console.warn("No se pudieron recalcular costos editados recientemente:", (err as Error).message);
@@ -84,6 +84,21 @@ export async function GET(request: NextRequest) {
             AND ${revenueStatusFilter()}
           GROUP BY oi.product_id
        ),
+       ship_hist AS (
+         -- Envío que ML le cobró al vendedor en las últimas 20 ventas de
+         -- cada producto (de cualquier fecha): con eso se estima el envío del
+         -- margen en vez de usar el costo de lista, que no trae la
+         -- bonificación por reputación.
+         SELECT product_id, SUM(shipping_cost) as ship, SUM(quantity) as units
+           FROM (
+             SELECT oi.product_id, oi.shipping_cost, oi.quantity,
+                    ROW_NUMBER() OVER (PARTITION BY oi.product_id ORDER BY o.date_created DESC) as rn
+               FROM order_items oi JOIN orders o ON o.account_id = oi.account_id AND o.id = oi.order_id
+              WHERE oi.account_id = $3 AND ${revenueStatusFilter()}
+           ) recent
+          WHERE rn <= 20
+          GROUP BY product_id
+       ),
        last_sale AS (
          -- Última venta de siempre, sin acotar por from/to: es una señal de
          -- "hace cuánto que no se mueve" independiente del período elegido.
@@ -103,9 +118,11 @@ export async function GET(request: NextRequest) {
               COALESCE(s.net, 0) as "totalProfit",
               s.revenue, s.commission, s.shipping, s.ads, s.cost as "soldCost", s.taxes, s.iva, s.net,
               COALESCE(s."linesWithoutCost", 0) as "linesWithoutCost",
-              ls.last_sale as "lastSaleDate"
+              ls.last_sale as "lastSaleDate",
+              sh.ship as "histShip", sh.units as "histUnits"
          FROM products p
          LEFT JOIN sales s ON s.product_id = p.id
+         LEFT JOIN ship_hist sh ON sh.product_id = p.id
          LEFT JOIN last_sale ls ON ls.product_id = p.id
         WHERE p.account_id = $3
         ORDER BY p.title`,
@@ -143,13 +160,27 @@ export async function GET(request: NextRequest) {
       iva: number | string | null;
       net: number | string | null;
       linesWithoutCost: number | string;
+      histShip: number | string | null;
+      histUnits: number | string | null;
     }[];
 
-    const ivaApplies = appliesIva(account.taxCondition);
+    const ivaApplies = deductsIvaFromProfit(account.taxCondition);
+    const history = (raw: (typeof rows)[number]): ShippingHistory | null => {
+      const units = raw.histUnits === null ? 0 : Number(raw.histUnits);
+      return units > 0 ? { perUnit: Number(raw.histShip ?? 0) / units, units } : null;
+    };
+    // Cuánto paga de verdad esta cuenta de envío frente al costo de lista de
+    // ML, medido en los productos con ventas: corrige la estimación de los
+    // que nunca vendieron.
+    const calibration = shippingCalibration(
+      rows
+        .filter((raw) => raw.freeShipping === true && raw.estShippingCost !== null && history(raw) !== null)
+        .map((raw) => ({ historyPerUnit: history(raw)!.perUnit, listCost: Number(raw.estShippingCost) }))
+    );
     return rows.map((raw) => {
       // Postgres devuelve SUM de enteros y COUNT como texto (bigint).
       const num = (v: number | string | null) => (v === null ? 0 : Number(v));
-      const { revenue, commission, shipping, ads, soldCost, taxes, iva, net, linesWithoutCost, ...rest } = raw;
+      const { revenue, commission, shipping, ads, soldCost, taxes, iva, net, linesWithoutCost, histShip: _hs, histUnits: _hu, ...rest } = raw;
       const r = {
         ...rest,
         currentPrice: Number(raw.currentPrice),
@@ -206,12 +237,21 @@ export async function GET(request: NextRequest) {
             }
           : null,
         estimate: raw.estSaleFee !== null
-          ? {
-              price: raw.estPrice === null ? null : Number(raw.estPrice),
-              saleFee: Number(raw.estSaleFee),
-              fixedFee: raw.estFixedFee === null ? null : Number(raw.estFixedFee),
-              shippingCost: raw.estShippingCost === null ? null : Number(raw.estShippingCost),
-            }
+          ? (() => {
+              const shipping = resolveEstimatedShipping({
+                freeShipping: raw.freeShipping,
+                listCost: raw.estShippingCost === null ? null : Number(raw.estShippingCost),
+                history: history(raw),
+                calibration,
+              });
+              return {
+                price: raw.estPrice === null ? null : Number(raw.estPrice),
+                saleFee: Number(raw.estSaleFee),
+                fixedFee: raw.estFixedFee === null ? null : Number(raw.estFixedFee),
+                shippingCost: shipping.cost,
+                shippingSource: shipping.source,
+              };
+            })()
           : null,
       });
       return {
@@ -305,7 +345,7 @@ export async function PATCH(request: NextRequest) {
     // cargado" para productos que acababa de completar, y parecía que la
     // carga no había tomado.
     const hasIva = await hasColumn(client, "order_items", "iva_applied");
-    const itemsUpdated = await recalculateProduct(client, account.id, productId, hasIva, account.otherTaxRate, appliesIva(account.taxCondition));
+    const itemsUpdated = await recalculateProduct(client, account.id, productId, hasIva, account.otherTaxRate, deductsIvaFromProfit(account.taxCondition));
     return { itemsUpdated, thresholdError };
   });
 
@@ -340,7 +380,7 @@ export async function DELETE(request: NextRequest) {
   const itemsUpdated = await withScope({ accountId: account.id }, async (client) => {
     await client.query(`DELETE FROM product_costs WHERE account_id = $1 AND product_id = $2`, [account.id, productId]);
     const hasIva = await hasColumn(client, "order_items", "iva_applied");
-    return recalculateProduct(client, account.id, productId, hasIva, account.otherTaxRate, appliesIva(account.taxCondition));
+    return recalculateProduct(client, account.id, productId, hasIva, account.otherTaxRate, deductsIvaFromProfit(account.taxCondition));
   });
 
   return NextResponse.json({ ok: true, itemsUpdated });
