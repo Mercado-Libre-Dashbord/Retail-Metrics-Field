@@ -91,9 +91,10 @@ describe("PATCH /api/products", () => {
 
     expect(await res.json()).toEqual({ ok: true, itemsUpdated: 1 });
     // La venta vieja queda con el costo recién cargado y su ganancia rehecha.
+    // Todas las ventas del producto en una sola escritura: ids y costos en arrays.
     expect(query).toHaveBeenCalledWith(
-      expect.stringContaining("UPDATE order_items SET cost_applied"),
-      expect.arrayContaining([350, 7])
+      expect.stringContaining("UPDATE order_items AS oi SET cost_applied"),
+      expect.arrayContaining([[7], [350]])
     );
   });
 
@@ -352,12 +353,8 @@ describe("DELETE /api/products", () => {
   });
 
   it("borra TODO el historial de costos del producto y recalcula sus ventas", async () => {
-    // El bug real que arregla: un costo cargado mal (ej. un cero de más) y
-    // corregido después seguía afectando la ganancia de ventas viejas —
-    // getCostEntryAtDate usa el PRIMER costo cargado como mejor estimación
-    // cuando ninguno tiene fecha anterior a la venta, y ese primer costo
-    // seguía siendo el erróneo. Borrar el historial entero deja que el
-    // próximo costo cargado sea "el primero" de nuevo.
+    // Sin costo, las ventas quedan fuera de la ganancia neta hasta que se
+    // cargue uno nuevo.
     const query = vi.fn().mockImplementation(async (sql: string) => {
       if (sql.includes("information_schema.columns")) {
         return { rows: [{ table_name: "order_items", column_name: "iva_applied" }] };
@@ -388,8 +385,8 @@ describe("DELETE /api/products", () => {
     );
     // Sin costos, la línea vuelve a "sin costo cargado" (cost_applied null).
     expect(query).toHaveBeenCalledWith(
-      expect.stringContaining("UPDATE order_items SET cost_applied"),
-      expect.arrayContaining([null, 7])
+      expect.stringContaining("UPDATE order_items AS oi SET cost_applied"),
+      expect.arrayContaining([[7], [null]])
     );
   });
 });

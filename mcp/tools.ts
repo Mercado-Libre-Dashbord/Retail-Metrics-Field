@@ -16,14 +16,22 @@ export interface MlProduct {
   logisticType: string | null;
   /** Id para consultar /inventories/{id}/stock/fulfillment. Sin confirmar. */
   inventoryId: string | null;
+  /** gold_special (Clásica), gold_pro (Premium), etc. Define la comisión. */
+  listingTypeId?: string | null;
+  /** Si la publicación ofrece envío gratis: el envío lo paga el vendedor. */
+  freeShipping?: boolean | null;
 }
 
 /** Sin confirmar todavía dónde vive exactamente en la respuesta de /items:
  * puede ser la raíz (ítem simple) o cada variación (ítem con variantes). */
-function extractLogistics(body: any): { logisticType: string | null; inventoryId: string | null } {
+function extractLogistics(body: any): {
+  logisticType: string | null; inventoryId: string | null; listingTypeId: string | null; freeShipping: boolean | null;
+} {
   return {
     logisticType: body?.shipping?.logistic_type ?? null,
     inventoryId: body?.inventory_id ?? body?.variations?.[0]?.inventory_id ?? null,
+    listingTypeId: body?.listing_type_id ?? null,
+    freeShipping: typeof body?.shipping?.free_shipping === "boolean" ? body.shipping.free_shipping : null,
   };
 }
 
@@ -304,6 +312,84 @@ export interface MlOrder {
   items: MlOrderItem[];
 }
 
+// ── Estimación de cargos para el margen real ──────────────────────────────
+// Para mostrar el margen de verdad de un producto antes (o sin) ventas: lo
+// que Mercado Libre cobraría hoy por venderlo a su precio.
+
+export interface ListingFeeEstimate {
+  /** Cargo por vender UNA unidad (comisión + cargo fijo). */
+  saleFee: number;
+  /** La parte fija de ese cargo (productos baratos pagan un monto fijo por unidad). */
+  fixedFee: number;
+}
+
+/** Lee la respuesta de /sites/{site}/listing_prices. Null si no trae el cargo. */
+export function parseListingFee(res: any, listingTypeId: string): ListingFeeEstimate | null {
+  const entry = Array.isArray(res) ? res.find((r: any) => r?.listing_type_id === listingTypeId) ?? null : res;
+  const saleFee = Number(entry?.sale_fee_amount);
+  if (!entry || !Number.isFinite(saleFee)) return null;
+  const fixed = Number(entry?.sale_fee_details?.fixed_fee ?? 0);
+  return { saleFee, fixedFee: Number.isFinite(fixed) ? fixed : 0 };
+}
+
+/**
+ * Cargo por vender una unidad a `price`, con la tabla de Mercado Libre para
+ * esa categoría y tipo de publicación (el mismo número que muestra su
+ * calculadora de costos). Null si no se pudo obtener.
+ */
+export async function getListingFee(
+  accountId: string,
+  itemId: string,
+  price: number,
+  categoryId: string,
+  listingTypeId: string
+): Promise<ListingFeeEstimate | null> {
+  const site = itemId.slice(0, 3);
+  const token = await getValidAccessToken(accountId);
+  try {
+    const res = await mlFetch(
+      `/sites/${site}/listing_prices?price=${encodeURIComponent(String(price))}&category_id=${encodeURIComponent(categoryId)}&listing_type_id=${encodeURIComponent(listingTypeId)}`,
+      token
+    );
+    return parseListingFee(res, listingTypeId);
+  } catch (err) {
+    console.warn(`No se pudo estimar el cargo de venta de ${itemId}:`, (err as Error).message);
+    return null;
+  }
+}
+
+/**
+ * Lee la respuesta de /users/{id}/shipping_options/free. La documentación de
+ * ML no fija la forma exacta: se prueban los lugares conocidos y, si no está
+ * en ninguno, null (el margen se muestra aclarando que falta el envío).
+ */
+export function parseFreeShippingCost(res: any): number | null {
+  for (const candidate of [res?.coverage?.all_country?.list_cost, res?.coverage?.all_country?.cost, res?.list_cost, res?.cost]) {
+    const value = Number(candidate);
+    if (candidate !== undefined && candidate !== null && Number.isFinite(value)) return value;
+  }
+  return null;
+}
+
+let warnedFreeShippingShape = false;
+
+/** Lo que le cuesta al vendedor el envío gratis de una unidad de esta publicación. */
+export async function getFreeShippingCost(accountId: string, sellerId: string, itemId: string): Promise<number | null> {
+  const token = await getValidAccessToken(accountId);
+  try {
+    const res = await mlFetch(`/users/${sellerId}/shipping_options/free?item_id=${encodeURIComponent(itemId)}`, token);
+    const cost = parseFreeShippingCost(res);
+    if (cost === null && !warnedFreeShippingShape) {
+      warnedFreeShippingShape = true;
+      console.warn(`Envío gratis de ${itemId}: respuesta sin costo reconocible. Claves: ${Object.keys(res ?? {}).join(", ")}`);
+    }
+    return cost;
+  } catch (err) {
+    console.warn(`No se pudo estimar el envío gratis de ${itemId}:`, (err as Error).message);
+    return null;
+  }
+}
+
 /**
  * Cuánto le costó el envío al VENDEDOR en una orden.
  *
@@ -324,25 +410,7 @@ export async function getShipmentSellerCost(accountId: string, shipmentId: strin
     const costs = await mlFetch(`/shipments/${shipmentId}/costs`, token, {
       headers: { "x-format-new": "true" },
     });
-
-    // Formato nuevo: senders[] (puede haber más de uno en carritos multi-vendedor).
-    if (Array.isArray(costs?.senders)) {
-      const total = costs.senders.reduce((sum: number, s: any) => sum + Number(s?.cost ?? 0), 0);
-      if (Number.isFinite(total)) return total;
-    }
-    // Formato viejo: costo del vendedor plano.
-    for (const candidate of [costs?.sender?.cost, costs?.gross_amount]) {
-      const value = Number(candidate);
-      if (Number.isFinite(value)) return value;
-    }
-    // Se loguean las claves (no el body entero, por las dudas) para poder ver
-    // la forma real de la respuesta la próxima vez que esto pase — es la
-    // sospecha concreta con Fulfillment/Full, que podría devolver un formato
-    // distinto a `senders[]` / `sender.cost` / `gross_amount`.
-    console.warn(
-      `Envío ${shipmentId}: /costs respondió sin costo de vendedor reconocible. Claves recibidas: ${Object.keys(costs ?? {}).join(", ")}`
-    );
-    return 0;
+    return sellerCostFromShipmentCosts(costs, shipmentId);
   } catch (err) {
     // Silenciar esto del todo dejaba el envío en $0 sin ninguna pista de por
     // qué (permisos, endpoint, formato). Se sigue devolviendo 0 para no
@@ -352,18 +420,178 @@ export async function getShipmentSellerCost(accountId: string, shipmentId: strin
   }
 }
 
+/**
+ * Lo que paga el VENDEDOR según la respuesta de `/shipments/{id}/costs`.
+ *
+ * Solo cuentan `senders[].cost` (formato nuevo: "el costo final que le
+ * corresponde a cada usuario", ya con descuentos) o `sender.cost` (formato
+ * viejo). Antes, sin ninguno de los dos, se caía a `gross_amount` — que es el
+ * costo TOTAL del envío sin descuentos y sin importar quién lo paga. Si lo
+ * pagaba el comprador, al vendedor se le descontaba igual un envío que nunca
+ * le cobraron: productos baratos terminaban "a pérdida" por un envío
+ * inexistente. Sin dato del vendedor, 0.
+ */
+export function sellerCostFromShipmentCosts(costs: any, shipmentId: string): number {
+  if (Array.isArray(costs?.senders)) {
+    const total = costs.senders.reduce((sum: number, s: any) => sum + Number(s?.cost ?? 0), 0);
+    if (Number.isFinite(total)) return total;
+  }
+  const oldFormat = Number(costs?.sender?.cost);
+  if (costs?.sender && Number.isFinite(oldFormat)) return oldFormat;
+  console.warn(
+    `Envío ${shipmentId}: /costs respondió sin costo de vendedor reconocible (se toma 0). Claves recibidas: ${Object.keys(costs ?? {}).join(", ")}`
+  );
+  return 0;
+}
+
+/**
+ * Qué parte del envío le toca a ESTA orden. En un carrito (pack) el comprador
+ * compra varias publicaciones del mismo vendedor, Mercado Libre crea una
+ * orden por publicación, y todas comparten UN solo envío. Antes cada orden
+ * del carrito descontaba el envío completo: dos productos en un carrito
+ * pagaban el envío dos veces. Se reparte proporcional a lo facturado por cada
+ * orden del pack. Ante cualquier error, 1 (la orden se queda con todo, que es
+ * el comportamiento anterior) y queda en el log.
+ */
+export async function packShippingShare(accountId: string, order: any): Promise<number> {
+  const packId = order?.pack_id;
+  if (!packId) return 1;
+  const token = await getValidAccessToken(accountId);
+  try {
+    const pack = await mlFetch(`/packs/${packId}`, token);
+    const orderIds: string[] = (pack?.orders ?? []).map((o: any) => String(o?.id)).filter(Boolean);
+    if (orderIds.length <= 1) return 1;
+    const totals = await Promise.all(
+      orderIds.map(async (id) => {
+        if (id === String(order.id)) return Number(order.total_amount ?? 0);
+        const sibling = await mlFetch(`/orders/${id}`, token);
+        return Number(sibling?.total_amount ?? 0);
+      })
+    );
+    const sum = totals.reduce((a, b) => a + b, 0);
+    if (!(sum > 0)) return 1 / orderIds.length;
+    return Number(order.total_amount ?? 0) / sum;
+  } catch (err) {
+    console.warn(`No se pudo leer el pack ${packId} de la orden ${order?.id}; el envío queda entero en esta orden:`, (err as Error).message);
+    return 1;
+  }
+}
+
+/**
+ * Todo lo que Mercado Libre dice del envío de una orden, sin datos
+ * personales (ni dirección ni nombres): para responder "¿este envío existe
+ * de verdad?" con la respuesta cruda de ML en vez de suposiciones.
+ */
+export async function diagnoseOrderShipping(accountId: string, orderId: string) {
+  const token = await getValidAccessToken(accountId);
+  const order = await mlFetch(`/orders/${orderId}`, token);
+  const shipmentId = order?.shipping?.id ? String(order.shipping.id) : null;
+  const pick = (o: any, keys: string[]) => Object.fromEntries(keys.map((k) => [k, o?.[k] ?? null]));
+  let shipment: unknown = null;
+  let costs: unknown = null;
+  let costsError: string | null = null;
+  if (shipmentId) {
+    try {
+      const sh = await mlFetch(`/shipments/${shipmentId}`, token);
+      shipment = {
+        ...pick(sh, ["mode", "logistic_type", "status", "substatus"]),
+        shipping_option: pick(sh?.shipping_option, ["cost", "list_cost", "name"]),
+      };
+    } catch (err) {
+      shipment = { error: (err as Error).message };
+    }
+    try {
+      const c = await mlFetch(`/shipments/${shipmentId}/costs`, token, { headers: { "x-format-new": "true" } });
+      costs = {
+        gross_amount: c?.gross_amount ?? null,
+        receiver: pick(c?.receiver, ["cost", "compensation", "save", "discounts"]),
+        senders: Array.isArray(c?.senders) ? c.senders.map((x: any) => pick(x, ["cost", "compensation", "save", "discounts"])) : null,
+        sender: c?.sender ? pick(c.sender, ["cost"]) : null,
+      };
+    } catch (err) {
+      costsError = (err as Error).message;
+    }
+  }
+  const share = await packShippingShare(accountId, order);
+  const sellerCost = costs ? sellerCostFromShipmentCosts(costs, shipmentId ?? "") : 0;
+  return {
+    order: {
+      id: String(order?.id),
+      status: order?.status ?? null,
+      total_amount: order?.total_amount ?? null,
+      pack_id: order?.pack_id ?? null,
+      shipment_id: shipmentId,
+      payments: (order?.payments ?? []).map((p: any) => pick(p, ["status", "transaction_amount", "shipping_cost", "marketplace_fee"])),
+    },
+    shipment,
+    costs,
+    costsError,
+    result: { sellerCost, packShare: share, shippingChargedToThisOrder: sellerCost * share },
+  };
+}
+
+/**
+ * Sin evidencia en la orden, `sale_fee` se toma como cargo POR UNIDAD (hay que
+ * multiplicarlo por la cantidad). Antes se tomaba como el total de la línea:
+ * en ventas de 2+ unidades eso descontaba la comisión de una sola unidad e
+ * inflaba la ganancia neta.
+ */
+export const SALE_FEE_DEFAULT_PER_UNIT = true;
+
+export type SaleFeeBasis = "per_unit" | "per_line";
+
+/**
+ * Comisión total de cada línea de la orden. La documentación de ML no dice si
+ * `order_items[].sale_fee` es por unidad o por línea, y en ventas de una
+ * unidad da lo mismo — solo importa con cantidad > 1. Para no depender de una
+ * suposición, se contrasta contra lo que ML efectivamente cobró: la suma de
+ * `payments[].marketplace_fee` de los pagos aprobados. Se usa solo si esos
+ * pagos corresponden únicamente a esta orden (la suma cobrada coincide con el
+ * total de la orden) — en un carrito, un mismo pago puede cubrir varias.
+ */
+export function resolveLineCommissions(order: any): { commissions: number[]; basis: SaleFeeBasis; evidence: boolean } {
+  const items: any[] = order.order_items ?? [];
+  const perUnit = items.map((oi) => Number(oi.sale_fee ?? 0) * Number(oi.quantity ?? 1));
+  const perLine = items.map((oi) => Number(oi.sale_fee ?? 0));
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+  const defaultBasis: SaleFeeBasis = SALE_FEE_DEFAULT_PER_UNIT ? "per_unit" : "per_line";
+  const pick = (basis: SaleFeeBasis) => (basis === "per_unit" ? perUnit : perLine);
+
+  // Con todas las líneas de 1 unidad las dos lecturas son idénticas.
+  if (!items.some((oi) => Number(oi.quantity ?? 1) > 1)) return { commissions: perLine, basis: defaultBasis, evidence: false };
+
+  const approved = (order.payments ?? []).filter((p: any) => p?.status === "approved");
+  const charged = sum(approved.map((p: any) => Number(p?.marketplace_fee)));
+  const paid = sum(approved.map((p: any) => Number(p?.transaction_amount)));
+  const orderTotal = Number(order.total_amount ?? 0);
+  const paymentIsOnlyThisOrder = approved.length > 0 && orderTotal > 0 && Math.abs(paid - orderTotal) <= orderTotal * 0.01;
+  if (!paymentIsOnlyThisOrder || !Number.isFinite(charged) || charged <= 0) {
+    return { commissions: pick(defaultBasis), basis: defaultBasis, evidence: false };
+  }
+  const basis: SaleFeeBasis = Math.abs(charged - sum(perUnit)) <= Math.abs(charged - sum(perLine)) ? "per_unit" : "per_line";
+  // Queda en los logs de Vercel: es la forma de confirmar con datos reales
+  // qué lectura de sale_fee es la correcta, sin adivinar.
+  console.info(
+    `Comisión multi-unidad orden ${order.id}: marketplace_fee=${charged}, sale_fee×cantidad=${sum(perUnit)}, sale_fee=${sum(perLine)} → ${basis}`
+  );
+  return { commissions: pick(basis), basis, evidence: true };
+}
+
 export async function getOrderDetail(accountId: string, orderId: string): Promise<MlOrder> {
   const token = await getValidAccessToken(accountId);
   const order = await mlFetch(`/orders/${orderId}`, token);
 
   const shipmentId = order.shipping?.id;
-  const orderShippingCost = shipmentId ? await getShipmentSellerCost(accountId, String(shipmentId)) : 0;
+  const shipmentCost = shipmentId ? await getShipmentSellerCost(accountId, String(shipmentId)) : 0;
+  // En un carrito el envío se comparte entre varias órdenes (ver packShippingShare).
+  const orderShippingCost = shipmentCost > 0 ? shipmentCost * (await packShippingShare(accountId, order)) : 0;
 
   // El envío se cobra una vez por ORDEN, no por producto. Antes se copiaba el
   // costo completo en cada línea, así que una orden con 2 productos distintos
   // descontaba el envío dos veces. Se reparte proporcional a lo facturado por
   // línea (y en partes iguales si la orden facturó 0).
   const items = order.order_items ?? [];
+  const { commissions } = resolveLineCommissions(order);
   const orderRevenue = items.reduce((sum: number, oi: any) => sum + Number(oi.unit_price) * Number(oi.quantity), 0);
 
   return {
@@ -371,7 +599,7 @@ export async function getOrderDetail(accountId: string, orderId: string): Promis
     dateCreated: order.date_created,
     status: order.status,
     buyerTotal: order.total_amount,
-    items: items.map((oi: any) => {
+    items: items.map((oi: any, idx: number) => {
       const lineRevenue = Number(oi.unit_price) * Number(oi.quantity);
       const share = orderRevenue > 0 ? lineRevenue / orderRevenue : 1 / (items.length || 1);
       return {
@@ -379,7 +607,8 @@ export async function getOrderDetail(accountId: string, orderId: string): Promis
         productTitle: String(oi.item.title ?? oi.item.id),
         unitPrice: oi.unit_price,
         quantity: oi.quantity,
-        mlCommission: oi.sale_fee ?? 0,
+        // Comisión TOTAL de la línea (no por unidad): ver resolveLineCommissions.
+        mlCommission: commissions[idx],
         shippingCost: orderShippingCost * share,
       };
     }),

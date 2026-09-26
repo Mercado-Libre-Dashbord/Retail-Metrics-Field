@@ -5,7 +5,7 @@ import { resolveCurrentAccount } from "@/lib/current-account";
 import { revenueStatusFilter } from "@/lib/order-status";
 import { appliesIva } from "@/db/accounts";
 import { recalculateProduct } from "@/sync/sync-service";
-import { getCostEntryAtDate } from "@/sync/profitability";
+import { getCurrentCostEntry } from "@/sync/profitability";
 
 export const runtime = "nodejs";
 
@@ -93,14 +93,14 @@ export async function GET(request: NextRequest) {
 
     const costs = (
       await client.query<{ cost: number; tax: number; validfrom: string | Date }>(
-        `SELECT cost, tax, valid_from as validFrom FROM product_costs WHERE account_id = $1 AND product_id = $2`,
+        `SELECT cost, tax, valid_from as validFrom FROM product_costs WHERE account_id = $1 AND product_id = $2 ORDER BY valid_from, id`,
         [account.id, productId]
       )
     ).rows.map((r) => ({ cost: Number(r.cost), tax: Number(r.tax), validFrom: new Date(r.validfrom).toISOString() }));
 
     let rows = await loadSales();
+    const expected = getCurrentCostEntry(costs)?.cost ?? null;
     const stale = rows.filter((r) => {
-      const expected = getCostEntryAtDate(costs, new Date(r.datecreated).toISOString())?.cost ?? null;
       const applied = r.costapplied === null ? null : Number(r.costapplied);
       if (expected === null || applied === null) return expected !== applied;
       return Math.abs(expected - applied) > 0.005;

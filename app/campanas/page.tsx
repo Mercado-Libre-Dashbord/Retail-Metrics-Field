@@ -40,6 +40,10 @@ interface AdsProductPerformance {
   netProfit: number;
   roas: number | null;
   recommendation: "pausar" | "mantener" | "aumentar";
+  acos: number | null;
+  breakevenAcos: number | null;
+  maxAdSpend: number;
+  missingCost: boolean;
 }
 
 const RECOMMENDATION_LABEL: Record<AdsProductPerformance["recommendation"], string> = {
@@ -56,6 +60,10 @@ const RECOMMENDATION_BADGE: Record<AdsProductPerformance["recommendation"], stri
 
 function fmt(n: number) {
   return n.toLocaleString("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 0 });
+}
+
+function pct(n: number | null) {
+  return n === null ? "—" : `${(n * 100).toFixed(1)}%`;
 }
 
 /**
@@ -346,6 +354,12 @@ export default function CampanasPage() {
           negativa. <strong>Aumentar</strong>: sin publicidad este producto dejaría bastante más que el doble de lo
           que gasta en Ads — hay margen de sobra para invertir más. <strong>Mantener</strong>: da ganancia, pero la
           publicidad ya se lleva una porción grande de esa ganancia.
+          <br /><br />
+          <strong>ACOS</strong>: publicidad ÷ facturación de la publicación (Mercado Libre no separa qué ventas
+          vinieron del anuncio, así que se mide sobre todas). <strong>ACOS de equilibrio</strong>: el máximo ACOS
+          que aguanta el producto antes de perder plata, con comisión, envío, costo e impuestos ya descontados. Si
+          el ACOS lo supera, cada venta con Ads deja pérdida. <strong>Tope de Ads</strong>: lo máximo que se
+          podía gastar en el período sin quedar en rojo.
         </KpiInfo>
       </h2>
       {adsPerformance === null ? (
@@ -369,7 +383,9 @@ export default function CampanasPage() {
                 <th className="num">Publicidad</th>
                 <th className="num">Facturación</th>
                 <th className="num">Ganancia neta</th>
-                <th className="num">ROAS</th>
+                <th className="num">ACOS</th>
+                <th className="num">ACOS de equilibrio</th>
+                <th className="num">Tope de Ads</th>
                 <th>Recomendación</th>
               </tr>
             </thead>
@@ -380,11 +396,29 @@ export default function CampanasPage() {
                   <td className="num">{fmt(p.adSpend)}</td>
                   <td className="num">{fmt(p.revenue)}</td>
                   <td className={`num ${p.netProfit < 0 ? "missing-cost" : ""}`}>{fmt(p.netProfit)}</td>
-                  <td className="num">{p.roas === null ? "—" : p.roas.toFixed(2)}</td>
+                  <td className={`num ${p.acos !== null && p.breakevenAcos !== null && p.acos > p.breakevenAcos ? "missing-cost" : ""}`}>
+                    {pct(p.acos)}
+                  </td>
+                  <td className="num">
+                    {p.breakevenAcos !== null && p.breakevenAcos <= 0 ? (
+                      <span className="missing-cost" title="Pierde plata aun sin publicidad: ningún gasto en Ads le sirve.">
+                        Sin margen
+                      </span>
+                    ) : (
+                      pct(p.breakevenAcos)
+                    )}
+                  </td>
+                  <td className="num">{fmt(p.maxAdSpend)}</td>
                   <td>
-                    <span className={`badge ${RECOMMENDATION_BADGE[p.recommendation]}`}>
-                      {RECOMMENDATION_LABEL[p.recommendation]}
-                    </span>
+                    {p.missingCost ? (
+                      <a className="badge badge-other" href="/productos" title="Hay ventas de esta publicación sin costo cargado: sin eso la ganancia no es real">
+                        Falta costo
+                      </a>
+                    ) : (
+                      <span className={`badge ${RECOMMENDATION_BADGE[p.recommendation]}`}>
+                        {RECOMMENDATION_LABEL[p.recommendation]}
+                      </span>
+                    )}
                   </td>
                 </tr>
               ))}

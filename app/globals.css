@@ -1135,3 +1135,14 @@ table th.num { font-variant-numeric: tabular-nums; }
   .missing-cost-list li.loss-row { flex-direction: column; align-items: stretch; }
   .loss-actions { justify-content: flex-start; }
 }
+
+/* Resumen: conciliación de comisión contra la factura de ML */
+.check-box { border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-3) var(--space-4); margin: var(--space-3) 0; font-size: 13px; background: var(--surface); }
+.check-box p { margin: 4px 0 0; color: var(--text-dim); line-height: 1.5; }
+.check-box.check-ok strong { color: var(--positive, #2e7d4f); }
+.check-box.check-warn { border-color: var(--negative); }
+.check-box.check-warn strong { color: var(--negative); }
+
+/* Productos: de dónde sale el margen */
+.margin-tag { text-align: right; text-transform: none; }
+.margin-tag.margin-bruto { color: var(--negative); }

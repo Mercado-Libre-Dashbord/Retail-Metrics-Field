@@ -9,7 +9,11 @@ vi.mock("./auth", () => ({ getValidAccessToken: vi.fn().mockResolvedValue("token
 import {
   listProducts,
   getOrderDetail,
+  resolveLineCommissions,
   AdsTimeBudgetError,
+  parseListingFee,
+  parseFreeShippingCost,
+  sellerCostFromShipmentCosts,
   listOrders,
   listOrdersPage,
   listUnansweredQuestions,
@@ -50,6 +54,7 @@ describe("listProducts", () => {
     expect(products[0]).toEqual({
       id: "MLA1", title: "Producto 1", sku: "SKU1", price: 1000, stock: 5, permalink: "url1",
       categoryId: null, categoryName: null, thumbnail: null, logisticType: null, inventoryId: null,
+      listingTypeId: null, freeShipping: null,
     });
   });
 
@@ -383,7 +388,8 @@ describe("getOrderDetail", () => {
     const order = await getOrderDetail("acc1", "999");
     // Sin título en la respuesta de ML, el id es el fallback: preferimos un
     // nombre feo antes que una ficha de producto sin nombre.
-    expect(order.items).toEqual([{ productId: "MLA1", productTitle: "MLA1", unitPrice: 500, quantity: 2, mlCommission: 65, shippingCost: 0 }]);
+    // Sin pagos para contrastar, sale_fee se toma por unidad: 65 × 2.
+    expect(order.items).toEqual([{ productId: "MLA1", productTitle: "MLA1", unitPrice: 500, quantity: 2, mlCommission: 130, shippingCost: 0 }]);
     // Sin shipment no se pide /shipments/.../costs.
     expect(vi.mocked(mlFetch)).toHaveBeenCalledTimes(1);
   });
@@ -1209,5 +1215,133 @@ describe("getFullStock", () => {
 
     expect(rows.map((r) => r.inventoryId).sort()).toEqual([...ids].sort());
     expect(mlFetch).toHaveBeenCalledTimes(25);
+  });
+});
+
+describe("resolveLineCommissions", () => {
+  const base = { id: 1, total_amount: 1000, order_items: [{ unit_price: 500, quantity: 2, sale_fee: 65 }] };
+
+  it("con líneas de 1 unidad usa sale_fee tal cual, sin mirar los pagos", () => {
+    const r = resolveLineCommissions({ ...base, order_items: [{ unit_price: 1000, quantity: 1, sale_fee: 130 }] });
+    expect(r).toMatchObject({ commissions: [130], evidence: false });
+  });
+
+  it("si lo cobrado en los pagos coincide con sale_fee × cantidad, es por unidad", () => {
+    const r = resolveLineCommissions({ ...base, payments: [{ status: "approved", transaction_amount: 1000, marketplace_fee: 130 }] });
+    expect(r).toEqual({ commissions: [130], basis: "per_unit", evidence: true });
+  });
+
+  it("si lo cobrado coincide con sale_fee solo, es por línea", () => {
+    const r = resolveLineCommissions({ ...base, payments: [{ status: "approved", transaction_amount: 1000, marketplace_fee: 65 }] });
+    expect(r).toEqual({ commissions: [65], basis: "per_line", evidence: true });
+  });
+
+  it("ignora pagos que cubren más que esta orden (carrito) y usa la lectura por defecto", () => {
+    const r = resolveLineCommissions({ ...base, payments: [{ status: "approved", transaction_amount: 3000, marketplace_fee: 65 }] });
+    expect(r).toEqual({ commissions: [130], basis: "per_unit", evidence: false });
+  });
+
+  it("no cuenta pagos rechazados", () => {
+    const r = resolveLineCommissions({
+      ...base,
+      payments: [
+        { status: "rejected", transaction_amount: 1000, marketplace_fee: 65 },
+        { status: "approved", transaction_amount: 1000, marketplace_fee: 130 },
+      ],
+    });
+    expect(r.basis).toBe("per_unit");
+    expect(r.evidence).toBe(true);
+  });
+});
+
+describe("sellerCostFromShipmentCosts", () => {
+  it("toma lo que paga el vendedor (senders[].cost), no el costo total del envío", () => {
+    expect(sellerCostFromShipmentCosts({ gross_amount: 8250, receiver: { cost: 0 }, senders: [{ cost: 4125 }] }, "1")).toBe(4125);
+  });
+
+  it("si el envío lo pagó el comprador, al vendedor le cuesta 0 aunque gross_amount diga 8250", () => {
+    expect(sellerCostFromShipmentCosts({ gross_amount: 8250, receiver: { cost: 8250 }, senders: [{ cost: 0 }] }, "1")).toBe(0);
+  });
+
+  it("nunca usa gross_amount como costo del vendedor cuando falta el dato del vendedor", () => {
+    expect(sellerCostFromShipmentCosts({ gross_amount: 8250, receiver: { cost: 8250 } }, "1")).toBe(0);
+  });
+
+  it("sigue entendiendo el formato viejo sender.cost", () => {
+    expect(sellerCostFromShipmentCosts({ gross_amount: 8250, sender: { cost: 3000 } }, "1")).toBe(3000);
+  });
+});
+
+describe("getOrderDetail en un carrito (pack)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("reparte un solo envío entre las órdenes del carrito según lo facturado", async () => {
+    vi.mocked(mlFetch).mockImplementation(async (path: string) => {
+      if (path === "/orders/A") {
+        return {
+          id: "A", date_created: "2026-08-06T12:00:00Z", status: "paid", total_amount: 12591, pack_id: 77,
+          shipping: { id: 900 }, order_items: [{ item: { id: "MLA1" }, unit_price: 12591, quantity: 1, sale_fee: 3244.77 }],
+        };
+      }
+      if (path === "/shipments/900/costs") return { gross_amount: 8250, senders: [{ cost: 8250 }] };
+      if (path === "/packs/77") return { id: 77, orders: [{ id: "A" }, { id: "B" }] };
+      if (path === "/orders/B") return { id: "B", total_amount: 37773 };
+      throw new Error("inesperado " + path);
+    });
+
+    const order = await getOrderDetail("acc1", "A");
+
+    // 12591 / (12591 + 37773) = 25% del envío, no el 100%.
+    expect(order.items[0].shippingCost).toBeCloseTo(8250 * (12591 / (12591 + 37773)), 2);
+  });
+
+  it("si no se puede leer el pack, la orden se queda con el envío entero", async () => {
+    vi.mocked(mlFetch).mockImplementation(async (path: string) => {
+      if (path === "/orders/A") {
+        return {
+          id: "A", date_created: "2026-08-06T12:00:00Z", status: "paid", total_amount: 1000, pack_id: 77,
+          shipping: { id: 900 }, order_items: [{ item: { id: "MLA1" }, unit_price: 1000, quantity: 1, sale_fee: 130 }],
+        };
+      }
+      if (path === "/shipments/900/costs") return { senders: [{ cost: 500 }] };
+      throw new Error("sin permiso");
+    });
+
+    const order = await getOrderDetail("acc1", "A");
+    expect(order.items[0].shippingCost).toBe(500);
+  });
+});
+
+describe("parseListingFee", () => {
+  it("lee el cargo por vender y su parte fija", () => {
+    expect(parseListingFee({ listing_type_id: "gold_special", sale_fee_amount: 2186, sale_fee_details: { fixed_fee: 1095, percentage_fee: 14.5 } }, "gold_special"))
+      .toEqual({ saleFee: 2186, fixedFee: 1095 });
+  });
+
+  it("si viene la lista de todos los tipos, toma el de la publicación", () => {
+    const res = [
+      { listing_type_id: "gold_pro", sale_fee_amount: 3000 },
+      { listing_type_id: "gold_special", sale_fee_amount: 2000, sale_fee_details: { fixed_fee: 0 } },
+    ];
+    expect(parseListingFee(res, "gold_special")).toEqual({ saleFee: 2000, fixedFee: 0 });
+  });
+
+  it("sin cargo reconocible devuelve null en vez de inventar un 0", () => {
+    expect(parseListingFee({ error: "not_found" }, "gold_special")).toBeNull();
+    expect(parseListingFee([], "gold_special")).toBeNull();
+  });
+});
+
+describe("parseFreeShippingCost", () => {
+  it("lee coverage.all_country.list_cost", () => {
+    expect(parseFreeShippingCost({ coverage: { all_country: { list_cost: 8250, currency_id: "ARS" } } })).toBe(8250);
+  });
+
+  it("acepta un cero real (envío sin costo para el vendedor)", () => {
+    expect(parseFreeShippingCost({ coverage: { all_country: { list_cost: 0 } } })).toBe(0);
+  });
+
+  it("sin dato devuelve null", () => {
+    expect(parseFreeShippingCost({ something: "else" })).toBeNull();
   });
 });
