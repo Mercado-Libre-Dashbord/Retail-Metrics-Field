@@ -9,22 +9,24 @@ export interface CostEntryResult {
   tax: number;
 }
 
-export function getCostEntryAtDate(costs: ProductCostEntry[], date: string): CostEntryResult | null {
-  let best: ProductCostEntry | null = null;
-  let earliest: ProductCostEntry | null = null;
+/**
+ * El costo que se aplica a una venta: el ÚLTIMO que cargó el vendedor, para
+ * TODAS sus ventas, sin importar la fecha.
+ *
+ * Antes cada costo tenía "vigencia desde" el momento en que se cargaba, y las
+ * ventas viejas conservaban el costo anterior. En la práctica eso era una
+ * trampa: el vendedor corregía un costo mal cargado, el margen cambiaba pero
+ * el beneficio de las ventas ya hechas no, y la única salida era "eliminar el
+ * costo y volver a cargarlo". Ahora cargar un costo nuevo recalcula todo el
+ * historial, que es lo que cualquiera espera. El historial de costos se sigue
+ * guardando (auditoría), pero ya no reparte ventas entre versiones.
+ */
+export function getCurrentCostEntry(costs: ProductCostEntry[]): CostEntryResult | null {
+  let latest: ProductCostEntry | null = null;
   for (const c of costs) {
-    if (c.validFrom <= date && (best === null || c.validFrom >= best.validFrom)) {
-      best = c;
-    }
-    if (earliest === null || c.validFrom < earliest.validFrom) {
-      earliest = c;
-    }
+    if (latest === null || c.validFrom >= latest.validFrom) latest = c;
   }
-  // Un costo cargado hoy para un producto con ventas viejas no tiene ningún
-  // registro con validFrom <= date — pero la mejor estimación disponible para
-  // esas ventas sigue siendo el primer costo que se cargó, no "sin dato".
-  const chosen = best ?? earliest;
-  return chosen ? { cost: chosen.cost, tax: chosen.tax } : null;
+  return latest ? { cost: latest.cost, tax: latest.tax } : null;
 }
 
 export function allocateAdsCost(

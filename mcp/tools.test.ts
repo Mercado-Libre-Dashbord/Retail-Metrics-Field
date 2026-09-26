@@ -11,6 +11,8 @@ import {
   getOrderDetail,
   resolveLineCommissions,
   AdsTimeBudgetError,
+  parseListingFee,
+  parseFreeShippingCost,
   sellerCostFromShipmentCosts,
   listOrders,
   listOrdersPage,
@@ -52,6 +54,7 @@ describe("listProducts", () => {
     expect(products[0]).toEqual({
       id: "MLA1", title: "Producto 1", sku: "SKU1", price: 1000, stock: 5, permalink: "url1",
       categoryId: null, categoryName: null, thumbnail: null, logisticType: null, inventoryId: null,
+      listingTypeId: null, freeShipping: null,
     });
   });
 
@@ -1306,5 +1309,39 @@ describe("getOrderDetail en un carrito (pack)", () => {
 
     const order = await getOrderDetail("acc1", "A");
     expect(order.items[0].shippingCost).toBe(500);
+  });
+});
+
+describe("parseListingFee", () => {
+  it("lee el cargo por vender y su parte fija", () => {
+    expect(parseListingFee({ listing_type_id: "gold_special", sale_fee_amount: 2186, sale_fee_details: { fixed_fee: 1095, percentage_fee: 14.5 } }, "gold_special"))
+      .toEqual({ saleFee: 2186, fixedFee: 1095 });
+  });
+
+  it("si viene la lista de todos los tipos, toma el de la publicación", () => {
+    const res = [
+      { listing_type_id: "gold_pro", sale_fee_amount: 3000 },
+      { listing_type_id: "gold_special", sale_fee_amount: 2000, sale_fee_details: { fixed_fee: 0 } },
+    ];
+    expect(parseListingFee(res, "gold_special")).toEqual({ saleFee: 2000, fixedFee: 0 });
+  });
+
+  it("sin cargo reconocible devuelve null en vez de inventar un 0", () => {
+    expect(parseListingFee({ error: "not_found" }, "gold_special")).toBeNull();
+    expect(parseListingFee([], "gold_special")).toBeNull();
+  });
+});
+
+describe("parseFreeShippingCost", () => {
+  it("lee coverage.all_country.list_cost", () => {
+    expect(parseFreeShippingCost({ coverage: { all_country: { list_cost: 8250, currency_id: "ARS" } } })).toBe(8250);
+  });
+
+  it("acepta un cero real (envío sin costo para el vendedor)", () => {
+    expect(parseFreeShippingCost({ coverage: { all_country: { list_cost: 0 } } })).toBe(0);
+  });
+
+  it("sin dato devuelve null", () => {
+    expect(parseFreeShippingCost({ something: "else" })).toBeNull();
   });
 });

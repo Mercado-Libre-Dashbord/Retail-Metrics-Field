@@ -43,6 +43,7 @@ interface AdsProductPerformance {
   acos: number | null;
   breakevenAcos: number | null;
   maxAdSpend: number;
+  missingCost: boolean;
 }
 
 const RECOMMENDATION_LABEL: Record<AdsProductPerformance["recommendation"], string> = {
@@ -409,9 +410,15 @@ export default function CampanasPage() {
                   </td>
                   <td className="num">{fmt(p.maxAdSpend)}</td>
                   <td>
-                    <span className={`badge ${RECOMMENDATION_BADGE[p.recommendation]}`}>
-                      {RECOMMENDATION_LABEL[p.recommendation]}
-                    </span>
+                    {p.missingCost ? (
+                      <a className="badge badge-other" href="/productos" title="Hay ventas de esta publicación sin costo cargado: sin eso la ganancia no es real">
+                        Falta costo
+                      </a>
+                    ) : (
+                      <span className={`badge ${RECOMMENDATION_BADGE[p.recommendation]}`}>
+                        {RECOMMENDATION_LABEL[p.recommendation]}
+                      </span>
+                    )}
                   </td>
                 </tr>
               ))}

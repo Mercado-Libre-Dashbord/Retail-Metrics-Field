@@ -544,6 +544,44 @@ describe("recalculate", () => {
     ]);
   });
 
+  it("carga TODO el gasto de Ads de una publicación a sus ventas, aunque haya días en que no vendió", async () => {
+    // Antes se repartía día por día: los días sin venta de esa publicación,
+    // su gasto no iba a ninguna parte y el beneficio salía inflado.
+    const { withScope } = await import("@/db/client");
+    const { recalculate } = await import("./sync-service");
+    const account = await makeAccount();
+
+    await withScope({ accountId: account.id }, async (client) => {
+      for (const [id, date] of [["O1", "2026-03-02"], ["O2", "2026-03-09"]]) {
+        await client.query(`INSERT INTO orders (account_id, id, date_created, status, buyer_total) VALUES ($1,$2,$3,'paid',100)`, [account.id, id, date]);
+        await client.query(
+          `INSERT INTO order_items (account_id, order_id, product_id, unit_price, quantity, ml_commission, shipping_cost, ads_cost_allocated)
+           VALUES ($1,$2,'MLA1',100,1,0,0,0)`,
+          [account.id, id]
+        );
+      }
+      // 10 días de gasto a $30 por día = $300; vendió solo 2 de esos días.
+      for (let d = 1; d <= 10; d++) {
+        await client.query(
+          `INSERT INTO ads_spend (account_id, product_id, date, amount, channel) VALUES ($1,'MLA1',$2,30,'mercado_ads')`,
+          [account.id, `2026-03-${String(d).padStart(2, "0")}`]
+        );
+      }
+    });
+
+    await withScope({ accountId: account.id }, (client) => recalculate(client, account.id, false, 0, true));
+
+    const allocated = await withScope({ accountId: account.id }, async (client) => {
+      const r = await client.query<{ ads_cost_allocated: number }>(
+        `SELECT ads_cost_allocated FROM order_items WHERE account_id = $1 ORDER BY order_id`,
+        [account.id]
+      );
+      return r.rows.map((x) => Number(x.ads_cost_allocated));
+    });
+    // $300 entre 2 unidades, no $30 + $30.
+    expect(allocated).toEqual([150, 150]);
+  });
+
   it("aplica el costo vigente, reparte la publicidad del día y calcula la ganancia neta de la línea", async () => {
     const { withScope } = await import("@/db/client");
     const { recalculate } = await import("./sync-service");

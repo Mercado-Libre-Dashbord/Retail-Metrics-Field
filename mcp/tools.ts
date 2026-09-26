@@ -16,14 +16,22 @@ export interface MlProduct {
   logisticType: string | null;
   /** Id para consultar /inventories/{id}/stock/fulfillment. Sin confirmar. */
   inventoryId: string | null;
+  /** gold_special (Clásica), gold_pro (Premium), etc. Define la comisión. */
+  listingTypeId?: string | null;
+  /** Si la publicación ofrece envío gratis: el envío lo paga el vendedor. */
+  freeShipping?: boolean | null;
 }
 
 /** Sin confirmar todavía dónde vive exactamente en la respuesta de /items:
  * puede ser la raíz (ítem simple) o cada variación (ítem con variantes). */
-function extractLogistics(body: any): { logisticType: string | null; inventoryId: string | null } {
+function extractLogistics(body: any): {
+  logisticType: string | null; inventoryId: string | null; listingTypeId: string | null; freeShipping: boolean | null;
+} {
   return {
     logisticType: body?.shipping?.logistic_type ?? null,
     inventoryId: body?.inventory_id ?? body?.variations?.[0]?.inventory_id ?? null,
+    listingTypeId: body?.listing_type_id ?? null,
+    freeShipping: typeof body?.shipping?.free_shipping === "boolean" ? body.shipping.free_shipping : null,
   };
 }
 
@@ -302,6 +310,84 @@ export interface MlOrder {
   status: string;
   buyerTotal: number;
   items: MlOrderItem[];
+}
+
+// ── Estimación de cargos para el margen real ──────────────────────────────
+// Para mostrar el margen de verdad de un producto antes (o sin) ventas: lo
+// que Mercado Libre cobraría hoy por venderlo a su precio.
+
+export interface ListingFeeEstimate {
+  /** Cargo por vender UNA unidad (comisión + cargo fijo). */
+  saleFee: number;
+  /** La parte fija de ese cargo (productos baratos pagan un monto fijo por unidad). */
+  fixedFee: number;
+}
+
+/** Lee la respuesta de /sites/{site}/listing_prices. Null si no trae el cargo. */
+export function parseListingFee(res: any, listingTypeId: string): ListingFeeEstimate | null {
+  const entry = Array.isArray(res) ? res.find((r: any) => r?.listing_type_id === listingTypeId) ?? null : res;
+  const saleFee = Number(entry?.sale_fee_amount);
+  if (!entry || !Number.isFinite(saleFee)) return null;
+  const fixed = Number(entry?.sale_fee_details?.fixed_fee ?? 0);
+  return { saleFee, fixedFee: Number.isFinite(fixed) ? fixed : 0 };
+}
+
+/**
+ * Cargo por vender una unidad a `price`, con la tabla de Mercado Libre para
+ * esa categoría y tipo de publicación (el mismo número que muestra su
+ * calculadora de costos). Null si no se pudo obtener.
+ */
+export async function getListingFee(
+  accountId: string,
+  itemId: string,
+  price: number,
+  categoryId: string,
+  listingTypeId: string
+): Promise<ListingFeeEstimate | null> {
+  const site = itemId.slice(0, 3);
+  const token = await getValidAccessToken(accountId);
+  try {
+    const res = await mlFetch(
+      `/sites/${site}/listing_prices?price=${encodeURIComponent(String(price))}&category_id=${encodeURIComponent(categoryId)}&listing_type_id=${encodeURIComponent(listingTypeId)}`,
+      token
+    );
+    return parseListingFee(res, listingTypeId);
+  } catch (err) {
+    console.warn(`No se pudo estimar el cargo de venta de ${itemId}:`, (err as Error).message);
+    return null;
+  }
+}
+
+/**
+ * Lee la respuesta de /users/{id}/shipping_options/free. La documentación de
+ * ML no fija la forma exacta: se prueban los lugares conocidos y, si no está
+ * en ninguno, null (el margen se muestra aclarando que falta el envío).
+ */
+export function parseFreeShippingCost(res: any): number | null {
+  for (const candidate of [res?.coverage?.all_country?.list_cost, res?.coverage?.all_country?.cost, res?.list_cost, res?.cost]) {
+    const value = Number(candidate);
+    if (candidate !== undefined && candidate !== null && Number.isFinite(value)) return value;
+  }
+  return null;
+}
+
+let warnedFreeShippingShape = false;
+
+/** Lo que le cuesta al vendedor el envío gratis de una unidad de esta publicación. */
+export async function getFreeShippingCost(accountId: string, sellerId: string, itemId: string): Promise<number | null> {
+  const token = await getValidAccessToken(accountId);
+  try {
+    const res = await mlFetch(`/users/${sellerId}/shipping_options/free?item_id=${encodeURIComponent(itemId)}`, token);
+    const cost = parseFreeShippingCost(res);
+    if (cost === null && !warnedFreeShippingShape) {
+      warnedFreeShippingShape = true;
+      console.warn(`Envío gratis de ${itemId}: respuesta sin costo reconocible. Claves: ${Object.keys(res ?? {}).join(", ")}`);
+    }
+    return cost;
+  } catch (err) {
+    console.warn(`No se pudo estimar el envío gratis de ${itemId}:`, (err as Error).message);
+    return null;
+  }
 }
 
 /**

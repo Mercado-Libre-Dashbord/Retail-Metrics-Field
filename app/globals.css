@@ -1142,3 +1142,7 @@ table th.num { font-variant-numeric: tabular-nums; }
 .check-box.check-ok strong { color: var(--positive, #2e7d4f); }
 .check-box.check-warn { border-color: var(--negative); }
 .check-box.check-warn strong { color: var(--negative); }
+
+/* Productos: de dónde sale el margen */
+.margin-tag { text-align: right; text-transform: none; }
+.margin-tag.margin-bruto { color: var(--negative); }

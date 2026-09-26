@@ -9,6 +9,7 @@ vi.mock("@/sync/sync-service", () => ({
   syncBillingCharges: vi.fn().mockResolvedValue(0),
   recalculate: vi.fn().mockResolvedValue({ done: true, nextOffset: null }),
   backfillMissingProducts: vi.fn().mockResolvedValue(0),
+  syncProductEstimates: vi.fn().mockResolvedValue({ updated: 0, done: true }),
   pendingOrderIds: vi.fn(async (_db: unknown, _acc: string, ids: string[]) => ids),
 }));
 vi.mock("@/mcp/tools", () => ({ listOrdersPage: vi.fn() }));
@@ -20,7 +21,7 @@ vi.mock("@/db/accounts", async () => {
 
 import { POST } from "./route";
 import { withScope } from "@/db/client";
-import { syncOrders, syncProductsPage, syncFullStock, recalculate, pendingOrderIds, backfillMissingProducts } from "@/sync/sync-service";
+import { syncOrders, syncProductsPage, syncFullStock, recalculate, pendingOrderIds, backfillMissingProducts, syncProductEstimates } from "@/sync/sync-service";
 import { listOrdersPage } from "@/mcp/tools";
 import { resolveCurrentAccount } from "@/lib/current-account";
 import { setOrdersSyncedThrough } from "@/db/accounts";
@@ -225,7 +226,7 @@ describe("POST /api/sync", () => {
     expect(vi.mocked(recalculate)).toHaveBeenCalled();
   });
 
-  it("el cierre pasa por ads, backfill, stock de Full, recálculo y facturación en ese orden, cada uno en su propia llamada", async () => {
+  it("el cierre pasa por ads, backfill, estimación de cargos, stock de Full, recálculo y facturación en ese orden, cada uno en su propia llamada", async () => {
     vi.mocked(resolveCurrentAccount).mockResolvedValue({ id: "acc1", mlSellerId: "S1", otherTaxRate: 0, taxCondition: "responsable_inscripto" } as any);
     vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query: vi.fn().mockResolvedValue({ rows: [] }) }));
 
@@ -238,7 +239,7 @@ describe("POST /api/sync", () => {
       requestedStep = closingBody.finalizeStep;
     }
 
-    expect(steps).toEqual(["ads", "backfill", "fullstock", "recalc", "billing"]);
+    expect(steps).toEqual(["ads", "backfill", "estimates", "fullstock", "recalc", "billing"]);
     expect(closingBody).toMatchObject({ done: true, finalized: true });
   });
 
@@ -369,5 +370,19 @@ describe("POST /api/sync", () => {
 
     expect(res.status).toBe(429);
     expect(await res.json()).not.toMatchObject({ error: expect.stringContaining("local_rate_limited") });
+  });
+
+  it("repite el paso de estimación de cargos hasta que no queda nada por estimar", async () => {
+    vi.mocked(resolveCurrentAccount).mockResolvedValue({ id: "acc1", mlSellerId: "S1", otherTaxRate: 0, taxCondition: "responsable_inscripto" } as any);
+    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query: vi.fn().mockResolvedValue({ rows: [] }) }));
+    vi.mocked(syncProductEstimates)
+      .mockResolvedValueOnce({ updated: 300, done: false })
+      .mockResolvedValueOnce({ updated: 12, done: true });
+
+    const first = await (await POST(req({ finalize: true, finalizeStep: "estimates" }))).json();
+    const second = await (await POST(req({ finalize: true, finalizeStep: first.finalizeStep }))).json();
+
+    expect(first.finalizeStep).toBe("estimates");
+    expect(second.finalizeStep).toBe("fullstock");
   });
 });

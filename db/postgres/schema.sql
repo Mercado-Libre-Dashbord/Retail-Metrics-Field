@@ -135,6 +135,14 @@ ALTER TABLE products ADD COLUMN IF NOT EXISTS full_stock_unavailable_qty INTEGER
 ALTER TABLE products ADD COLUMN IF NOT EXISTS low_stock_threshold INTEGER;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS full_since TIMESTAMPTZ;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT 'mercado_libre';
+-- Margen estimado con los cargos de Mercado Libre (ver migrations/020-margen-estimado.sql).
+ALTER TABLE products ADD COLUMN IF NOT EXISTS listing_type_id TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS free_shipping BOOLEAN;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS est_price DOUBLE PRECISION;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS est_sale_fee DOUBLE PRECISION;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS est_fixed_fee DOUBLE PRECISION;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS est_shipping_cost DOUBLE PRECISION;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS est_updated_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS product_costs (
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

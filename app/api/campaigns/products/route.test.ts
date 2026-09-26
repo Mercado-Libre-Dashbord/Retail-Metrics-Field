@@ -27,7 +27,7 @@ describe("GET /api/campaigns/products", () => {
 
   it("recomienda pausar un producto cuya ganancia neta (ya con Ads descontado) es negativa", async () => {
     const query = vi.fn().mockResolvedValue({
-      rows: [{ productId: "MLA1", title: "Mochila", revenue: 12591, adSpend: 453.69, netProfit: -6332.46 }],
+      rows: [{ productId: "MLA1", title: "Mochila", revenue: 12591, adSpend: 453.69, netBeforeAds: -5878.77 }],
     });
     vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
 
@@ -35,7 +35,7 @@ describe("GET /api/campaigns/products", () => {
 
     expect(body).toEqual([
       { productId: "MLA1", title: "Mochila", revenue: 12591, adSpend: 453.69, netProfit: -6332.46, roas: 12591 / 453.69,
-        acos: 453.69 / 12591, breakevenAcos: (-6332.46 + 453.69) / 12591, maxAdSpend: 0, recommendation: "pausar" },
+        acos: 453.69 / 12591, breakevenAcos: (-6332.46 + 453.69) / 12591, maxAdSpend: 0, missingCost: false, recommendation: "pausar" },
     ]);
   });
 
@@ -43,7 +43,7 @@ describe("GET /api/campaigns/products", () => {
     // Sin Ads, este producto dejaría 1000 (900 + 100 de Ads) — la publicidad
     // es menos de la mitad de eso: hay margen de sobra para poner más plata.
     const query = vi.fn().mockResolvedValue({
-      rows: [{ productId: "MLA2", title: "Rentable", revenue: 5000, adSpend: 100, netProfit: 900 }],
+      rows: [{ productId: "MLA2", title: "Rentable", revenue: 5000, adSpend: 100, netBeforeAds: 1000.0 }],
     });
     vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
 
@@ -56,7 +56,7 @@ describe("GET /api/campaigns/products", () => {
     // Sin Ads dejaría 200 (100 + 100 de Ads) — la publicidad es la mitad
     // exacta: ni conviene apagarlo (todavía da positivo) ni forzarlo más.
     const query = vi.fn().mockResolvedValue({
-      rows: [{ productId: "MLA3", title: "Al límite", revenue: 3000, adSpend: 100, netProfit: 100 }],
+      rows: [{ productId: "MLA3", title: "Al límite", revenue: 3000, adSpend: 100, netBeforeAds: 200.0 }],
     });
     vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
 
@@ -72,5 +72,27 @@ describe("GET /api/campaigns/products", () => {
     await GET(req("from=2026-08-01&to=2026-08-31"));
 
     expect(query).toHaveBeenCalledWith(expect.any(String), ["acc1", "2026-08-01", "2026-08-31"]);
+  });
+
+  it("muestra a pausar una publicación que gasta en Ads y no vendió nada", async () => {
+    const query = vi.fn().mockResolvedValue({
+      rows: [{ productId: "MLA9", title: "Sin ventas", revenue: 0, adSpend: 2500, netBeforeAds: 0, missingCost: 0 }],
+    });
+    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
+
+    const body = await (await GET(req())).json();
+
+    expect(body[0]).toMatchObject({ productId: "MLA9", netProfit: -2500, recommendation: "pausar", acos: null });
+  });
+
+  it("marca las publicaciones con ventas sin costo cargado", async () => {
+    const query = vi.fn().mockResolvedValue({
+      rows: [{ productId: "MLA8", title: "Sin costo", revenue: 5000, adSpend: 100, netBeforeAds: 0, missingCost: 2 }],
+    });
+    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
+
+    const body = await (await GET(req())).json();
+
+    expect(body[0].missingCost).toBe(true);
   });
 });
