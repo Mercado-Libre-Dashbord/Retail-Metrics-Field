@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import { NoAccountState } from "../NoAccountState";
-import type { ProductMargin } from "@/lib/margin";
 
 interface Product {
   id: string;
@@ -19,8 +18,6 @@ interface Product {
   unitsSold: number;
   totalProfit: number;
   marginPct: number | null;
-  /** Ver lib/margin.ts: real (de sus ventas), estimado (cargos de ML de hoy) o bruto (sin estimación todavía). */
-  margin: ProductMargin | null;
   logisticType: string | null;
   fullStockQty: number | null;
   fullStockUnavailableQty: number | null;
@@ -47,55 +44,6 @@ function fmt(n: number) {
 
 function fmtUsd(n: number) {
   return n.toLocaleString("es-AR", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
-}
-
-const MARGIN_TAG: Record<ProductMargin["kind"], string> = {
-  real: "real",
-  estimado: "estimado",
-  bruto: "sin comisión ni envío",
-};
-
-const SHIPPING_SOURCE_NOTE: Record<NonNullable<ProductMargin["shippingSource"]>, string> = {
-  ventas: "(promedio de tus últimas ventas)",
-  ajustado: "(según lo que pagás de envío en tus otros productos)",
-  lista: "(costo de lista de ML: puede ser menor con tu bonificación)",
-  sin_envio: "(lo paga el comprador)",
-};
-
-/** El desglose por unidad, en texto, para el tooltip de la celda de Margen. */
-function marginTooltip(m: ProductMargin): string {
-  const u = m.perUnit;
-  const origin =
-    m.kind === "real"
-      ? "Promedio por unidad de tus ventas del período:"
-      : m.kind === "estimado"
-        ? "Estimado por unidad: comisión que cobra hoy Mercado Libre a este precio y envío de tus ventas reales:"
-        : "Solo precio − costo − impuestos: todavía no hay estimación de comisión y envío (se calcula al sincronizar).";
-  const lines = [
-    origin,
-    `Precio ${fmt(u.price)}`,
-    `− Comisión ML ${fmt(u.commission)}`,
-    `− Envío ${m.missingShipping ? "(sin dato)" : fmt(u.shipping)}${m.shippingSource ? ` ${SHIPPING_SOURCE_NOTE[m.shippingSource]}` : ""}`,
-    ...(u.ads > 0 ? [`− Publicidad ${fmt(u.ads)}`] : []),
-    `− Costo ${fmt(u.cost)}`,
-    ...(u.taxes > 0 ? [`− Otros impuestos ${fmt(u.taxes)}`] : []),
-    ...(u.iva > 0 ? [`− IVA ${fmt(u.iva)}`] : []),
-    `= Ganancia ${fmt(u.net)} por unidad`,
-  ];
-  return lines.join("\n");
-}
-
-function MarginCell({ margin }: { margin: ProductMargin | null }) {
-  if (!margin) return <td className="num">-</td>;
-  return (
-    <td className={`num ${margin.pct < 0 ? "missing-cost" : ""}`} title={marginTooltip(margin)}>
-      {(margin.pct * 100).toFixed(1)}%
-      <span className={`cell-sub margin-tag margin-${margin.kind}`}>
-        {MARGIN_TAG[margin.kind]}
-        {margin.missingShipping ? " · sin envío" : ""}
-      </span>
-    </td>
-  );
 }
 
 /**
@@ -211,9 +159,7 @@ function BreakdownPanel({
         { label: "Publicidad", value: data.totals.ads, sign: -1 },
         { label: "Costo del producto", value: data.totals.cost, sign: -1 },
         { label: "Otros impuestos", value: data.totals.taxes, sign: -1 },
-        // El IVA no se descuenta de la ganancia (ver deductsIvaFromProfit):
-        // solo se muestra si alguna venta vieja todavía lo trae aplicado.
-        ...(data.totals.iva !== 0 ? [{ label: "IVA a pagar", value: data.totals.iva, sign: -1 as const }] : []),
+        { label: "IVA a pagar", value: data.totals.iva, sign: -1 },
       ]
     : [];
   const biggest = lines.filter((l) => l.sign === -1).sort((a, b) => b.value - a.value)[0];
@@ -977,10 +923,7 @@ export default function ProductosPage() {
               style={{ padding: "6px 8px", minWidth: 220 }}
             />
             <span className="field-hint" style={{ margin: 0 }}>
-              Para ordenar por precio, costo, margen, etc., hacé clic en el encabezado de esa columna. El margen ya
-              descuenta comisión, envío, publicidad y otros impuestos (el IVA no, eso lo liquidás vos): "real" sale de
-              tus ventas del período, "estimado" de la comisión de hoy y el envío de tus ventas anteriores. Pasá el
-              mouse por el margen para ver el desglose.
+              Para ordenar por precio, costo, margen, etc., hacé clic en el encabezado de esa columna.
             </span>
             <label htmlFor="sold-within" className="field-hint" style={{ margin: 0 }}>
               Vendidos en
@@ -1220,7 +1163,7 @@ export default function ProductosPage() {
                     {p.currentCost === null ? "Sin costo cargado" : p.currentCost.toFixed(2)}
                   </td>
                   <td className="num">{p.currentCostUsd === null ? "—" : fmtUsd(p.currentCostUsd)}</td>
-                  <MarginCell margin={p.margin} />
+                  <td className="num">{p.marginPct === null ? "-" : `${(p.marginPct * 100).toFixed(1)}%`}</td>
                   <td className="num">{p.unitsSold}</td>
                   <td>{p.lastSaleDate ? new Date(p.lastSaleDate).toLocaleDateString("es-AR") : "Nunca"}</td>
                   <td className={`num ${p.negativeMargin ? "missing-cost" : ""}`}>

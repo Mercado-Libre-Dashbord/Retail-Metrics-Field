@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withScope } from "@/db/client";
 import { hasColumn } from "@/db/schema-capabilities";
-import { syncProductsPage, syncOrders, syncAds, syncFullStock, syncBillingCharges, recalculate, pendingOrderIds, backfillMissingProducts, syncProductEstimates } from "@/sync/sync-service";
-import { deductsIvaFromProfit, setOrdersSyncedThrough } from "@/db/accounts";
+import { syncProductsPage, syncOrders, syncAds, syncFullStock, syncBillingCharges, recalculate, pendingOrderIds, backfillMissingProducts } from "@/sync/sync-service";
+import { appliesIva, setOrdersSyncedThrough } from "@/db/accounts";
 import { listOrdersPage } from "@/mcp/tools";
 import { resolveCurrentAccount } from "@/lib/current-account";
 import { MlApiError } from "@/mcp/ml-client";
@@ -46,8 +46,6 @@ const ORDERS_PER_BATCH = 50;
  * camino — el sync se caía entero en vez de simplemente tardar un poco más.
  */
 const PRODUCTS_TIME_BUDGET_MS = 35_000;
-/** Presupuesto del paso de estimación de cargos por producto (ver syncProductEstimates). */
-const ESTIMATES_TIME_BUDGET_MS = 35_000;
 
 /**
  * El cierre en sí mismo no entra siempre en una sola llamada: una cuenta con
@@ -60,7 +58,7 @@ const ESTIMATES_TIME_BUDGET_MS = 35_000;
  * ads, stock de Full y facturación quedaban en cero para siempre, aunque el
  * botón "Sincronizar" se apretara una y otra vez.
  */
-const FINALIZE_STEPS = ["ads", "backfill", "estimates", "fullstock", "recalc", "billing"] as const;
+const FINALIZE_STEPS = ["ads", "backfill", "fullstock", "recalc", "billing"] as const;
 type FinalizeStep = (typeof FINALIZE_STEPS)[number];
 
 interface SyncBody {
@@ -136,14 +134,7 @@ export async function POST(request: NextRequest) {
             // vendieron, así aparecen en Productos y se les puede cargar el
             // costo — antes del recálculo, que depende de esos costos.
             await backfillMissingProducts(client, account.id, sellerId);
-            return { ...zeroed, done: false, finalized: false, finalizeStep: "estimates" as FinalizeStep };
-          }
-          case "estimates": {
-            // Lo que Mercado Libre cobraría hoy por vender cada producto (para
-            // el margen real en Productos). Por tandas: se repite este mismo
-            // paso hasta que no quede nada desactualizado.
-            const { done } = await syncProductEstimates(client, account.id, sellerId, Date.now() + ESTIMATES_TIME_BUDGET_MS);
-            return { ...zeroed, done: false, finalized: false, finalizeStep: (done ? "fullstock" : "estimates") as FinalizeStep };
+            return { ...zeroed, done: false, finalized: false, finalizeStep: "fullstock" as FinalizeStep };
           }
           case "fullstock": {
             // Depende del catálogo ya sincronizado (necesita el inventory_id
@@ -157,7 +148,7 @@ export async function POST(request: NextRequest) {
           }
           case "recalc": {
             const { done, nextOffset } = await recalculate(
-              client, account.id, hasIva, account.otherTaxRate, deductsIvaFromProfit(account.taxCondition), recalcOffset
+              client, account.id, hasIva, account.otherTaxRate, appliesIva(account.taxCondition), recalcOffset
             );
             if (!done) {
               return { ...zeroed, done: false, finalized: false, finalizeStep: "recalc" as FinalizeStep, recalcOffset: nextOffset ?? 0 };
@@ -182,7 +173,7 @@ export async function POST(request: NextRequest) {
         const today = new Date().toISOString().slice(0, 10);
         const page = await listOrdersPage(account.id, sellerId, from, today, offset, ORDERS_PER_BATCH);
         const pending = await pendingOrderIds(client, account.id, page.ids);
-        const ordersSynced = await syncOrders(client, account.id, pending, hasIva, account.otherTaxRate, deductsIvaFromProfit(account.taxCondition));
+        const ordersSynced = await syncOrders(client, account.id, pending, hasIva, account.otherTaxRate, appliesIva(account.taxCondition));
 
         return {
           done: page.done,

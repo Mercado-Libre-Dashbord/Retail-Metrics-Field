@@ -3,16 +3,7 @@
 import { useState } from "react";
 
 /** Sub-pasos del cierre — ver la misma lista en app/api/sync/route.ts. */
-type FinalizeStep = "ads" | "backfill" | "estimates" | "fullstock" | "recalc" | "billing";
-
-const FINALIZE_LABEL: Record<FinalizeStep, string> = {
-  ads: "Trayendo el gasto en publicidad…",
-  backfill: "Completando publicaciones dadas de baja…",
-  estimates: "Calculando comisión y envío de cada producto…",
-  fullstock: "Actualizando stock en Full…",
-  recalc: "Recalculando la ganancia de cada venta…",
-  billing: "Trayendo la facturación de Mercado Libre…",
-};
+type FinalizeStep = "ads" | "backfill" | "fullstock" | "recalc" | "billing";
 
 interface SyncResponse {
   done: boolean;
@@ -170,7 +161,6 @@ export function SyncButton() {
               totals.billing += closing.billingChargesSynced ?? 0;
               if (closing.finalized) break;
               finalizeStep = closing.finalizeStep;
-              if (finalizeStep) setProgress(FINALIZE_LABEL[finalizeStep]);
               fullStockOffset = closing.fullStockOffset ?? 0;
               recalcOffset = closing.recalcOffset ?? 0;
             }

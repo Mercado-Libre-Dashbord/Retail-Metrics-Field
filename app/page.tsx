@@ -10,7 +10,6 @@ import { NoAccountState } from "./NoAccountState";
 import { PeriodBar } from "./PeriodBar";
 import { Period, rangeForPeriod, toDateStr } from "@/lib/period";
 import { countsAsRevenue } from "@/lib/order-status";
-import { interpretCommissionCheck, type CommissionCheckInput } from "@/lib/commission-check";
 
 interface PreviousTotals {
   orders: number;
@@ -63,7 +62,6 @@ interface BillingBucket {
 
 interface Billing {
   available: boolean;
-  commissionCheck?: CommissionCheckInput | null;
   buckets: BillingBucket[];
   total: number;
   charges?: number;
@@ -978,7 +976,7 @@ export default function HomePage() {
           <div className="value"><KpiValue>{summary ? fmt(summary.aov) : "-"}</KpiValue></div>
         </div>
         <div className="kpi-card">
-          <div className="kpi-card-head"><KpiIcon name="profit" /><span className="label">Ganancia neta</span><KpiInfo>Facturación − comisión de Mercado Libre − envío − publicidad − costo del producto − otros impuestos. No descuenta IVA: eso lo liquidás vos. Si a un producto le falta el costo cargado, sus ventas quedan afuera de este número: no se inventa un valor.</KpiInfo></div>
+          <div className="kpi-card-head"><KpiIcon name="profit" /><span className="label">Ganancia neta</span><KpiInfo>Facturación − comisión de Mercado Libre − envío − publicidad − costo del producto − IVA − otros impuestos. Si a un producto le falta el costo cargado, sus ventas quedan afuera de este número: no se inventa un valor.</KpiInfo></div>
           <div className="value"><KpiValue>{summary ? fmt(summary.netProfit) : "-"}</KpiValue></div>
           {summary && <DeltaPill current={summary.netProfit} previous={summary.previous?.netProfit} />}
         </div>
@@ -1066,15 +1064,6 @@ export default function HomePage() {
               </tbody>
             </table>
           </div>
-          {billing.commissionCheck && (() => {
-            const verdict = interpretCommissionCheck(billing.commissionCheck);
-            return (
-              <div className={verdict.status === "ok" ? "check-box check-ok" : "check-box check-warn"} role="status">
-                <strong>{verdict.status === "ok" ? "✓ " : "⚠ "}{verdict.title}</strong>
-                <p>{verdict.detail}</p>
-              </div>
-            );
-          })()}
           <details className="explain-box">
             <summary>¿Qué es esta tabla?</summary>
             <p>

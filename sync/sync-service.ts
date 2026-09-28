@@ -1,6 +1,6 @@
 import type { QueryExecutor } from "@/db/client";
-import { listProducts, listOrders, getOrderDetail, getAdsSpend, listBillingPeriods, getBillingCharges, getProductsByIds, getOrderItemTitles, getFullStock, scanProductIds, getProductDetails, getListingFee, getFreeShippingCost, type MlProduct, type ListingFeeEstimate } from "@/mcp/tools";
-import { getCurrentCostEntry, allocateAdsCost, calculateNetProfit, calculateIva } from "./profitability";
+import { listProducts, listOrders, getOrderDetail, getAdsSpend, listBillingPeriods, getBillingCharges, getProductsByIds, getOrderItemTitles, getFullStock, scanProductIds, getProductDetails, type MlProduct } from "@/mcp/tools";
+import { getCostEntryAtDate, allocateAdsCost, calculateNetProfit, calculateIva } from "./profitability";
 import { hasColumn } from "@/db/schema-capabilities";
 
 /**
@@ -10,17 +10,17 @@ import { hasColumn } from "@/db/schema-capabilities";
  * saltean, que es lo que hace que un solo botón pueda recorrer todo el
  * historial sin tardar minutos cada vez.
  */
-export const ORDER_SYNC_VERSION = 3;
 /**
- * Qué cambió en cada versión, para volver a pedirle a ML solo las órdenes que
- * de verdad pueden haber quedado mal (en cuentas grandes, reprocesar todo
- * serían miles de llamadas para nada):
- * - v2: comisión de líneas con más de una unidad (resolveLineCommissions).
- * - v3: envío — ya no se toma gross_amount como costo del vendedor, y en un
- *   carrito el envío se reparte entre sus órdenes. Solo pueden estar mal las
- *   órdenes que tienen envío cargado.
+ * 4 y no 1 a propósito: entre el 26 y el 28/9 estuvo en producción otra
+ * lógica de comisión y envío (versiones 2 y 3) que se revirtió a pedido del
+ * cliente. Las órdenes que esa lógica reprocesó quedaron guardadas con sus
+ * valores; subiendo la versión, el próximo sync las vuelve a pedir y las
+ * recalcula con esta. Las que siguen en 1 nunca pasaron por esa lógica y no
+ * hace falta volver a pedirlas (ver pendingOrderIds).
  */
-const ORDER_SYNC_VERSION_MULTI_UNIT_FIX = 2;
+export const ORDER_SYNC_VERSION = 4;
+/** Versión de las órdenes procesadas con esta misma lógica antes del 26/9. */
+const ORDER_SYNC_VERSION_SAME_LOGIC = 1;
 
 export interface SyncResult {
   productsSynced: number;
@@ -34,8 +34,6 @@ interface ProductColumnFlags {
   hasCategory: boolean;
   hasThumbnail: boolean;
   hasLogistics: boolean;
-  /** listing_type_id / free_shipping (migración 020). */
-  hasListingInfo?: boolean;
 }
 
 /**
@@ -47,10 +45,7 @@ interface ProductColumnFlags {
  * como ficha mínima de una corrida anterior.
  */
 function buildOptionalProductColumns(
-  p: {
-    categoryId?: string | null; categoryName?: string | null; thumbnail?: string | null; logisticType?: string | null;
-    inventoryId?: string | null; listingTypeId?: string | null; freeShipping?: boolean | null;
-  } | undefined,
+  p: { categoryId?: string | null; categoryName?: string | null; thumbnail?: string | null; logisticType?: string | null; inventoryId?: string | null } | undefined,
   flags: ProductColumnFlags,
   updateOnConflict: boolean
 ): { cols: string[]; vals: unknown[]; updateSet: string[] } {
@@ -72,11 +67,6 @@ function buildOptionalProductColumns(
     vals.push(p?.logisticType ?? null, p?.inventoryId ?? null);
     if (updateOnConflict) updateSet.push("logistic_type = excluded.logistic_type", "inventory_id = excluded.inventory_id");
   }
-  if (flags.hasListingInfo) {
-    cols.push("listing_type_id", "free_shipping");
-    vals.push(p?.listingTypeId ?? null, p?.freeShipping ?? null);
-    if (updateOnConflict) updateSet.push("listing_type_id = excluded.listing_type_id", "free_shipping = excluded.free_shipping");
-  }
   return { cols, vals, updateSet };
 }
 
@@ -85,7 +75,6 @@ async function productColumnFlags(db: QueryExecutor): Promise<ProductColumnFlags
     hasCategory: await hasColumn(db, "products", "category_id"),
     hasThumbnail: await hasColumn(db, "products", "thumbnail"),
     hasLogistics: await hasColumn(db, "products", "logistic_type"),
-    hasListingInfo: await hasColumn(db, "products", "listing_type_id"),
   };
 }
 
@@ -125,75 +114,6 @@ export async function syncProducts(db: QueryExecutor, accountId: string, sellerI
   const products = await listProducts(accountId, sellerId);
   await upsertProducts(db, accountId, products, flags, now);
   return products.length;
-}
-
-/** Cada cuánto se vuelve a pedir la estimación de un producto aunque no cambie de precio. */
-const ESTIMATE_MAX_AGE_DAYS = 3;
-const ESTIMATE_CONCURRENCY = 5;
-const ESTIMATE_BATCH = 300;
-
-/**
- * Guarda, por publicación, lo que Mercado Libre cobraría hoy por venderla a
- * su precio: cargo de venta (comisión + cargo fijo, de /listing_prices) y, si
- * ofrece envío gratis, lo que le cuesta ese envío al vendedor. Con eso
- * Productos muestra el margen real de un producto aunque todavía no haya
- * vendido (ver lib/margin.ts).
- *
- * Solo recalcula lo desactualizado (nunca estimado, más viejo que
- * ESTIMATE_MAX_AGE_DAYS, o con precio distinto al estimado), por tandas y
- * con límite de tiempo: quien llama (el paso "estimates" del sync) repite
- * hasta `done`. Un producto cuya estimación falla queda marcado igual, para
- * no reintentarlo en cada vuelta y trabar el sync; se reintenta en unos días.
- */
-export async function syncProductEstimates(
-  db: QueryExecutor,
-  accountId: string,
-  sellerId: string,
-  deadline: number
-): Promise<{ updated: number; done: boolean }> {
-  if (!(await hasColumn(db, "products", "est_updated_at"))) return { updated: 0, done: true };
-
-  const pending = await db.query<{ id: string; price: number; categoryid: string; listingtypeid: string; freeshipping: boolean | null }>(
-    `SELECT id, current_price as price, category_id as categoryId, listing_type_id as listingTypeId, free_shipping as freeShipping
-       FROM products
-      WHERE account_id = $1 AND current_price > 0 AND category_id IS NOT NULL AND listing_type_id IS NOT NULL
-        AND (est_updated_at IS NULL
-             OR est_updated_at < now() - ($2::int * interval '1 day')
-             OR est_price IS DISTINCT FROM current_price)
-      ORDER BY id
-      LIMIT $3`,
-    [accountId, ESTIMATE_MAX_AGE_DAYS, ESTIMATE_BATCH]
-  );
-
-  // Muchas publicaciones comparten precio, categoría y tipo (variantes, packs):
-  // una sola consulta de cargo para todas ellas.
-  const feeCache = new Map<string, Promise<ListingFeeEstimate | null>>();
-  let updated = 0;
-  let i = 0;
-  for (; i < pending.rows.length; i += ESTIMATE_CONCURRENCY) {
-    if (i > 0 && Date.now() >= deadline) break;
-    const chunk = pending.rows.slice(i, i + ESTIMATE_CONCURRENCY);
-    const results = await Promise.all(
-      chunk.map(async (p) => {
-        const price = Number(p.price);
-        const key = `${price}|${p.categoryid}|${p.listingtypeid}`;
-        if (!feeCache.has(key)) feeCache.set(key, getListingFee(accountId, p.id, price, p.categoryid, p.listingtypeid));
-        const fee = await feeCache.get(key)!;
-        const shipping = p.freeshipping === true ? await getFreeShippingCost(accountId, sellerId, p.id) : p.freeshipping === false ? 0 : null;
-        return { p, price, fee, shipping };
-      })
-    );
-    for (const r of results) {
-      await db.query(
-        `UPDATE products SET est_price = $3, est_sale_fee = $4, est_fixed_fee = $5, est_shipping_cost = $6, est_updated_at = now()
-          WHERE account_id = $1 AND id = $2`,
-        [accountId, r.p.id, r.price, r.fee?.saleFee ?? null, r.fee?.fixedFee ?? null, r.shipping]
-      );
-      updated += 1;
-    }
-  }
-  const finishedBatch = i >= pending.rows.length;
-  return { updated, done: finishedBatch && pending.rows.length < ESTIMATE_BATCH };
 }
 
 export interface SyncProductsPageResult {
@@ -244,15 +164,9 @@ export async function pendingOrderIds(
   if (!(await hasColumn(db, "orders", "sync_version"))) return orderIds;
 
   const result = await db.query<{ id: string }>(
-    `SELECT o.id FROM orders o
-      WHERE o.account_id = $1 AND o.id = ANY($2::text[])
-        AND (o.sync_version >= $3
-             OR (o.sync_version >= 1
-                 AND NOT EXISTS (
-                   SELECT 1 FROM order_items oi WHERE oi.account_id = o.account_id AND oi.order_id = o.id AND oi.shipping_cost > 0)
-                 AND (o.sync_version >= $4 OR NOT EXISTS (
-                   SELECT 1 FROM order_items oi WHERE oi.account_id = o.account_id AND oi.order_id = o.id AND oi.quantity > 1))))`,
-    [accountId, orderIds, ORDER_SYNC_VERSION, ORDER_SYNC_VERSION_MULTI_UNIT_FIX]
+    `SELECT id FROM orders
+      WHERE account_id = $1 AND id = ANY($2::text[]) AND (sync_version >= $3 OR sync_version = $4)`,
+    [accountId, orderIds, ORDER_SYNC_VERSION, ORDER_SYNC_VERSION_SAME_LOGIC]
   );
   const upToDate = new Set(result.rows.map((r) => String(r.id)));
   return orderIds.filter((id) => !upToDate.has(id));
@@ -308,7 +222,7 @@ export async function syncOrders(
         );
 
         const costsResult = await db.query<{ cost: number; tax: number; validfrom: string | Date }>(
-          `SELECT cost, tax, valid_from as validFrom FROM product_costs WHERE account_id = $1 AND product_id = $2 ORDER BY valid_from, id`,
+          `SELECT cost, tax, valid_from as validFrom FROM product_costs WHERE account_id = $1 AND product_id = $2`,
           [accountId, item.productId]
         );
         const costs = costsResult.rows.map((r) => ({
@@ -316,7 +230,7 @@ export async function syncOrders(
           tax: Number(r.tax),
           validFrom: new Date(r.validfrom).toISOString(),
         }));
-        const entry = getCurrentCostEntry(costs);
+        const entry = getCostEntryAtDate(costs, order.dateCreated);
         const profitInput = {
           unitPrice: item.unitPrice,
           quantity: item.quantity,
@@ -507,7 +421,6 @@ export async function backfillMissingProducts(
     hasCategory: await hasColumn(db, "products", "category_id"),
     hasThumbnail: await hasColumn(db, "products", "thumbnail"),
     hasLogistics: await hasColumn(db, "products", "logistic_type"),
-    hasListingInfo: await hasColumn(db, "products", "listing_type_id"),
   };
   const now = new Date().toISOString();
 
@@ -562,7 +475,7 @@ export async function recalculateProduct(
   appliesIva = true
 ): Promise<number> {
   const costsResult = await db.query<{ cost: number; tax: number; validfrom: string | Date }>(
-    `SELECT cost, tax, valid_from as validFrom FROM product_costs WHERE account_id = $1 AND product_id = $2 ORDER BY valid_from, id`,
+    `SELECT cost, tax, valid_from as validFrom FROM product_costs WHERE account_id = $1 AND product_id = $2`,
     [accountId, productId]
   );
   const costs = costsResult.rows.map((r) => ({
@@ -580,16 +493,8 @@ export async function recalculateProduct(
     [accountId, productId]
   );
 
-  // Una sola escritura para todas las ventas del producto (arrays + unnest),
-  // no un UPDATE por venta: con miles de ventas, guardar un costo tardaba
-  // lo mismo que miles de idas y vueltas a la base.
-  const entry = getCurrentCostEntry(costs);
-  const ids: number[] = [];
-  const costsApplied: (number | null)[] = [];
-  const taxes: number[] = [];
-  const nets: (number | null)[] = [];
-  const ivas: number[] = [];
   for (const it of itemsResult.rows) {
+    const entry = getCostEntryAtDate(costs, new Date(it.datecreated).toISOString());
     const profitInput = {
       unitPrice: Number(it.unitprice),
       quantity: Number(it.quantity),
@@ -600,21 +505,15 @@ export async function recalculateProduct(
       taxApplied: Number(it.unitprice) * otherTaxRate,
       appliesIva,
     };
-    ids.push(Number(it.id));
-    costsApplied.push(entry?.cost ?? null);
-    taxes.push(profitInput.taxApplied);
-    nets.push(calculateNetProfit(profitInput));
-    ivas.push(calculateIva(profitInput));
-  }
-  if (ids.length > 0) {
     await db.query(
-      `UPDATE order_items AS oi SET cost_applied = v.cost_applied, tax_applied = v.tax_applied, net_profit = v.net_profit${
-        hasIva ? ", iva_applied = v.iva_applied" : ""
-      }
-         FROM unnest($1::bigint[], $2::double precision[], $3::double precision[], $4::double precision[], $5::double precision[])
-           AS v(id, cost_applied, tax_applied, net_profit, iva_applied)
-        WHERE oi.account_id = $6 AND oi.id = v.id`,
-      [ids, costsApplied, taxes, nets, ivas, accountId]
+      `UPDATE order_items SET cost_applied = $1, tax_applied = $2, net_profit = $3${hasIva ? ", iva_applied = $5" : ""} WHERE id = $4`,
+      [
+        entry?.cost ?? null,
+        profitInput.taxApplied,
+        calculateNetProfit(profitInput),
+        it.id,
+        ...(hasIva ? [calculateIva(profitInput)] : []),
+      ]
     );
   }
   return itemsResult.rows.length;
@@ -622,53 +521,44 @@ export async function recalculateProduct(
 
 /**
  * Red de seguridad para "cargué el costo nuevo y el beneficio no cambió":
- * busca ventas cuyo costo aplicado no es el costo vigente del producto (el
- * último cargado, ver getCurrentCostEntry) —incluidas las de productos cuyo
- * costo se borró— y las recalcula. Corre antes de mostrar Productos, así que
- * el beneficio nunca puede quedar con un costo viejo, venga de donde venga el
- * desfasaje (una sincronización en paralelo, un error a mitad de camino, una
- * versión anterior de la app).
- *
- * Una sola consulta con el costo vigente de cada producto calculado una vez
- * (DISTINCT ON), no una subconsulta por venta: es barata aunque la cuenta
- * tenga decenas de miles de ventas. Como mucho `limit` productos por pasada;
- * lo que quede se corrige en la próxima.
+ * busca ventas cuyo costo aplicado no es el que corresponde según lo cargado
+ * hoy (mismo criterio que getCostEntryAtDate: el último vigente a la fecha
+ * de la venta, o el primero cargado si la venta es anterior a todos), solo
+ * entre productos con un costo cargado hace poco — así es barato
+ * aunque la cuenta tenga decenas de miles de ventas — y las recalcula.
  */
-export async function healStaleCosts(
+export async function healRecentCostEdits(
   db: QueryExecutor,
   accountId: string,
   hasIva: boolean,
   otherTaxRate = 0,
   appliesIva = true,
-  limit = 50,
-  /** Pasado este momento no se recalcula nada más (lo que quede, en la próxima pasada o en el sync). */
-  deadline: number = Number.POSITIVE_INFINITY
+  sinceDays = 14
 ): Promise<string[]> {
   const stale = await db.query<{ productid: string }>(
-    `WITH latest AS (
-       SELECT DISTINCT ON (product_id) product_id, cost
-         FROM product_costs WHERE account_id = $1
-        ORDER BY product_id, valid_from DESC, id DESC
-     )
-     SELECT oi.product_id as productId
-       FROM order_items oi
-       LEFT JOIN latest l ON l.product_id = oi.product_id
+    `SELECT DISTINCT oi.product_id as productId
+       FROM order_items oi JOIN orders o ON o.account_id = oi.account_id AND o.id = oi.order_id
       WHERE oi.account_id = $1
-        AND (oi.cost_applied IS DISTINCT FROM l.cost
-             -- Ventas calculadas con IVA descontado cuando ya no corresponde
-             -- (ver deductsIvaFromProfit): también quedaron desactualizadas.
-             ${hasIva && !appliesIva ? "OR COALESCE(oi.iva_applied, 0) <> 0" : ""})
-      GROUP BY oi.product_id
-      LIMIT $2`,
-    [accountId, limit]
+        AND oi.product_id IN (
+          SELECT product_id FROM product_costs
+           WHERE account_id = $1 AND valid_from >= now() - ($2::int * interval '1 day')
+        )
+        AND oi.cost_applied IS DISTINCT FROM COALESCE(
+          (SELECT pc.cost FROM product_costs pc
+            WHERE pc.account_id = oi.account_id AND pc.product_id = oi.product_id AND pc.valid_from <= o.date_created
+            ORDER BY pc.valid_from DESC LIMIT 1),
+          (SELECT pc.cost FROM product_costs pc
+            WHERE pc.account_id = oi.account_id AND pc.product_id = oi.product_id
+            ORDER BY pc.valid_from ASC LIMIT 1)
+        )
+      LIMIT 50`,
+    [accountId, sinceDays]
   );
-  const healed: string[] = [];
-  for (const row of stale.rows) {
-    if (Date.now() >= deadline) break;
-    await recalculateProduct(db, accountId, row.productid, hasIva, otherTaxRate, appliesIva);
-    healed.push(row.productid);
+  const ids = stale.rows.map((r) => r.productid);
+  for (const productId of ids) {
+    await recalculateProduct(db, accountId, productId, hasIva, otherTaxRate, appliesIva);
   }
-  return healed;
+  return ids;
 }
 
 export async function recalculate(
@@ -837,11 +727,15 @@ async function reallocateAdsCosts(
   const items = itemsResult.rows;
   if (items.length === 0) return { done: true, nextOffset: null };
 
-  // Unidades vendidas por día en toda la cuenta, para repartir el gasto de
-  // Ads que no viene atado a ninguna publicación.
+  // Por producto+día (para el caso, hoy inexistente, de que un gasto SÍ
+  // venga atado a una publicación puntual) y por día solo, para todo el
+  // catálogo (para el caso real de hoy: ver más abajo).
+  const unitsSoldByProductDate = new Map<string, number>();
   const unitsSoldByDate = new Map<string, number>();
   for (const it of items) {
     const dateStr = new Date(it.datecreated).toISOString().slice(0, 10);
+    const key = `${it.productid}|${dateStr}`;
+    unitsSoldByProductDate.set(key, (unitsSoldByProductDate.get(key) ?? 0) + Number(it.quantity));
     unitsSoldByDate.set(dateStr, (unitsSoldByDate.get(dateStr) ?? 0) + Number(it.quantity));
   }
 
@@ -849,6 +743,7 @@ async function reallocateAdsCosts(
     `SELECT product_id as productId, date, amount FROM ads_spend WHERE account_id = $1 AND channel = 'mercado_ads'`,
     [accountId]
   );
+  const adsByProductDate = new Map<string, number>();
   // Mercado Ads dejó de discriminar el gasto por publicación (ver
   // getAdsSpend en mcp/tools.ts): TODO lo que llega hoy tiene product_id
   // null. Antes esto se guardaba igual en `adsByProductDate` con clave
@@ -858,34 +753,12 @@ async function reallocateAdsCosts(
   // Ahora ese gasto sin publicación se guarda aparte, por día, y se reparte
   // entre TODAS las unidades vendidas ese día en toda la cuenta.
   const adsByDate = new Map<string, number>();
-  // Gasto atado a una publicación: se junta TODO el de cada publicación (y
-  // entre qué fechas lo hay) para repartirlo entre las unidades que esa
-  // publicación vendió en ese rango. Antes se repartía día por día: el gasto
-  // de un día en que la publicación no vendió nada no se le cargaba a ninguna
-  // venta y se perdía — en productos que venden cada tantos días, la mayor
-  // parte de lo gastado en Ads desaparecía de su beneficio.
-  const adsByProduct = new Map<string, { total: number; from: string; to: string }>();
   for (const row of adsResult.rows) {
     const dateStr = row.date instanceof Date ? row.date.toISOString().slice(0, 10) : String(row.date).slice(0, 10);
     if (row.productid) {
-      const cur = adsByProduct.get(row.productid);
-      if (!cur) adsByProduct.set(row.productid, { total: Number(row.amount), from: dateStr, to: dateStr });
-      else {
-        cur.total += Number(row.amount);
-        if (dateStr < cur.from) cur.from = dateStr;
-        if (dateStr > cur.to) cur.to = dateStr;
-      }
+      adsByProductDate.set(`${row.productid}|${dateStr}`, (adsByProductDate.get(`${row.productid}|${dateStr}`) ?? 0) + Number(row.amount));
     } else {
       adsByDate.set(dateStr, (adsByDate.get(dateStr) ?? 0) + Number(row.amount));
-    }
-  }
-  const unitsSoldInAdsRange = new Map<string, number>();
-  for (const it of items) {
-    const range = adsByProduct.get(it.productid);
-    if (!range) continue;
-    const dateStr = new Date(it.datecreated).toISOString().slice(0, 10);
-    if (dateStr >= range.from && dateStr <= range.to) {
-      unitsSoldInAdsRange.set(it.productid, (unitsSoldInAdsRange.get(it.productid) ?? 0) + Number(it.quantity));
     }
   }
 
@@ -896,7 +769,7 @@ async function reallocateAdsCosts(
   // congelado en null para siempre en vez de tomar el costo recién cargado.
   const loadCostsByProduct = async () => {
     const costsResult = await db.query<{ productid: string; cost: number; tax: number; validfrom: string | Date }>(
-      `SELECT product_id as productId, cost, tax, valid_from as validFrom FROM product_costs WHERE account_id = $1 ORDER BY valid_from, id`,
+      `SELECT product_id as productId, cost, tax, valid_from as validFrom FROM product_costs WHERE account_id = $1`,
       [accountId]
     );
     const byProduct = new Map<string, { cost: number; tax: number; validFrom: string }[]>();
@@ -928,6 +801,7 @@ async function reallocateAdsCosts(
     const cols = hasIva ? 6 : 5;
     batch.forEach((it, idx) => {
       const dateStr = new Date(it.datecreated).toISOString().slice(0, 10);
+      const productDateKey = `${it.productid}|${dateStr}`;
       // Gasto sin publicación asociada (todo Mercado Ads hoy): se reparte
       // entre todas las unidades vendidas ESE DÍA en toda la cuenta, no solo
       // las de este producto — es la única base real que hay para repartirlo.
@@ -936,17 +810,17 @@ async function reallocateAdsCosts(
         unitsSoldByDate.get(dateStr) ?? 0,
         Number(it.quantity)
       );
-      // Gasto atado a esta publicación (lo que trae hoy Mercado Ads): todo
-      // lo que gastó en su rango, repartido entre las unidades que vendió en
-      // ese rango (ver adsByProduct). Nunca se pisa con el de arriba: una
-      // fila de ads_spend tiene product_id o no lo tiene.
-      const range = adsByProduct.get(it.productid);
-      const attributedAds =
-        range && dateStr >= range.from && dateStr <= range.to
-          ? allocateAdsCost(range.total, unitsSoldInAdsRange.get(it.productid) ?? 0, Number(it.quantity))
-          : 0;
+      // Gasto atado a esta publicación puntual (si alguna vez vuelve a venir
+      // así, o se carga a mano para un producto): se reparte solo entre las
+      // unidades de este producto ese día. Nunca se pisan entre sí: una fila
+      // de ads_spend tiene product_id o no lo tiene, nunca las dos cosas.
+      const attributedAds = allocateAdsCost(
+        adsByProductDate.get(productDateKey) ?? 0,
+        unitsSoldByProductDate.get(productDateKey) ?? 0,
+        Number(it.quantity)
+      );
       const adsCostAllocated = unattributedAds + attributedAds;
-      const entry = getCurrentCostEntry(costsByProduct.get(it.productid) ?? []);
+      const entry = getCostEntryAtDate(costsByProduct.get(it.productid) ?? [], new Date(it.datecreated).toISOString());
       const profitInput = {
         unitPrice: Number(it.unitprice),
         quantity: Number(it.quantity),

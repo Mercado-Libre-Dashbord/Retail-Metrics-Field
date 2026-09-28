@@ -1,35 +1,42 @@
 import { describe, it, expect } from "vitest";
-import { getCurrentCostEntry, allocateAdsCost, calculateNetProfit, calculateIva } from "./profitability";
+import { getCostEntryAtDate, allocateAdsCost, calculateNetProfit, calculateIva } from "./profitability";
 
-describe("getCurrentCostEntry", () => {
+describe("getCostEntryAtDate", () => {
   it("returns null when no cost entries exist", () => {
-    expect(getCurrentCostEntry([])).toBeNull();
+    expect(getCostEntryAtDate([], "2026-01-01")).toBeNull();
   });
 
-  it("aplica el último costo cargado a todas las ventas, sin importar su fecha", () => {
-    // Pedido explícito del vendedor: corregir un costo tiene que recalcular
-    // todo el historial, no solo las ventas de ahí en adelante.
+  it("returns the most recent cost/tax valid on or before the date", () => {
     const costs = [
       { cost: 100, tax: 10, validFrom: "2026-01-01" },
       { cost: 120, tax: 15, validFrom: "2026-03-01" },
     ];
-    expect(getCurrentCostEntry(costs)).toEqual({ cost: 120, tax: 15 });
+    expect(getCostEntryAtDate(costs, "2026-02-15")).toEqual({ cost: 100, tax: 10 });
+    expect(getCostEntryAtDate(costs, "2026-03-15")).toEqual({ cost: 120, tax: 15 });
   });
 
-  it("no depende del orden en que vengan los costos", () => {
+  it("falls back to the earliest known entry when it was loaded after the sale date", () => {
+    // Cargar el primer costo de un producto no debería dejar sin dato a las
+    // ventas históricas anteriores a esa carga — usamos la mejor estimación
+    // disponible en vez de null.
+    const costs = [{ cost: 100, tax: 10, validFrom: "2026-03-01" }];
+    expect(getCostEntryAtDate(costs, "2026-01-01")).toEqual({ cost: 100, tax: 10 });
+  });
+
+  it("still prefers an entry valid on or before the date over the earliest one", () => {
     const costs = [
-      { cost: 120, tax: 15, validFrom: "2026-03-01" },
-      { cost: 100, tax: 10, validFrom: "2026-01-01" },
+      { cost: 100, tax: 10, validFrom: "2026-03-01" },
+      { cost: 80, tax: 5, validFrom: "2025-01-01" },
     ];
-    expect(getCurrentCostEntry(costs)).toEqual({ cost: 120, tax: 15 });
+    expect(getCostEntryAtDate(costs, "2025-06-01")).toEqual({ cost: 80, tax: 5 });
   });
 
-  it("con dos costos de la misma fecha gana el último de la lista (el último cargado)", () => {
+  it("picks the latest entry when two share the same validFrom date", () => {
     const costs = [
       { cost: 100, tax: 10, validFrom: "2026-01-01" },
       { cost: 150, tax: 20, validFrom: "2026-01-01" },
     ];
-    expect(getCurrentCostEntry(costs)).toEqual({ cost: 150, tax: 20 });
+    expect(getCostEntryAtDate(costs, "2026-01-01")).toEqual({ cost: 150, tax: 20 });
   });
 });
 
