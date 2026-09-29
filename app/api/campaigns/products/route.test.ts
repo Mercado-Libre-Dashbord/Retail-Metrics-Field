@@ -2,19 +2,35 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@/db/client", () => ({ withScope: vi.fn() }));
 vi.mock("@/lib/current-account", () => ({ resolveCurrentAccount: vi.fn() }));
+vi.mock("@/mcp/tools", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/mcp/tools")>();
+  return { ...actual, getProductAdsReport: vi.fn() };
+});
 
 import { GET } from "./route";
 import { withScope } from "@/db/client";
 import { resolveCurrentAccount } from "@/lib/current-account";
+import { getProductAdsReport } from "@/mcp/tools";
 
 const account = {
   id: "acc1", name: "Cuenta", ownerEmail: "a@example.com", mlSellerId: "S1",
   otherTaxRate: 0, taxCondition: "responsable_inscripto" as const, taxConditionConfirmed: true, createdAt: "2026-01-01",
 };
+const req = (qs = "from=2026-09-01&to=2026-09-28") => ({ nextUrl: { searchParams: new URLSearchParams(qs) } }) as any;
 
-const req = (qs = "") => ({ nextUrl: { searchParams: new URLSearchParams(qs) } }) as any;
+const item = (over: Record<string, unknown>) => ({
+  itemId: "MLA1", campaignId: "C1", clicks: 0, prints: 0, cost: 0, directAmount: 0, indirectAmount: 0,
+  totalAmount: 0, units: 0, organicUnits: 0, organicAmount: 0, ...over,
+});
 
-describe("GET /api/campaigns/products", () => {
+function dbReturning(perProduct: any[], accountRevenue: number) {
+  const query = vi.fn().mockImplementation(async (sql: string) =>
+    sql.includes("unnest") ? { rows: perProduct } : { rows: [{ revenue: accountRevenue }] }
+  );
+  vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
+}
+
+describe("GET /api/campaigns/products (reporte real de Mercado Ads)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(resolveCurrentAccount).mockResolvedValue(account);
@@ -25,51 +41,73 @@ describe("GET /api/campaigns/products", () => {
     expect((await GET(req())).status).toBe(401);
   });
 
-  it("recomienda pausar un producto cuya ganancia neta (ya con Ads descontado) es negativa", async () => {
-    const query = vi.fn().mockResolvedValue({
-      rows: [{ productId: "MLA1", title: "Mochila", revenue: 12591, adSpend: 453.69, netProfit: -6332.46 }],
+  it("calcula ROAS y ACOS con las ventas atribuidas al anuncio, no con toda la facturación del producto", async () => {
+    vi.mocked(getProductAdsReport).mockResolvedValue({
+      available: true, from: "2026-09-01", to: "2026-09-28", clamped: false,
+      campaigns: [{ id: "C1", name: "Hogar", status: "active", budget: 5000 }],
+      items: [item({ itemId: "MLA1", cost: 1000, totalAmount: 8000, units: 4, organicUnits: 12, clicks: 200, prints: 10000 })],
     });
-    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
+    // El producto facturó 64.000 en total (orgánico + Ads) con 40% de margen antes de Ads.
+    dbReturning([{ productId: "MLA1", title: "Sartén", revenue: 64000, netBeforeAds: 25600, missingCost: 0 }], 200000);
 
     const body = await (await GET(req())).json();
+    const p = body.products[0];
 
-    expect(body).toEqual([
-      { productId: "MLA1", title: "Mochila", revenue: 12591, adSpend: 453.69, netProfit: -6332.46, roas: 12591 / 453.69, recommendation: "pausar" },
-    ]);
+    expect(p.roas).toBe(8); // 8000 / 1000, no 64000 / 1000
+    expect(p.acos).toBeCloseTo(0.125);
+    expect(p.breakevenAcos).toBeCloseTo(0.4);
+    expect(p.adsProfit).toBeCloseTo(8000 * 0.4 - 1000);
+    expect(p.recommendation).toBe("aumentar");
+    expect(p.adShare).toBeCloseTo(4 / 16);
+    expect(p.ctr).toBeCloseTo(0.02);
+    expect(p.cpc).toBe(5);
+    expect(p.cvr).toBeCloseTo(0.02);
+    expect(body.totals).toMatchObject({ spend: 1000, adRevenue: 8000, roas: 8 });
+    expect(body.totals.tacos).toBeCloseTo(1000 / 200000);
+    expect(body.campaigns[0]).toMatchObject({ id: "C1", name: "Hogar", spend: 1000, adRevenue: 8000, roas: 8, products: 1 });
   });
 
-  it("recomienda aumentar cuando la publicidad es una porción chica de la ganancia que dejaría el producto sin Ads", async () => {
-    // Sin Ads, este producto dejaría 1000 (900 + 100 de Ads) — la publicidad
-    // es menos de la mitad de eso: hay margen de sobra para poner más plata.
-    const query = vi.fn().mockResolvedValue({
-      rows: [{ productId: "MLA2", title: "Rentable", revenue: 5000, adSpend: 100, netProfit: 900 }],
+  it("recomienda pausar cuando el ACOS supera el margen, y cuando gasta sin vender por publicidad", async () => {
+    vi.mocked(getProductAdsReport).mockResolvedValue({
+      available: true, from: "2026-09-01", to: "2026-09-28", clamped: false, campaigns: [],
+      items: [
+        item({ itemId: "CARO", cost: 3000, totalAmount: 10000 }),
+        item({ itemId: "NADA", cost: 500, totalAmount: 0 }),
+      ],
     });
-    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
-
+    dbReturning(
+      [
+        { productId: "CARO", title: "Caro", revenue: 10000, netBeforeAds: 2000, missingCost: 0 },
+        { productId: "NADA", title: "Nada", revenue: 0, netBeforeAds: null, missingCost: 0 },
+      ],
+      10000
+    );
     const body = await (await GET(req())).json();
-
-    expect(body[0].recommendation).toBe("aumentar");
+    const byId = Object.fromEntries(body.products.map((p: any) => [p.productId, p]));
+    expect(byId.CARO.recommendation).toBe("pausar"); // ACOS 30% > margen 20%
+    expect(byId.NADA.recommendation).toBe("pausar"); // gasta y no vendió nada por publicidad
   });
 
-  it("recomienda mantener cuando la ganancia es positiva pero la publicidad ya se lleva la mitad o más del margen sin Ads", async () => {
-    // Sin Ads dejaría 200 (100 + 100 de Ads) — la publicidad es la mitad
-    // exacta: ni conviene apagarlo (todavía da positivo) ni forzarlo más.
-    const query = vi.fn().mockResolvedValue({
-      rows: [{ productId: "MLA3", title: "Al límite", revenue: 3000, adSpend: 100, netProfit: 100 }],
+  it("sin costo cargado no recomienda nada", async () => {
+    vi.mocked(getProductAdsReport).mockResolvedValue({
+      available: true, from: "2026-09-01", to: "2026-09-28", clamped: false, campaigns: [],
+      items: [item({ itemId: "MLA1", cost: 100, totalAmount: 1000 })],
     });
-    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
-
+    dbReturning([{ productId: "MLA1", title: "X", revenue: 1000, netBeforeAds: null, missingCost: 2 }], 1000);
     const body = await (await GET(req())).json();
-
-    expect(body[0].recommendation).toBe("mantener");
+    expect(body.products[0].recommendation).toBe("sin_costo");
   });
 
-  it("scopes the query to the requested from/to range", async () => {
-    const query = vi.fn().mockResolvedValue({ rows: [] });
-    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
+  it("avisa si la cuenta no tiene Product Ads", async () => {
+    vi.mocked(getProductAdsReport).mockResolvedValue({ available: false, from: null, to: null, clamped: false, items: [], campaigns: [] });
+    const body = await (await GET(req())).json();
+    expect(body).toMatchObject({ available: false, products: [] });
+  });
 
-    await GET(req("from=2026-08-01&to=2026-08-31"));
-
-    expect(query).toHaveBeenCalledWith(expect.any(String), ["acc1", "2026-08-01", "2026-08-31"]);
+  it("devuelve un error entendible si Mercado Ads falla", async () => {
+    vi.mocked(getProductAdsReport).mockRejectedValue(new Error("boom"));
+    const res = await GET(req());
+    expect(res.status).toBe(502);
+    expect((await res.json()).error).toContain("Mercado Ads");
   });
 });

@@ -791,6 +791,150 @@ export async function getAdsSpend(
   return rows;
 }
 
+// ── Reporte de Mercado Ads por publicación (ventas atribuidas) ────────────
+// El gasto solo no alcanza para saber si un anuncio conviene: hace falta lo
+// que se vendió GRACIAS al anuncio. Mercado Ads lo informa por publicación
+// (direct/indirect/total_amount, unidades por publicidad y orgánicas), y con
+// eso ROAS y ACOS salen como los calcula el propio Mercado Ads, no dividiendo
+// toda la facturación del producto por lo gastado.
+
+const ADS_REPORT_METRICS = [
+  "clicks", "prints", "cost",
+  "direct_amount", "indirect_amount", "total_amount",
+  "direct_units_quantity", "indirect_units_quantity", "units_quantity",
+  "organic_units_quantity", "organic_units_amount",
+];
+
+export interface AdsItemMetrics {
+  itemId: string;
+  campaignId: string | null;
+  clicks: number;
+  prints: number;
+  cost: number;
+  /** Ventas por publicidad: compra del mismo producto después del clic. */
+  directAmount: number;
+  /** Ventas por publicidad: otro producto tuyo comprado después del clic. */
+  indirectAmount: number;
+  /** direct + indirect: todo lo atribuido al anuncio. */
+  totalAmount: number;
+  /** Unidades vendidas por publicidad. */
+  units: number;
+  /** Unidades vendidas sin publicidad. */
+  organicUnits: number;
+  organicAmount: number;
+}
+
+export interface AdsReport {
+  /** False: la cuenta no tiene anunciante de Product Ads. */
+  available: boolean;
+  /** Rango efectivamente consultado (ML solo guarda ~90 días). */
+  from: string | null;
+  to: string | null;
+  /** El rango pedido empezaba antes de lo que ML guarda y se recortó. */
+  clamped: boolean;
+  items: AdsItemMetrics[];
+  campaigns: MlCampaign[];
+}
+
+function num(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** Suma las métricas de una fila de ads/search a lo acumulado de esa publicación. */
+export function accumulateAdsItem(acc: Map<string, AdsItemMetrics>, item: any): void {
+  const itemId = item?.item_id != null ? String(item.item_id) : null;
+  if (!itemId) return;
+  const m = item?.metrics ?? {};
+  const cur = acc.get(itemId) ?? {
+    itemId, campaignId: item?.campaign_id != null ? String(item.campaign_id) : null,
+    clicks: 0, prints: 0, cost: 0, directAmount: 0, indirectAmount: 0, totalAmount: 0,
+    units: 0, organicUnits: 0, organicAmount: 0,
+  };
+  const direct = num(m.direct_amount);
+  const indirect = num(m.indirect_amount);
+  cur.clicks += num(m.clicks);
+  cur.prints += num(m.prints);
+  cur.cost += num(m.cost);
+  cur.directAmount += direct;
+  cur.indirectAmount += indirect;
+  // Si ML no manda total_amount, es la suma de las dos.
+  cur.totalAmount += m.total_amount !== undefined && m.total_amount !== null ? num(m.total_amount) : direct + indirect;
+  cur.units += m.units_quantity !== undefined && m.units_quantity !== null
+    ? num(m.units_quantity)
+    : num(m.direct_units_quantity) + num(m.indirect_units_quantity);
+  cur.organicUnits += num(m.organic_units_quantity);
+  cur.organicAmount += num(m.organic_units_amount);
+  if (!cur.campaignId && item?.campaign_id != null) cur.campaignId = String(item.campaign_id);
+  acc.set(itemId, cur);
+}
+
+/**
+ * Métricas reales de Mercado Ads por publicación para un rango (recortado a
+ * lo que ML guarda). Solo lectura: no toca la base ni el cálculo de ganancia.
+ */
+export async function getProductAdsReport(
+  accountId: string,
+  dateFrom: string,
+  dateTo: string,
+  deadline: number = Date.now() + 45_000
+): Promise<AdsReport> {
+  const advertiser = await getAdvertiserId(accountId);
+  if (!advertiser) return { available: false, from: null, to: null, clamped: false, items: [], campaigns: [] };
+
+  const token = await getValidAccessToken(accountId);
+  const base = productAdsBase(advertiser.siteId, advertiser.advertiserId);
+  const today = dateStr(new Date());
+  const to = dateTo > today ? today : dateTo;
+  const from = clampToAdsWindow(dateFrom);
+  const clamped = from !== dateFrom;
+  if (from > to) return { available: true, from, to, clamped, items: [], campaigns: [] };
+
+  const acc = new Map<string, AdsItemMetrics>();
+  const campaignsById = new Map<string, MlCampaign>();
+  const metrics = ADS_REPORT_METRICS.join(",");
+
+  for (const window of splitIntoWindows(from, to)) {
+    if (Date.now() > deadline) throw new AdsTimeBudgetError();
+    const campaigns = await listOrEmpty(
+      () => mlFetch(`${base}/campaigns/search?date_from=${window.from}&date_to=${window.to}&metrics=cost`, token, { headers: { "Api-Version": "2" } }),
+      { results: [] }
+    );
+    const results = campaigns.results ?? [];
+    for (const c of results) {
+      const id = String(c.id);
+      if (!campaignsById.has(id)) campaignsById.set(id, { id, name: c.name ?? id, status: c.status ?? "unknown", budget: num(c.budget) });
+    }
+    if (results.length === 0) continue;
+    // ads/search pide un campaign_id pero no filtra por él: devuelve todas
+    // las publicaciones de la cuenta (ver fetchItemAdsTotals).
+    const campaignId = String(results[0].id);
+    const fetchPage = (offset: number) =>
+      listOrEmpty(
+        () => mlFetch(
+          `${base}/ads/search?campaign_id=${campaignId}&date_from=${window.from}&date_to=${window.to}&metrics=${metrics}&limit=${ADS_ITEMS_PAGE_SIZE}&offset=${offset}`,
+          token,
+          { headers: { "Api-Version": "2" } }
+        ),
+        { results: [] }
+      );
+    const first = await fetchPage(0);
+    (first.results ?? []).forEach((item: any) => accumulateAdsItem(acc, item));
+    const total = typeof first.paging?.total === "number" ? first.paging.total : 0;
+    const offsets: number[] = [];
+    for (let off = (first.results ?? []).length; off < total && offsets.length < ADS_MAX_PAGES - 1; off += ADS_ITEMS_PAGE_SIZE) offsets.push(off);
+    for (let i = 0; i < offsets.length; i += ADS_PAGES_CONCURRENCY) {
+      if (Date.now() > deadline) throw new AdsTimeBudgetError();
+      const pages = await Promise.all(offsets.slice(i, i + ADS_PAGES_CONCURRENCY).map(fetchPage));
+      for (const page of pages) (page.results ?? []).forEach((item: any) => accumulateAdsItem(acc, item));
+    }
+  }
+
+  // Solo las publicaciones que tuvieron actividad de Ads en el rango.
+  const items = [...acc.values()].filter((i) => i.cost > 0 || i.totalAmount > 0 || i.clicks > 0);
+  return { available: true, from, to, clamped, items, campaigns: [...campaignsById.values()] };
+}
+
 export interface MlCampaign {
   id: string;
   name: string;

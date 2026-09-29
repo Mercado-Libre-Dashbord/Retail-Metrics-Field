@@ -8,6 +8,7 @@ import {
 import { NoAccountState } from "../NoAccountState";
 import { PeriodBar } from "../PeriodBar";
 import { Period, rangeForPeriod, toDateStr } from "@/lib/period";
+import type { AdsReportResponse, AdsProductRow } from "@/app/api/campaigns/products/route";
 
 interface Summary {
   adSpend: number;
@@ -32,27 +33,32 @@ interface Campaign {
   budget: number;
 }
 
-interface AdsProductPerformance {
-  productId: string;
-  title: string;
-  revenue: number;
-  adSpend: number;
-  netProfit: number;
-  roas: number | null;
-  recommendation: "pausar" | "mantener" | "aumentar";
-}
-
-const RECOMMENDATION_LABEL: Record<AdsProductPerformance["recommendation"], string> = {
+const RECOMMENDATION_LABEL: Record<AdsProductRow["recommendation"], string> = {
   pausar: "Pausar",
   mantener: "Mantener",
   aumentar: "Aumentar",
+  sin_costo: "Falta costo",
 };
 
-const RECOMMENDATION_BADGE: Record<AdsProductPerformance["recommendation"], string> = {
+const RECOMMENDATION_BADGE: Record<AdsProductRow["recommendation"], string> = {
   pausar: "badge-cancelled",
   mantener: "badge-other",
   aumentar: "badge-paid",
+  sin_costo: "badge-other",
 };
+
+function pct(n: number | null) {
+  return n === null ? "—" : `${(n * 100).toFixed(1)}%`;
+}
+
+function times(n: number | null) {
+  return n === null ? "—" : `${n.toFixed(2)}x`;
+}
+
+function fmtDate(d: string) {
+  const [y, m, day] = d.split("-");
+  return `${day}/${m}/${y}`;
+}
 
 function fmt(n: number) {
   return n.toLocaleString("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 0 });
@@ -102,6 +108,182 @@ function KpiInfo({ children }: { children: React.ReactNode }) {
   );
 }
 
+/**
+ * Rendimiento real de Mercado Ads: ventas atribuidas a cada anuncio según
+ * Mercado Ads, no la facturación total del producto (ver
+ * /api/campaigns/products).
+ */
+function AdsReportSection({ report }: { report: AdsReportResponse | null }) {
+  const header = (
+    <h2 className="section-title">
+      Rendimiento real de Mercado Ads
+      <KpiInfo>
+        Todo sale del reporte de Mercado Ads: cuánto invertiste en cada anuncio y cuánto se vendió <strong>gracias a
+        ese anuncio</strong> (compras después de un clic, del mismo producto o de otro tuyo). <strong>ROAS</strong> =
+        ventas por publicidad ÷ inversión. <strong>ACOS</strong> = inversión ÷ ventas por publicidad.{" "}
+        <strong>ACOS de equilibrio</strong> = el margen del producto antes de publicidad: si el ACOS lo supera, cada
+        venta por Ads te hace perder plata. <strong>Ganancia de Ads</strong> = ventas por publicidad × ese margen −
+        inversión. <strong>% por Ads</strong> = qué parte de las unidades vendidas vino de la publicidad (si es muy
+        alta, el producto depende de pagar Ads para vender). Mercado Ads guarda los últimos ~90 días.
+      </KpiInfo>
+    </h2>
+  );
+
+  if (report === null) return <>{header}<p className="empty-state">Leyendo el reporte de Mercado Ads…</p></>;
+  if (report.error) return <>{header}<p className="field-error" role="alert">{report.error}</p></>;
+  if (!report.available) {
+    return <>{header}<p className="empty-state">Esta cuenta no tiene Product Ads de Mercado Libre.</p></>;
+  }
+  if (!report.totals || report.products.length === 0) {
+    return (
+      <>
+        {header}
+        <p className="empty-state">
+          Sin actividad de Mercado Ads en este período
+          {report.from && report.to ? ` (${fmtDate(report.from)} al ${fmtDate(report.to)})` : ""}.
+        </p>
+      </>
+    );
+  }
+  const t = report.totals;
+  return (
+    <>
+      {header}
+      {report.clamped && report.from && (
+        <p className="field-hint" style={{ marginTop: 0 }}>
+          Mercado Ads solo guarda los últimos ~90 días: se muestra desde el {fmtDate(report.from)}.
+        </p>
+      )}
+      <div className="kpi-grid">
+        <div className="kpi-card">
+          <div className="kpi-card-head"><span className="label">Inversión en Ads</span></div>
+          <div className="value">{fmt(t.spend)}</div>
+        </div>
+        <div className="kpi-card">
+          <div className="kpi-card-head"><span className="label">Ventas por publicidad</span></div>
+          <div className="value">{fmt(t.adRevenue)}</div>
+          <div className="kpi-delta"><span className="kpi-delta-caption">{t.adUnits.toLocaleString("es-AR")} unidades</span></div>
+        </div>
+        <div className="kpi-card">
+          <div className="kpi-card-head"><span className="label">ROAS real</span></div>
+          <div className="value">{times(t.roas)}</div>
+          <div className="kpi-delta"><span className="kpi-delta-caption">ACOS {pct(t.acos)}</span></div>
+        </div>
+        <div className="kpi-card">
+          <div className="kpi-card-head">
+            <span className="label">TACOS</span>
+            <KpiInfo>Inversión en Ads ÷ facturación total de la cuenta (orgánica + publicidad). Cuánto de todo lo que facturás se va en publicidad.</KpiInfo>
+          </div>
+          <div className="value">{pct(t.tacos)}</div>
+        </div>
+        <div className="kpi-card">
+          <div className="kpi-card-head"><span className="label">% de ventas por Ads</span></div>
+          <div className="value">{pct(t.adShare)}</div>
+          <div className="kpi-delta"><span className="kpi-delta-caption">de las unidades de publicaciones con Ads</span></div>
+        </div>
+        <div className="kpi-card">
+          <div className="kpi-card-head"><span className="label">Clics</span></div>
+          <div className="value">{t.clicks.toLocaleString("es-AR")}</div>
+          <div className="kpi-delta"><span className="kpi-delta-caption">CTR {pct(t.ctr)} · CPC {t.cpc === null ? "—" : fmt(t.cpc)}</span></div>
+        </div>
+        <div className="kpi-card">
+          <div className="kpi-card-head"><span className="label">Conversión</span></div>
+          <div className="value">{pct(t.cvr)}</div>
+          <div className="kpi-delta"><span className="kpi-delta-caption">unidades vendidas por clic</span></div>
+        </div>
+      </div>
+
+      {report.campaigns.length > 0 && (
+        <>
+          <h3 className="chart-card-title" style={{ margin: "var(--space-4) 0 var(--space-2)" }}>Por campaña</h3>
+          <div className="table-wrap table-scroll" style={{ marginBottom: "var(--space-4)" }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>Campaña</th>
+                  <th>Estado</th>
+                  <th className="num">Publicaciones</th>
+                  <th className="num">Inversión</th>
+                  <th className="num">Ventas por Ads</th>
+                  <th className="num">ROAS</th>
+                  <th className="num">ACOS</th>
+                </tr>
+              </thead>
+              <tbody>
+                {report.campaigns.map((c) => (
+                  <tr key={c.id}>
+                    <td>{c.name}</td>
+                    <td><span className={`badge ${c.status === "active" ? "badge-paid" : "badge-other"}`}>{c.status}</span></td>
+                    <td className="num">{c.products}</td>
+                    <td className="num">{fmt(c.spend)}</td>
+                    <td className="num">{fmt(c.adRevenue)}</td>
+                    <td className="num">{times(c.roas)}</td>
+                    <td className="num">{pct(c.acos)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      <h3 className="chart-card-title" style={{ margin: "var(--space-4) 0 var(--space-2)" }}>Por publicación</h3>
+      <div className="table-wrap table-scroll" style={{ marginBottom: "var(--space-5)" }}>
+        <table>
+          <thead>
+            <tr>
+              <th>Publicación</th>
+              <th className="num">Inversión</th>
+              <th className="num">Ventas por Ads</th>
+              <th className="num">ROAS</th>
+              <th className="num">ACOS</th>
+              <th className="num">ACOS de equilibrio</th>
+              <th className="num">Ganancia de Ads</th>
+              <th className="num">Clics</th>
+              <th className="num">CTR</th>
+              <th className="num">CPC</th>
+              <th className="num">Conversión</th>
+              <th className="num">% por Ads</th>
+              <th>Recomendación</th>
+            </tr>
+          </thead>
+          <tbody>
+            {report.products.map((p) => (
+              <tr key={p.productId}>
+                <td>
+                  <span className="cell-title" title={p.title}>{p.title}</span>
+                  <span className="cell-sub">{p.productId}</span>
+                </td>
+                <td className="num">{fmt(p.spend)}</td>
+                <td className="num">
+                  {fmt(p.adRevenue)}
+                  <span className="cell-sub">{p.adUnits.toLocaleString("es-AR")} u.</span>
+                </td>
+                <td className="num">{times(p.roas)}</td>
+                <td className={`num ${p.acos !== null && p.breakevenAcos !== null && p.acos > p.breakevenAcos ? "missing-cost" : ""}`}>{pct(p.acos)}</td>
+                <td className="num">{p.breakevenAcos !== null && p.breakevenAcos <= 0 ? <span className="missing-cost">Sin margen</span> : pct(p.breakevenAcos)}</td>
+                <td className={`num ${p.adsProfit !== null && p.adsProfit < 0 ? "missing-cost" : ""}`}>{p.adsProfit === null ? "—" : fmt(p.adsProfit)}</td>
+                <td className="num">{p.clicks.toLocaleString("es-AR")}</td>
+                <td className="num">{pct(p.ctr)}</td>
+                <td className="num">{p.cpc === null ? "—" : fmt(p.cpc)}</td>
+                <td className="num">{pct(p.cvr)}</td>
+                <td className="num">{pct(p.adShare)}</td>
+                <td>
+                  {p.recommendation === "sin_costo" ? (
+                    <a className="badge badge-other" href="/productos" title="Sin el costo del producto no se puede saber si el anuncio deja ganancia">Falta costo</a>
+                  ) : (
+                    <span className={`badge ${RECOMMENDATION_BADGE[p.recommendation]}`}>{RECOMMENDATION_LABEL[p.recommendation]}</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
 export default function CampanasPage() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [daily, setDaily] = useState<DailyAdsRow[] | null>(null);
@@ -115,7 +297,7 @@ export default function CampanasPage() {
   const [campaigns, setCampaigns] = useState<Campaign[] | null>(null);
   const [campaignsError, setCampaignsError] = useState("");
   const [togglingId, setTogglingId] = useState<string | null>(null);
-  const [adsPerformance, setAdsPerformance] = useState<AdsProductPerformance[] | null>(null);
+  const [adsReport, setAdsReport] = useState<AdsReportResponse | null>(null);
 
   const { from, to } = rangeForPeriod(period, customFrom, customTo);
   const activeCampaigns = campaigns?.filter((c) => c.status === "active").length ?? 0;
@@ -129,9 +311,13 @@ export default function CampanasPage() {
       if (r.status === 401) return;
       r.json().then(setDaily);
     });
-    fetch(`/api/campaigns/products?from=${from}&to=${to}`).then((r) => {
+    setAdsReport(null);
+    fetch(`/api/campaigns/products?from=${from}&to=${to}`).then(async (r) => {
       if (r.status === 401) return;
-      r.json().then(setAdsPerformance);
+      const data = await r.json().catch(() => null);
+      setAdsReport(
+        data ?? { available: true, from: null, to: null, clamped: false, error: "No se pudo leer el reporte de Mercado Ads.", totals: null, campaigns: [], products: [] }
+      );
     });
   }
 
@@ -224,8 +410,10 @@ export default function CampanasPage() {
           <div className="value"><KpiValue>{summary ? summary.mer.toFixed(2) : "-"}</KpiValue></div>
         </div>
         <div className="kpi-card">
-          <div className="kpi-card-head"><span className="label">ROAS</span><KpiInfo>Hoy se calcula igual que MER: Mercado Libre no separa qué parte de la facturación vino puntualmente de un anuncio, así que no hay forma de aislar el retorno solo de las ventas por Ads.</KpiInfo></div>
-          <div className="value"><KpiValue>{summary ? summary.roas.toFixed(2) : "-"}</KpiValue></div>
+          <div className="kpi-card-head"><span className="label">ROAS</span><KpiInfo>Ventas que Mercado Ads atribuye a tus anuncios ÷ lo invertido en Mercado Ads. A diferencia del MER, no cuenta las ventas orgánicas: es el retorno real de la publicidad. Mercado Ads guarda los últimos ~90 días.</KpiInfo></div>
+          <div className="value">
+            <KpiValue>{adsReport === null ? "-" : adsReport.totals?.roas != null ? times(adsReport.totals.roas) : "—"}</KpiValue>
+          </div>
         </div>
         <div className="kpi-card">
           <div className="kpi-card-head"><span className="label">CPA</span><KpiInfo>Gasto en Ads ÷ Cantidad de órdenes del período. Cuánto costó, en promedio, cada orden — le atribuyas o no esa orden puntual a un anuncio.</KpiInfo></div>
@@ -336,62 +524,7 @@ export default function CampanasPage() {
         </div>
       ) : null}
 
-      <h2 className="section-title">
-        Rendimiento de Ads por publicación
-        <KpiInfo>
-          Compara la publicidad real que gastó cada publicación contra la ganancia neta que dejó — para decidir a
-          cuál seguir pagando, a cuál sacarle presupuesto y a cuál ponerle más plata, no solo mirar el total de la
-          cuenta. Solo cubre los últimos ~90 días: es el límite que da Mercado Libre para el gasto por publicación
-          puntual, no una limitación nuestra. <strong>Pausar</strong>: la ganancia (ya con Ads descontado) es
-          negativa. <strong>Aumentar</strong>: sin publicidad este producto dejaría bastante más que el doble de lo
-          que gasta en Ads — hay margen de sobra para invertir más. <strong>Mantener</strong>: da ganancia, pero la
-          publicidad ya se lleva una porción grande de esa ganancia.
-        </KpiInfo>
-      </h2>
-      {adsPerformance === null ? (
-        <p className="empty-state">Cargando…</p>
-      ) : adsPerformance.length === 0 ? (
-        <div className="empty-state">
-          <p style={{ margin: 0, fontWeight: 600, color: "var(--text)" }}>
-            Sin gasto de Ads por publicación en este período.
-          </p>
-          <p style={{ margin: "var(--space-2) 0 0" }}>
-            Puede ser que no hayas usado Ads en estas fechas, o que el período elegido quede fuera de los últimos
-            ~90 días (el límite que da Mercado Libre para este dato).
-          </p>
-        </div>
-      ) : (
-        <div className="table-wrap table-scroll" style={{ marginBottom: "var(--space-5)" }}>
-          <table>
-            <thead>
-              <tr>
-                <th>Producto</th>
-                <th className="num">Publicidad</th>
-                <th className="num">Facturación</th>
-                <th className="num">Ganancia neta</th>
-                <th className="num">ROAS</th>
-                <th>Recomendación</th>
-              </tr>
-            </thead>
-            <tbody>
-              {adsPerformance.map((p) => (
-                <tr key={p.productId}>
-                  <td>{p.title}</td>
-                  <td className="num">{fmt(p.adSpend)}</td>
-                  <td className="num">{fmt(p.revenue)}</td>
-                  <td className={`num ${p.netProfit < 0 ? "missing-cost" : ""}`}>{fmt(p.netProfit)}</td>
-                  <td className="num">{p.roas === null ? "—" : p.roas.toFixed(2)}</td>
-                  <td>
-                    <span className={`badge ${RECOMMENDATION_BADGE[p.recommendation]}`}>
-                      {RECOMMENDATION_LABEL[p.recommendation]}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <AdsReportSection report={adsReport} />
 
       <h2 className="section-title">Cargar publicidad externa</h2>
       <form className="ad-form" onSubmit={submitAdSpend} noValidate>

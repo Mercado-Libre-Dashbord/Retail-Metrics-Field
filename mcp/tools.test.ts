@@ -7,6 +7,8 @@ vi.mock("./ml-client", async () => {
 vi.mock("./auth", () => ({ getValidAccessToken: vi.fn().mockResolvedValue("token") }));
 
 import {
+  accumulateAdsItem,
+  getProductAdsReport,
   listProducts,
   getOrderDetail,
   AdsTimeBudgetError,
@@ -1209,5 +1211,58 @@ describe("getFullStock", () => {
 
     expect(rows.map((r) => r.inventoryId).sort()).toEqual([...ids].sort());
     expect(mlFetch).toHaveBeenCalledTimes(25);
+  });
+});
+
+describe("accumulateAdsItem", () => {
+  it("suma las métricas de Mercado Ads de una publicación entre tramos", () => {
+    const acc = new Map();
+    accumulateAdsItem(acc, { item_id: "MLA1", campaign_id: 7, metrics: { cost: 100, clicks: 10, prints: 500, direct_amount: 800, indirect_amount: 200, total_amount: 1000, units_quantity: 2, organic_units_quantity: 5 } });
+    accumulateAdsItem(acc, { item_id: "MLA1", campaign_id: 7, metrics: { cost: 50, clicks: 5, prints: 250, direct_amount: 400, indirect_amount: 0, total_amount: 400, units_quantity: 1, organic_units_quantity: 3 } });
+    expect(acc.get("MLA1")).toMatchObject({ campaignId: "7", cost: 150, clicks: 15, prints: 750, totalAmount: 1400, units: 3, organicUnits: 8 });
+  });
+
+  it("sin total_amount suma directas e indirectas", () => {
+    const acc = new Map();
+    accumulateAdsItem(acc, { item_id: "MLA1", metrics: { direct_amount: 300, indirect_amount: 100, direct_units_quantity: 1, indirect_units_quantity: 1 } });
+    expect(acc.get("MLA1")).toMatchObject({ totalAmount: 400, units: 2 });
+  });
+});
+
+describe("getProductAdsReport", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("pide las métricas de ventas atribuidas, recorre todas las páginas y deja solo publicaciones con actividad", async () => {
+    const paths: string[] = [];
+    vi.mocked(mlFetch).mockImplementation(async (path: string) => {
+      paths.push(path);
+      if (path.startsWith("/advertising/advertisers")) return { advertisers: [{ advertiser_id: 9, site_id: "MLA" }] };
+      if (path.includes("/campaigns/search")) return { results: [{ id: 1, name: "Hogar", status: "active", budget: 3000 }] };
+      const offset = Number(/offset=(\d+)/.exec(path)?.[1] ?? 0);
+      const results = Array.from({ length: Math.min(50, 70 - offset) }, (_, k) => ({
+        item_id: `MLA${offset + k}`, campaign_id: 1,
+        metrics: offset + k === 60 ? { cost: 500, total_amount: 4000, units_quantity: 2, clicks: 40 } : { cost: 0, total_amount: 0, clicks: 0 },
+      }));
+      return { results, paging: { total: 70 } };
+    });
+
+    const today = new Date().toISOString().slice(0, 10);
+    const report = await getProductAdsReport("acc1", today, today);
+
+    expect(report.available).toBe(true);
+    expect(report.campaigns).toEqual([{ id: "1", name: "Hogar", status: "active", budget: 3000 }]);
+    expect(report.items.map((i) => i.itemId)).toEqual(["MLA60"]);
+    expect(report.items[0]).toMatchObject({ cost: 500, totalAmount: 4000, units: 2 });
+    expect(paths.find((p) => p.includes("/ads/search"))).toContain("total_amount");
+  });
+
+  it("recorta el rango a lo que guarda Mercado Ads y lo avisa", async () => {
+    vi.mocked(mlFetch).mockImplementation(async (path: string) => {
+      if (path.startsWith("/advertising/advertisers")) return { advertisers: [{ advertiser_id: 9, site_id: "MLA" }] };
+      return { results: [] };
+    });
+    const report = await getProductAdsReport("acc1", "2020-01-01", new Date().toISOString().slice(0, 10));
+    expect(report.clamped).toBe(true);
+    expect(report.from! > "2020-01-01").toBe(true);
   });
 });
