@@ -9,27 +9,41 @@ vi.mock("@/lib/current-account", () => ({
 }));
 
 import { GET } from "./route";
+
+/** Request con el state en la URL y, opcionalmente, en la cookie del navegador. */
+function req(params: Record<string, string>, cookieState?: string) {
+  return {
+    nextUrl: { searchParams: new URLSearchParams(params) },
+    cookies: { get: (name: string) => (name === "ml_oauth_state" && cookieState ? { value: cookieState } : undefined) },
+    url: "https://retail.metricsfield.com/api/ml/callback",
+  } as any;
+}
 import { resolveCurrentAccount } from "@/lib/current-account";
 
 describe("GET /api/ml/callback", () => {
   it("returns 400 when the authorization code is missing", async () => {
-    const request = { nextUrl: { searchParams: new URLSearchParams({ state: "acc1" }) } } as any;
-    const res = await GET(request);
+    const res = await GET(req({ state: "acc1.n" }, "acc1.n"));
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "Missing authorization code" });
   });
 
-  it("returns 400 when the state (account id) is missing", async () => {
-    const request = { nextUrl: { searchParams: new URLSearchParams({ code: "abc" }) } } as any;
-    const res = await GET(request);
+  it("returns 400 when the state is missing", async () => {
+    const res = await GET(req({ code: "abc" }, "acc1.n"));
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: "Missing state (account id)" });
+  });
+
+  it("rechaza un state que este navegador no pidió (CSRF en la vinculación)", async () => {
+    // Link armado por un tercero: el state es válido para la cuenta de la
+    // víctima, pero el navegador de la víctima no inició esa autorización.
+    const res = await GET(req({ code: "codigo-del-atacante", state: "victim-account.nonce-del-atacante" }));
+    expect(res.status).toBe(400);
+    const otherNonce = await GET(req({ code: "abc", state: "acc1.otro" }, "acc1.propio"));
+    expect(otherNonce.status).toBe(400);
   });
 
   it("rejects an unauthenticated caller instead of trusting state as the account id", async () => {
     vi.mocked(resolveCurrentAccount).mockResolvedValueOnce(null);
-    const request = { nextUrl: { searchParams: new URLSearchParams({ code: "abc", state: "victim-account" }) } } as any;
-    const res = await GET(request);
+    const res = await GET(req({ code: "abc", state: "victim-account.n" }, "victim-account.n"));
     expect(res.status).toBe(401);
   });
 
@@ -42,10 +56,7 @@ describe("GET /api/ml/callback", () => {
       otherTaxRate: 0, taxCondition: "responsable_inscripto" as const, taxConditionConfirmed: true,
       createdAt: "2026-01-01T00:00:00Z",
     });
-    const request = {
-      nextUrl: { searchParams: new URLSearchParams({ code: "abc", state: "victim-account" }) },
-    } as any;
-    const res = await GET(request);
+    const res = await GET(req({ code: "abc", state: "victim-account.n" }, "victim-account.n"));
     expect(res.status).toBe(401);
   });
 });

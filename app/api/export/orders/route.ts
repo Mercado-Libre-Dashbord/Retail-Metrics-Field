@@ -20,7 +20,13 @@ export const runtime = "nodejs";
  */
 function csvCell(value: string | number | null): string {
   if (value === null) return "";
-  const s = String(value);
+  let s = String(value);
+  // Un texto que empieza con = + - @ (o tab/retorno) Excel lo ejecuta como
+  // fórmula al abrir el CSV: un título de publicación tipo
+  // "=HYPERLINK(...)" se volvería un link o un cálculo. Se le antepone un
+  // apóstrofo para que quede como texto. Solo a textos: un número negativo
+  // tiene que seguir siendo número.
+  if (typeof value === "string" && /^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 

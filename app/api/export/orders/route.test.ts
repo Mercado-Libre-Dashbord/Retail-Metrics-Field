@@ -77,4 +77,29 @@ describe("GET /api/export/orders", () => {
     // costApplied null: la línea queda vacía, no "0" ni "null" literal.
     expect(text).toContain("O2,2026-08-06,cancelled,MLA2,Otro,1,500,500,0,0,0,,,,");
   });
+
+  it("neutraliza fórmulas de Excel en los textos, sin tocar los números negativos", async () => {
+    const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes("information_schema.columns")) return { rows: [] };
+      return {
+        rows: [
+          {
+            orderId: "O1", dateCreated: "2026-08-05T00:00:00Z", status: "paid",
+            productId: "MLA1", productTitle: '=HYPERLINK("http://x","clic")',
+            quantity: 1, unitPrice: 1000, mlCommission: 130, shippingCost: 0,
+            adsCostAllocated: 0, costApplied: 2000, taxApplied: null, ivaApplied: null,
+            netProfit: -1130,
+          },
+        ],
+      };
+    });
+    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
+
+    const text = await (await GET(req())).text();
+
+    expect(text).toContain(`"'=HYPERLINK(""http://x"",""clic"")"`);
+    expect(text).toContain("-1130");
+    expect(text).not.toContain("'-1130");
+  });
 });
+
