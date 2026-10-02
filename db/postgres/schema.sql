@@ -446,6 +446,9 @@ $$;
 
 -- ── Grants ───────────────────────────────────────────────────────────────
 GRANT EXECUTE ON FUNCTION app_current_account_id(), app_is_admin(), app_current_user_email(), app_current_loyalty_key_hash(), app_credential_lookup_email(), app_current_credential_invite_hash() TO app_user;
+-- Solo app_user: con EXECUTE para PUBLIC (el default de Postgres) cualquiera
+-- con acceso a la base podía bloquear o resetear el login de otro (ver 020).
+REVOKE EXECUTE ON FUNCTION credential_record_failed_login(text, integer, integer), credential_record_successful_login(text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION credential_record_failed_login(text, integer, integer), credential_record_successful_login(text) TO app_user;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_user;

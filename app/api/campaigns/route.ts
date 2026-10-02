@@ -30,10 +30,14 @@ export async function PATCH(request: NextRequest) {
   const account = await resolveCurrentAccount();
   if (!account) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
 
-  const body = await request.json();
+  const body = await request.json().catch(() => ({}));
   const { campaignId, status } = body as { campaignId?: string; status?: "active" | "paused" };
   if (!campaignId || (status !== "active" && status !== "paused")) {
     return NextResponse.json({ error: "campaignId y status ('active'|'paused') son requeridos" }, { status: 400 });
+  }
+  // Va directo a la URL de Mercado Ads: solo ids numéricos.
+  if (!/^\d+$/.test(String(campaignId))) {
+    return NextResponse.json({ error: "campaignId inválido" }, { status: 400 });
   }
 
   try {

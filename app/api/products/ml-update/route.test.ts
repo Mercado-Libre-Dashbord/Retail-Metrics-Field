@@ -29,6 +29,11 @@ describe("POST /api/products/ml-update", () => {
     expect((await POST(request)).status).toBe(400);
   });
 
+  it("returns 400 for a productId that is not a listing id (it goes into the Mercado Libre URL)", async () => {
+    const request = { json: async () => ({ productId: "MLA1/../../users/me", price: 100 }) } as any;
+    expect((await POST(request)).status).toBe(400);
+  });
+
   it("returns 400 for a non-positive price", async () => {
     const request = { json: async () => ({ productId: "MLA1", price: 0 }) } as any;
     expect((await POST(request)).status).toBe(400);

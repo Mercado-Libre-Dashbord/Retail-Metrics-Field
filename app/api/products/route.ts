@@ -148,7 +148,7 @@ export async function PATCH(request: NextRequest) {
   const account = await resolveCurrentAccount();
   if (!account) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
 
-  const body = await request.json();
+  const body = await request.json().catch(() => ({}));
   const { productId, cost, exchangeRate, costCurrency, lowStockThreshold } = body as {
     productId: string;
     cost?: number;

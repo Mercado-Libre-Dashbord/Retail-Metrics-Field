@@ -86,7 +86,7 @@ export async function PATCH(request: NextRequest) {
   const account = await resolveCurrentAccount();
   if (!account) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
 
-  const body = await request.json();
+  const body = await request.json().catch(() => ({}));
   const { mlQuestionId, answer, action } = body as { mlQuestionId?: number; answer?: string; action?: "save" | "send" };
   if (!mlQuestionId || typeof answer !== "string" || (action !== "save" && action !== "send")) {
     return NextResponse.json({ error: "mlQuestionId, answer y action ('save'|'send') son requeridos" }, { status: 400 });

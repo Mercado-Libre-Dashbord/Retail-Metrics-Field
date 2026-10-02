@@ -55,6 +55,16 @@ describe("PATCH /api/campaigns", () => {
     expect((await PATCH(request)).status).toBe(400);
   });
 
+  it("returns 400 for a campaignId that is not numeric (it goes into the Mercado Ads URL)", async () => {
+    const request = { json: async () => ({ campaignId: "1/../../users/me", status: "paused" }) } as any;
+    expect((await PATCH(request)).status).toBe(400);
+  });
+
+  it("returns 400 for a malformed JSON body", async () => {
+    const request = { json: async () => { throw new SyntaxError("Unexpected token"); } } as any;
+    expect((await PATCH(request)).status).toBe(400);
+  });
+
   it("pauses the campaign", async () => {
     vi.mocked(setCampaignStatus).mockResolvedValue(undefined);
     const request = { json: async () => ({ campaignId: "1", status: "paused" }) } as any;

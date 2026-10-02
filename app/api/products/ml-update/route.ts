@@ -14,10 +14,14 @@ export async function POST(request: NextRequest) {
   const account = await resolveCurrentAccount();
   if (!account) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
 
-  const body = await request.json();
+  const body = await request.json().catch(() => ({}));
   const { productId, price, stock } = body as { productId?: string; price?: number; stock?: number };
   if (!productId || (price === undefined && stock === undefined)) {
     return NextResponse.json({ error: "productId y al menos uno de price/stock son requeridos" }, { status: 400 });
+  }
+  // Va directo a la URL de Mercado Libre: solo ids de publicación (MLA123…).
+  if (typeof productId !== "string" || !/^[A-Z]{3}\d+$/.test(productId)) {
+    return NextResponse.json({ error: "productId inválido" }, { status: 400 });
   }
   if (price !== undefined && (typeof price !== "number" || price <= 0)) {
     return NextResponse.json({ error: "price tiene que ser un número mayor a 0" }, { status: 400 });

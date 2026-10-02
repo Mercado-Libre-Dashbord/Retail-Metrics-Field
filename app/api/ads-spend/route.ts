@@ -35,7 +35,7 @@ export async function POST(request: NextRequest) {
   const account = await resolveCurrentAccount();
   if (!account) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
 
-  const body = await request.json();
+  const body = await request.json().catch(() => ({}));
   const { channel, date, amount } = body as { channel: unknown; date: unknown; amount: unknown };
 
   if (!isManualChannel(channel)) {

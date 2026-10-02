@@ -21,7 +21,7 @@ export async function POST(request: NextRequest) {
   const user = await getCurrentUser();
   if (!user?.isAdmin) return NextResponse.json({ error: "No autorizado" }, { status: 403 });
 
-  const body = await request.json();
+  const body = await request.json().catch(() => ({}));
   const { name, ownerEmail } = body as { name?: string; ownerEmail?: string };
   if (!name || !ownerEmail) {
     return NextResponse.json({ error: "name y ownerEmail son requeridos" }, { status: 400 });
@@ -44,7 +44,7 @@ export async function PATCH(request: NextRequest) {
   const user = await getCurrentUser();
   if (!user?.isAdmin) return NextResponse.json({ error: "No autorizado" }, { status: 403 });
 
-  const body = await request.json();
+  const body = await request.json().catch(() => ({}));
   const { accountId, name, ownerEmail } = body as { accountId?: string; name?: string; ownerEmail?: string };
   if (!accountId) return NextResponse.json({ error: "accountId es requerido" }, { status: 400 });
   if (name === undefined && ownerEmail === undefined) {
