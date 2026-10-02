@@ -43,7 +43,7 @@ export async function resolveCurrentAccount(): Promise<Account | null> {
 
     const accounts = await listAccounts(client);
     if (accounts.length === 0) return null;
-    const selectedId = cookies().get(CURRENT_ACCOUNT_COOKIE)?.value;
+    const selectedId = (await cookies()).get(CURRENT_ACCOUNT_COOKIE)?.value;
     const selected = selectedId ? accounts.find((a) => a.id === selectedId) : undefined;
     return selected ?? accounts[0];
   });
