@@ -39,6 +39,19 @@ CREATE POLICY trial_requests_delete ON trial_requests FOR DELETE USING (app_is_a
 GRANT SELECT, INSERT, UPDATE, DELETE ON trial_requests TO app_user;
 GRANT USAGE, SELECT ON SEQUENCE trial_requests_id_seq TO app_user;
 
+-- Como en la 020: los roles públicos de Supabase no tocan esta tabla.
+DO $$
+DECLARE r TEXT;
+BEGIN
+  FOREACH r IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+      EXECUTE format('REVOKE ALL ON trial_requests FROM %I', r);
+      EXECUTE format('REVOKE ALL ON SEQUENCE trial_requests_id_seq FROM %I', r);
+    END IF;
+  END LOOP;
+END
+$$;
+
 -- Verificación: 1 fila, con rowsecurity y forcerowsecurity en true.
 SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
   FROM pg_class c WHERE c.relname = 'trial_requests';
