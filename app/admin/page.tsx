@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { TrialRequests } from "./TrialRequests";
 
 interface AccountRow {
   id: string;
@@ -154,6 +155,14 @@ export default function AdminAccountsPage() {
   return (
     <div>
       <h1>Cuentas</h1>
+
+      <TrialRequests
+        onCreateAccount={(name, ownerEmail) => {
+          setForm({ name, ownerEmail });
+          setError("");
+          document.getElementById("acc-name")?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }}
+      />
 
       <h2 className="section-title">Nueva cuenta</h2>
       <form className="ad-form" onSubmit={createAccount} noValidate style={{ marginBottom: 24 }}>
