@@ -15,6 +15,9 @@ const TAX_CONDITION_LABEL: Record<TaxCondition, string> = {
 export default function ConfiguracionPage() {
   const [rate, setRate] = useState("");
   const [taxCondition, setTaxCondition] = useState<TaxCondition>("responsable_inscripto");
+  // El régimen que está guardado (no el que está elegido en el desplegable):
+  // decide si se puede cargar el IVA pagado.
+  const [savedTaxCondition, setSavedTaxCondition] = useState<TaxCondition>("responsable_inscripto");
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -27,7 +30,10 @@ export default function ConfiguracionPage() {
       const data = await r.json();
       // Se guarda como fracción (0.03) y se edita como porcentaje (3).
       setRate(String((Number(data.otherTaxRate ?? 0) * 100).toFixed(2).replace(/\.?0+$/, "")));
-      if (data.taxCondition) setTaxCondition(data.taxCondition);
+      if (data.taxCondition) {
+        setTaxCondition(data.taxCondition);
+        setSavedTaxCondition(data.taxCondition);
+      }
       setLoaded(true);
     }).catch(() => {
       setError("No se pudo cargar la configuración.");
@@ -62,6 +68,7 @@ export default function ConfiguracionPage() {
       const data = await res.json();
       if (!res.ok) { setError(data.error ?? "No se pudo guardar."); return; }
       setSaved(true);
+      setSavedTaxCondition(taxCondition);
     } finally {
       setSaving(false);
     }
@@ -158,7 +165,13 @@ export default function ConfiguracionPage() {
         </details>
       </div>
 
-      {loaded && taxCondition === "responsable_inscripto" && <IvaPaid />}
+      {loaded && (
+        <IvaPaid
+          key={savedTaxCondition}
+          appliesIva={savedTaxCondition === "responsable_inscripto"}
+          conditionLabel={TAX_CONDITION_LABEL[savedTaxCondition]}
+        />
+      )}
     </div>
   );
 }

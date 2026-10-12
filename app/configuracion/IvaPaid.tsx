@@ -16,26 +16,39 @@ const pct = (n: number) => `${(n * 100).toFixed(2).replace(".", ",")}%`;
  * el % efectivo del mes y se aplica a sus ventas; los meses sin cargar usan
  * el % del último mes cargado.
  */
-export function IvaPaid() {
+export function IvaPaid({ appliesIva, conditionLabel }: { appliesIva: boolean; conditionLabel: string }) {
   const [months, setMonths] = useState<IvaMonth[] | null>(null);
   const [available, setAvailable] = useState(true);
-  const [appliesIva, setAppliesIva] = useState(true);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [savingPeriod, setSavingPeriod] = useState<string | null>(null);
   const [message, setMessage] = useState<{ period: string; text: string; error?: boolean } | null>(null);
 
   useEffect(() => {
+    if (!appliesIva) return;
     fetch("/api/account/iva")
       .then((r) => (r.ok ? r.json() : Promise.reject()))
       .then((data) => {
         setMonths(data.months ?? []);
         setAvailable(data.available !== false);
-        setAppliesIva(data.appliesIva !== false);
       })
       .catch(() => setMonths([]));
-  }, []);
+  }, [appliesIva]);
 
-  if (!appliesIva) return null;
+  if (!appliesIva) {
+    return (
+      <>
+        <h2 className="section-title">IVA que pagaste</h2>
+        <div className="day-card" style={{ maxWidth: 620 }}>
+          <p className="field-hint" style={{ margin: 0 }}>
+            Esta cuenta figura como <strong>{conditionLabel}</strong>, así que hoy no se descuenta IVA de sus ventas.
+            Si es Responsable Inscripto y la pusiste así para cargar el IVA a mano, ya no hace falta: elegí
+            &quot;Responsable Inscripto&quot; arriba, apretá Guardar, y acá vas a poder cargar el IVA que pagó cada mes.
+            Con eso calculamos su % de IVA real y lo descontamos de cada venta.
+          </p>
+        </div>
+      </>
+    );
+  }
 
   const loadedRates = (months ?? []).filter((m) => m.effectiveRate !== null);
   /** % que se usa en un mes sin monto: el del último mes cargado anterior, o el primero cargado. */
