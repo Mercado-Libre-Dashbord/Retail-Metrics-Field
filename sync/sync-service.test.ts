@@ -704,4 +704,41 @@ describe("syncBillingCharges", () => {
     expect(loggedText).not.toContain("80");
     warnSpy.mockRestore();
   });
+
+  it("borra la fila basura 'undefined', guarda miles de cargos en pocas escrituras y no duplica ids repetidos", async () => {
+    const { listBillingPeriods, getBillingCharges } = await import("@/mcp/tools");
+    vi.mocked(listBillingPeriods).mockResolvedValueOnce([
+      { key: "2026-09-01", dateFrom: "2026-09-01", dateTo: "2026-09-30", amount: 100, periodStatus: "CLOSED" },
+    ]);
+    const many = Array.from({ length: 1200 }, (_, i) => ({
+      detailId: `D${i}`, periodKey: "2026-09-01", detailType: "CHARGE", detailSubType: "CV", concept: "Cargo por venta",
+      orderId: `O${i}`, amount: 10, chargedAt: "2026-09-10T12:00:00.000-03:00",
+    }));
+    vi.mocked(getBillingCharges).mockResolvedValueOnce([...many, { ...many[0], amount: 15 }]);
+
+    const { withScope } = await import("@/db/client");
+    const { syncBillingCharges } = await import("./sync-service");
+    const account = await makeAccount();
+    const result = await withScope({ accountId: account.id }, async (client) => {
+      await client.query(
+        `INSERT INTO billing_charges (account_id, detail_id, period_key, amount) VALUES ($1, 'undefined', '2026-09-01', 0)`,
+        [account.id]
+      );
+      const queries: string[] = [];
+      const spy = { query: (sql: string, params?: unknown[]) => { queries.push(sql); return client.query(sql, params); } };
+      const saved = await syncBillingCharges(spy as any, account.id);
+      const rows = await client.query<{ n: string; total: number; bogus: string }>(
+        `SELECT count(*) AS n, sum(amount) AS total, count(*) FILTER (WHERE detail_id = 'undefined') AS bogus FROM billing_charges WHERE account_id = $1`,
+        [account.id]
+      );
+      return { saved, inserts: queries.filter((q) => q.includes("INSERT INTO billing_charges")).length, ...rows.rows[0] };
+    });
+
+    expect(result.saved).toBe(1200);
+    expect(Number(result.n)).toBe(1200);
+    expect(Number(result.bogus)).toBe(0);
+    // D0 llegó dos veces: queda la última versión (15), sin error de duplicado.
+    expect(Number(result.total)).toBe(1199 * 10 + 15);
+    expect(result.inserts).toBeLessThanOrEqual(3);
+  });
 });

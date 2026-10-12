@@ -23,6 +23,7 @@ import {
   splitIntoWindows,
   createSellerCoupon,
   listBillingPeriods,
+  getBillingCharges,
   getStoreVisits,
   getProductsByIds,
   clampToAdsWindow,
@@ -942,6 +943,70 @@ describe("listBillingPeriods", () => {
     expect(periods).toEqual([
       { key: "2026-07-01", dateFrom: "2026-07-01", dateTo: "2026-07-31", amount: 1234.5, periodStatus: "CLOSED" },
     ]);
+  });
+});
+
+describe("getBillingCharges", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  // Forma de la respuesta según la documentación de ML: el cargo anidado en
+  // charge_info y la venta en sales_info (una lista).
+  const row = (id: number, amount: number, sub = "CV", text = "Cargo por venta", orderId: number | null = 2000001) => ({
+    charge_info: {
+      legal_document_number: "A-0001-00012345",
+      creation_date_time: "2026-09-10T12:00:00.000-03:00",
+      detail_id: id,
+      transaction_detail: text,
+      detail_amount: amount,
+      detail_type: "CHARGE",
+      detail_sub_type: sub,
+    },
+    discount_info: { charge_amount_without_discount: amount, discount_amount: 0 },
+    sales_info: orderId === null ? [] : [{ order_id: orderId, operation_id: 99, sale_date_time: "2026-09-10T11:00:00.000-03:00" }],
+    items_info: [{ item_id: "MLA1", item_title: "Lámpara" }],
+  });
+
+  it("lee el cargo desde charge_info y la orden desde sales_info", async () => {
+    vi.mocked(mlFetch).mockResolvedValueOnce({ results: [row(111, 2500.5), row(112, 3900, "CXD", "Costo de envío", null)] });
+
+    const charges = await getBillingCharges("acc1", "2026-09-01");
+
+    expect(charges).toEqual([
+      { detailId: "111", periodKey: "2026-09-01", detailType: "CHARGE", detailSubType: "CV", concept: "Cargo por venta", orderId: "2000001", amount: 2500.5, chargedAt: "2026-09-10T12:00:00.000-03:00" },
+      { detailId: "112", periodKey: "2026-09-01", detailType: "CHARGE", detailSubType: "CXD", concept: "Costo de envío", orderId: null, amount: 3900, chargedAt: "2026-09-10T12:00:00.000-03:00" },
+    ]);
+  });
+
+  it("nunca devuelve un cargo con id 'undefined' (antes todos colapsaban en esa clave)", async () => {
+    vi.mocked(mlFetch).mockResolvedValueOnce({ results: [{ charge_info: { detail_amount: 10 } }, row(5, 1)] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const charges = await getBillingCharges("acc1", "2026-09-01");
+    expect(charges.map((c) => c.detailId)).toEqual(["5"]);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("pagina con from_id hasta traer todo", async () => {
+    const page1 = Array.from({ length: 1000 }, (_, i) => row(i + 1, 1));
+    vi.mocked(mlFetch)
+      .mockResolvedValueOnce({ results: page1 })
+      .mockResolvedValueOnce({ results: [row(1001, 1), row(1002, 1)] });
+
+    const charges = await getBillingCharges("acc1", "2026-09-01");
+
+    expect(charges).toHaveLength(1002);
+    const urls = vi.mocked(mlFetch).mock.calls.map((c) => c[0] as string);
+    expect(urls[0]).toContain("from_id=0");
+    expect(urls[0]).toContain("document_type=BILL");
+    expect(urls[1]).toContain("from_id=1000");
+  });
+
+  it("sigue aceptando el formato plano", async () => {
+    vi.mocked(mlFetch).mockResolvedValueOnce({
+      results: [{ detail_id: 7, detail_type: "CHARGE", detail_sub_type: "CV", concept: "Comisión", order_id: 3, detail_amount: 40, creation_date_time: null }],
+    });
+    const [c] = await getBillingCharges("acc1", "2026-09-01");
+    expect(c).toMatchObject({ detailId: "7", concept: "Comisión", orderId: "3", amount: 40 });
   });
 });
 

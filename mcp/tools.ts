@@ -1352,20 +1352,34 @@ export async function listBillingPeriods(accountId: string): Promise<MlBillingPe
 }
 
 /**
- * Detalle de cargos de un período. Se pagina con `from_id` hasta que ML deja
- * de devolver resultados; el tope de vueltas evita un loop infinito si la API
- * ignora el cursor.
+ * Detalle de cargos de un período, paginado con `from_id` (el único método
+ * que según la documentación de ML garantiza traer todo; `offset` corta en
+ * 10.000). El tope de vueltas evita un loop infinito si la API ignora el
+ * cursor.
+ *
+ * Cada resultado viene anidado: los datos del cargo están en `charge_info`
+ * (detail_id, detail_amount, detail_type, detail_sub_type,
+ * transaction_detail, creation_date_time) y la venta en `sales_info` (una
+ * lista con order_id). Antes se leían del nivel de arriba: no había
+ * detail_id, todos los cargos se guardaban bajo la misma clave "undefined"
+ * con monto 0, y la conciliación mostraba "Otros cargos $0". Se sigue
+ * aceptando el formato plano por si algún recurso lo devuelve así.
  */
-export async function getBillingCharges(accountId: string, periodKey: string): Promise<MlBillingCharge[]> {
+export async function getBillingCharges(
+  accountId: string,
+  periodKey: string,
+  /** Pasado este momento no se piden más páginas: se devuelve lo traído. */
+  deadline = Number.POSITIVE_INFINITY
+): Promise<MlBillingCharge[]> {
   const token = await getValidAccessToken(accountId);
-  const PAGE_SIZE = 100;
-  const MAX_PAGES = 50;
+  const PAGE_SIZE = 1000;
+  const MAX_PAGES = 30;
   const charges: MlBillingCharge[] = [];
-  let fromId: string | null = null;
+  let fromId = "0";
+  let skipped = 0;
 
   for (let page = 0; page < MAX_PAGES; page += 1) {
-    const query = new URLSearchParams({ document_type: "BILL", limit: String(PAGE_SIZE) });
-    if (fromId) query.set("from_id", fromId);
+    const query = new URLSearchParams({ document_type: "BILL", limit: String(PAGE_SIZE), from_id: fromId });
     const res: any = await listOrEmpty(
       () => mlFetch(`/billing/integration/periods/key/${periodKey}/group/ML/details?${query}`, token),
       { results: [] }
@@ -1373,27 +1387,43 @@ export async function getBillingCharges(accountId: string, periodKey: string): P
     const rows: any[] = res.results ?? res.details ?? [];
     if (rows.length === 0) break;
 
+    let lastId: string | null = null;
     for (const row of rows) {
+      const ci = row.charge_info ?? row;
+      const detailId = firstDefined(ci.detail_id, row.detail_id, row.id);
+      if (!detailId) {
+        skipped += 1;
+        continue;
+      }
+      lastId = detailId;
+      const sales = Array.isArray(row.sales_info) ? row.sales_info : row.sales_info ? [row.sales_info] : [];
       charges.push({
-        detailId: String(row.detail_id ?? row.id),
+        detailId,
         periodKey,
-        detailType: row.detail_type ?? null,
-        detailSubType: row.detail_sub_type ?? null,
-        concept: row.concept ?? row.detail_sub_type ?? row.detail_type ?? null,
+        detailType: ci.detail_type ?? null,
+        detailSubType: ci.detail_sub_type ?? null,
+        concept: ci.transaction_detail ?? ci.concept ?? ci.detail_sub_type ?? ci.detail_type ?? null,
         // ML nombra este campo distinto según el tipo de cargo; el primero que
         // exista es el que ata el cargo a una venta nuestra.
-        orderId: firstDefined(row.order_id, row.transaction_detail?.order_id, row.sales_info?.order_id),
-        amount: Number(row.detail_amount ?? row.charge_amount ?? row.amount ?? 0),
-        chargedAt: row.creation_date_time ?? row.date_created ?? null,
+        orderId: firstDefined(sales[0]?.order_id, ci.order_id, row.order_id),
+        amount: Number(ci.detail_amount ?? ci.charge_amount ?? ci.amount ?? 0),
+        chargedAt: ci.creation_date_time ?? ci.date_created ?? null,
       });
     }
 
-    const last = rows[rows.length - 1];
-    const nextId = last?.detail_id ?? last?.id;
-    if (!nextId || rows.length < PAGE_SIZE) break;
-    fromId = String(nextId);
+    const nextId = firstDefined(res.last_id, lastId);
+    if (!nextId || rows.length < PAGE_SIZE || nextId === fromId) break;
+    if (Date.now() > deadline) {
+      console.warn(`Facturación ML: período ${periodKey} cortado por tiempo; se completa en el próximo sync.`);
+      break;
+    }
+    fromId = nextId;
   }
 
+  if (skipped > 0) {
+    // Sin montos: solo cuántos y con qué forma, para poder corregir el parseo.
+    console.warn(`Facturación ML: ${skipped} cargo(s) sin detail_id en el período ${periodKey}, salteados.`);
+  }
   return charges;
 }
 

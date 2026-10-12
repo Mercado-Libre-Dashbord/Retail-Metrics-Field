@@ -612,6 +612,11 @@ export async function runSync(
  * Como todo lo de facturación puede fallar por permisos, un error acá no
  * rompe el resto del sync que ya se guardó.
  */
+/** Cargos de facturación por INSERT. */
+const BILLING_WRITE_BATCH = 500;
+/** Tiempo máximo para traer cargos de Mercado Libre dentro del paso de facturación. */
+const BILLING_TIME_BUDGET_MS = 35_000;
+
 export async function syncBillingCharges(db: QueryExecutor, accountId: string): Promise<number> {
   try {
     if (!(await hasColumn(db, "billing_charges", "detail_id"))) return 0;
@@ -635,8 +640,19 @@ export async function syncBillingCharges(db: QueryExecutor, accountId: string): 
       string,
       { subTypes: Set<string>; concepts: Set<string>; withOrderId: number; withoutOrderId: number }
     >();
+    // Una versión anterior guardaba todos los cargos bajo la clave
+    // "undefined" (leía detail_id del nivel equivocado de la respuesta):
+    // esa fila no es un cargo real.
+    await db.query(`DELETE FROM billing_charges WHERE account_id = $1 AND detail_id = 'undefined'`, [accountId]);
+
+    // Presupuesto de tiempo: el paso de facturación corre en su propia
+    // llamada de 60s y en una transacción; si se pasa, no se guarda nada y
+    // el sync no termina nunca. Lo que no entra se completa en el próximo.
+    const deadline = Date.now() + BILLING_TIME_BUDGET_MS;
     for (const period of periods.slice(0, 3)) {
-      for (const c of await getBillingCharges(accountId, period.key)) {
+      if (Date.now() > deadline) break;
+      const unique = new Map<string, Awaited<ReturnType<typeof getBillingCharges>>[number]>();
+      for (const c of await getBillingCharges(accountId, period.key, deadline)) {
         if (c.detailType && c.detailType.toUpperCase() !== "CHARGE") {
           const entry = unexpectedTypes.get(c.detailType) ?? {
             subTypes: new Set(), concepts: new Set(), withOrderId: 0, withoutOrderId: 0,
@@ -646,18 +662,31 @@ export async function syncBillingCharges(db: QueryExecutor, accountId: string): 
           if (c.orderId) entry.withOrderId += 1; else entry.withoutOrderId += 1;
           unexpectedTypes.set(c.detailType, entry);
         }
+        unique.set(c.detailId, c);
+      }
 
+      // En lotes: una cuenta grande tiene miles de cargos por mes, y uno por
+      // consulta se comía el tiempo del paso de facturación.
+      const all = [...unique.values()];
+      for (let i = 0; i < all.length; i += BILLING_WRITE_BATCH) {
+        const batch = all.slice(i, i + BILLING_WRITE_BATCH);
+        const values: unknown[] = [];
+        const tuples = batch.map((c, j) => {
+          values.push(accountId, c.detailId, c.periodKey, c.detailType, c.detailSubType, c.concept, c.orderId, c.amount, c.chargedAt);
+          const b = j * 9;
+          return `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}, $${b + 6}, $${b + 7}, $${b + 8}, $${b + 9}::timestamptz)`;
+        });
         await db.query(
           `INSERT INTO billing_charges
              (account_id, detail_id, period_key, detail_type, detail_sub_type, concept, order_id, amount, charged_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           VALUES ${tuples.join(", ")}
            ON CONFLICT (account_id, detail_id) DO UPDATE SET
              period_key = excluded.period_key, detail_type = excluded.detail_type,
              detail_sub_type = excluded.detail_sub_type, concept = excluded.concept,
              order_id = excluded.order_id, amount = excluded.amount, charged_at = excluded.charged_at`,
-          [accountId, c.detailId, c.periodKey, c.detailType, c.detailSubType, c.concept, c.orderId, c.amount, c.chargedAt]
+          values
         );
-        saved += 1;
+        saved += batch.length;
       }
     }
     if (unexpectedTypes.size > 0) {
