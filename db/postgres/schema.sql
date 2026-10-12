@@ -474,6 +474,22 @@ CREATE POLICY trial_requests_update ON trial_requests FOR UPDATE USING (app_is_a
 DROP POLICY IF EXISTS trial_requests_delete ON trial_requests;
 CREATE POLICY trial_requests_delete ON trial_requests FOR DELETE USING (app_is_admin());
 
+-- ── IVA pagado por mes (ver migración 022) ───────────────────────────────
+CREATE TABLE IF NOT EXISTS iva_payments (
+  account_id TEXT NOT NULL REFERENCES accounts(id),
+  period DATE NOT NULL,
+  amount DOUBLE PRECISION NOT NULL CHECK (amount >= 0),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (account_id, period)
+);
+
+ALTER TABLE iva_payments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE iva_payments FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS iva_payments_isolation ON iva_payments;
+CREATE POLICY iva_payments_isolation ON iva_payments
+  USING (account_id = app_current_account_id())
+  WITH CHECK (account_id = app_current_account_id());
+
 -- ── Grants ───────────────────────────────────────────────────────────────
 GRANT EXECUTE ON FUNCTION app_current_account_id(), app_is_admin(), app_current_user_email(), app_current_loyalty_key_hash(), app_credential_lookup_email(), app_current_credential_invite_hash() TO app_user;
 -- Solo app_user: con EXECUTE para PUBLIC (el default de Postgres) cualquiera

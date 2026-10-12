@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { NoAccountState } from "../NoAccountState";
+import { IvaPaid } from "./IvaPaid";
 
 type TaxCondition = "responsable_inscripto" | "monotributo" | "exento";
 
@@ -146,7 +147,8 @@ export default function ConfiguracionPage() {
             <li>
               <strong>No</strong>: el IVA. Se calcula al 21% sobre cada venta —descontando el crédito de la
               comisión, el envío, la publicidad y el costo— solo si arriba tenés marcado "Responsable
-              Inscripto". Si lo cargás acá también lo estarías contando dos veces.
+              Inscripto", o con el IVA real que cargues abajo. Si lo cargás acá también lo estarías contando
+              dos veces.
             </li>
           </ul>
           <p>
@@ -155,6 +157,8 @@ export default function ConfiguracionPage() {
           </p>
         </details>
       </div>
+
+      {loaded && taxCondition === "responsable_inscripto" && <IvaPaid />}
     </div>
   );
 }

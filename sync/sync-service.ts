@@ -1,6 +1,7 @@
 import type { QueryExecutor } from "@/db/client";
 import { listProducts, listOrders, getOrderDetail, getAdsSpend, listBillingPeriods, getBillingCharges, getProductsByIds, getOrderItemTitles, getFullStock, scanProductIds, getProductDetails, type MlProduct } from "@/mcp/tools";
 import { getCostEntryAtDate, allocateAdsCost, calculateNetProfit, calculateIva } from "./profitability";
+import { applyIvaPayments } from "./iva-payments";
 import { hasColumn } from "@/db/schema-capabilities";
 
 /**
@@ -259,6 +260,7 @@ export async function syncOrders(
       synced += 1;
     }
   }
+  if (synced > 0 && hasIva && appliesIva) await applyIvaPayments(db, accountId);
   return synced;
 }
 
@@ -516,6 +518,8 @@ export async function recalculateProduct(
       ]
     );
   }
+  // Si el vendedor cargó el IVA que pagó, reemplaza el teórico recién escrito.
+  if (hasIva && appliesIva) await applyIvaPayments(db, accountId, { productId });
   return itemsResult.rows.length;
 }
 
@@ -862,5 +866,9 @@ async function reallocateAdsCosts(
     i += batch.length;
   }
 
-  return { done: i >= items.length, nextOffset: i >= items.length ? null : i };
+  const done = i >= items.length;
+  // Al terminar de recalcular todo: el IVA cargado por el vendedor reemplaza
+  // al teórico que se acaba de escribir.
+  if (done && hasIva && appliesIva) await applyIvaPayments(db, accountId);
+  return { done, nextOffset: done ? null : i };
 }
