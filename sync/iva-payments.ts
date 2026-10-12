@@ -17,6 +17,12 @@ import { IVA_RATE } from "@/lib/iva";
  *
  * Una cuenta que nunca cargó un monto no se toca: sigue con el cálculo
  * teórico, igual que antes de esta función.
+ *
+ * Cuentas que no son Responsable Inscripto (Exento, Monotributo): el sistema
+ * no les calcula IVA, pero algunos vendedores se ponen así justamente para
+ * cargar a mano lo que pagan. Se les permite: solo los meses con un monto
+ * cargado llevan IVA; los demás quedan en 0 (no se estima nada, porque su
+ * régimen dice que no hay IVA que calcular).
  */
 
 /** Mes contable de una orden: en hora argentina, no en UTC (una venta del
@@ -51,6 +57,10 @@ export async function ivaPaymentsAvailable(db: QueryExecutor): Promise<boolean> 
 export async function applyIvaPayments(
   db: QueryExecutor,
   accountId: string,
+  /** Si el régimen de la cuenta discrimina IVA (Responsable Inscripto). Sin
+   * default a propósito: para algo que mueve la ganancia, un olvido tiene que
+   * ser un error de compilación. */
+  appliesIva: boolean,
   opts: { productId?: string; force?: boolean } = {}
 ): Promise<number> {
   if (!(await ivaPaymentsAvailable(db)) || !(await hasColumn(db, "order_items", "iva_applied"))) return 0;
@@ -60,7 +70,7 @@ export async function applyIvaPayments(
   }
 
   const factor = IVA_RATE / (1 + IVA_RATE);
-  const params: unknown[] = [accountId, factor];
+  const params: unknown[] = [accountId, factor, appliesIva];
   if (opts.productId) params.push(opts.productId);
 
   const result = await db.query(
@@ -77,23 +87,29 @@ export async function applyIvaPayments(
      ),
      month_rate AS (
        SELECT m.period,
-              COALESCE(
-                (SELECT r.rate FROM rates r WHERE r.period <= m.period ORDER BY r.period DESC LIMIT 1),
-                (SELECT r.rate FROM rates r ORDER BY r.period ASC LIMIT 1)
-              ) AS rate
+              CASE WHEN $3::boolean THEN
+                COALESCE(
+                  (SELECT r.rate FROM rates r WHERE r.period <= m.period ORDER BY r.period DESC LIMIT 1),
+                  (SELECT r.rate FROM rates r ORDER BY r.period ASC LIMIT 1)
+                )
+              ELSE
+                (SELECT r.rate FROM rates r WHERE r.period = m.period)
+              END AS rate
          FROM monthly m
      ),
      calc AS (
        SELECT oi.id,
               COALESCE(oi.iva_applied, 0) AS old_iva,
               CASE WHEN mr.rate IS NOT NULL THEN oi.unit_price * oi.quantity * mr.rate
-                   ELSE (oi.unit_price * oi.quantity - COALESCE(oi.ml_commission, 0) - COALESCE(oi.shipping_cost, 0)
+                   WHEN $3::boolean THEN
+                        (oi.unit_price * oi.quantity - COALESCE(oi.ml_commission, 0) - COALESCE(oi.shipping_cost, 0)
                          - COALESCE(oi.ads_cost_allocated, 0) - COALESCE(oi.cost_applied, 0) * oi.quantity) * $2
+                   ELSE 0
               END AS new_iva
          FROM order_items oi
          JOIN orders o ON o.account_id = oi.account_id AND o.id = oi.order_id
          LEFT JOIN month_rate mr ON mr.period = ${ORDER_MONTH_SQL}
-        WHERE oi.account_id = $1 AND ${revenueStatusFilter()}${opts.productId ? " AND oi.product_id = $3" : ""}
+        WHERE oi.account_id = $1 AND ${revenueStatusFilter()}${opts.productId ? " AND oi.product_id = $4" : ""}
      )
      UPDATE order_items oi
         SET iva_applied = c.new_iva,

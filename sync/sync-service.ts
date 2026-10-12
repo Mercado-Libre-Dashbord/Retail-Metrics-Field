@@ -260,7 +260,7 @@ export async function syncOrders(
       synced += 1;
     }
   }
-  if (synced > 0 && hasIva && appliesIva) await applyIvaPayments(db, accountId);
+  if (synced > 0 && hasIva) await applyIvaPayments(db, accountId, appliesIva);
   return synced;
 }
 
@@ -519,7 +519,7 @@ export async function recalculateProduct(
     );
   }
   // Si el vendedor cargó el IVA que pagó, reemplaza el teórico recién escrito.
-  if (hasIva && appliesIva) await applyIvaPayments(db, accountId, { productId });
+  if (hasIva) await applyIvaPayments(db, accountId, appliesIva, { productId });
   return itemsResult.rows.length;
 }
 
@@ -898,6 +898,6 @@ async function reallocateAdsCosts(
   const done = i >= items.length;
   // Al terminar de recalcular todo: el IVA cargado por el vendedor reemplaza
   // al teórico que se acaba de escribir.
-  if (done && hasIva && appliesIva) await applyIvaPayments(db, accountId);
+  if (done && hasIva) await applyIvaPayments(db, accountId, appliesIva);
   return { done, nextOffset: done ? null : i };
 }

@@ -13,7 +13,7 @@ const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 const MAX_EFFECTIVE_RATE = IVA_RATE / (1 + IVA_RATE);
 
 /** IVA pagado por mes: lo que cargó el vendedor, la facturación del mes y
- * el % efectivo que resulta. Solo para Responsable Inscripto. */
+ * el % efectivo que resulta. */
 export async function GET() {
   const account = await resolveCurrentAccount();
   if (!account) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
@@ -29,10 +29,6 @@ export async function GET() {
 export async function PUT(request: NextRequest) {
   const account = await resolveCurrentAccount();
   if (!account) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
-  if (!appliesIva(account.taxCondition)) {
-    return NextResponse.json({ error: "El IVA solo se calcula para Responsables Inscriptos." }, { status: 400 });
-  }
-
   const { period, amount } = (await request.json().catch(() => ({}))) as { period?: unknown; amount?: unknown };
   if (typeof period !== "string" || !PERIOD_RE.test(period)) {
     return NextResponse.json({ error: "Mes inválido." }, { status: 400 });
@@ -52,7 +48,9 @@ export async function PUT(request: NextRequest) {
       }
     }
     await saveIvaPayment(client, account.id, period, amount as number | null);
-    const updated = await applyIvaPayments(client, account.id, { force: true });
+    // Cualquier régimen puede cargar el IVA pagado; solo cambia qué pasa con
+    // los meses sin cargar (ver sync/iva-payments.ts).
+    const updated = await applyIvaPayments(client, account.id, appliesIva(account.taxCondition), { force: true });
     return { updated, months: await listIvaMonths(client, account.id) };
   });
   if (!result) {

@@ -58,7 +58,7 @@ describe("IVA pagado por mes (Postgres real)", () => {
 
       // Agosto: pagó 10.000 sobre 100.000 facturados → 10%.
       await saveIvaPayment(c, account.id, "2026-08", 10000);
-      await applyIvaPayments(c, account.id, { force: true });
+      await applyIvaPayments(c, account.id, true, { force: true });
       const after = await c.query<{ order_id: string; iva_applied: number; net_profit: number; unit_price: number; ml_commission: number; cost_applied: number }>(
         `SELECT order_id, iva_applied, net_profit, unit_price, ml_commission, cost_applied FROM order_items WHERE account_id = $1 ORDER BY order_id`,
         [account.id]
@@ -67,7 +67,7 @@ describe("IVA pagado por mes (Postgres real)", () => {
 
       // Borrar el monto vuelve todo al cálculo teórico.
       await saveIvaPayment(c, account.id, "2026-08", null);
-      await applyIvaPayments(c, account.id, { force: true });
+      await applyIvaPayments(c, account.id, true, { force: true });
       const restored = await c.query<{ order_id: string; iva_applied: number; net_profit: number }>(
         `SELECT order_id, iva_applied, net_profit FROM order_items WHERE account_id = $1 ORDER BY order_id`,
         [account.id]
@@ -124,7 +124,7 @@ describe("IVA pagado por mes (Postgres real)", () => {
          VALUES ($1, 'O1', 'P1', 1000, 1, 100, 0, 500, 12345, 1)`,
         [account.id]
       );
-      return applyIvaPayments(c, account.id);
+      return applyIvaPayments(c, account.id, true);
     });
     expect(updated).toBe(0);
   });
@@ -143,10 +143,82 @@ describe("IVA pagado por mes (Postgres real)", () => {
         [account.id]
       );
       await saveIvaPayment(c, account.id, "2026-08", 1000); // 5%
-      await applyIvaPayments(c, account.id, { force: true });
+      await applyIvaPayments(c, account.id, true, { force: true });
       // Nuevo costo: 10.000. El recálculo escribe el IVA teórico y el hook lo reemplaza por el real.
       await c.query(`INSERT INTO product_costs (account_id, product_id, cost, valid_from) VALUES ($1, 'P1', 10000, now())`, [account.id]);
       await recalculateProduct(c, account.id, "P1", true, 0, true);
+      return (await c.query<{ iva_applied: number; net_profit: number }>(`SELECT iva_applied, net_profit FROM order_items WHERE account_id = $1`, [account.id])).rows[0];
+    });
+    expect(Number(row.iva_applied)).toBeCloseTo(1000, 2);
+    expect(Number(row.net_profit)).toBeCloseTo(20000 - 3000 - 10000 - 1000, 2);
+  });
+
+  it("una cuenta Exento puede cargar el IVA pagado: solo los meses cargados llevan IVA, los demás quedan en 0", async () => {
+    const { withScope } = await import("@/db/client");
+    const { createAccount } = await import("@/db/accounts");
+    const { applyIvaPayments, saveIvaPayment } = await import("./iva-payments");
+    const account = await withScope({ isAdmin: true }, (c) => createAccount(c, "Exento", `exento.${nanoid(6)}@example.com`.toLowerCase()));
+    const out = await withScope({ accountId: account.id }, async (c) => {
+      const orders: [string, string][] = [["A1", "2026-08-10T15:00:00Z"], ["S1", "2026-09-15T15:00:00Z"]];
+      for (const [id, date] of orders) {
+        await c.query(`INSERT INTO orders (account_id, id, date_created, status) VALUES ($1, $2, $3, 'paid')`, [account.id, id, date]);
+        // Exento: el sync no les calcula IVA (iva_applied 0, ganancia sin IVA).
+        await c.query(
+          `INSERT INTO order_items (account_id, order_id, product_id, unit_price, quantity, ml_commission, shipping_cost, ads_cost_allocated, cost_applied, tax_applied, iva_applied, net_profit)
+           VALUES ($1, $2, 'P1', 40000, 1, 6000, 0, 0, 14000, 0, 0, 20000)`,
+          [account.id, id]
+        );
+      }
+      // Sin montos cargados no se toca nada.
+      const untouched = await applyIvaPayments(c, account.id, false);
+
+      // Agosto: pagó 4.000 sobre 40.000 → 10%. Septiembre no se carga.
+      await saveIvaPayment(c, account.id, "2026-08", 4000);
+      await applyIvaPayments(c, account.id, false, { force: true });
+      const loaded = await c.query<{ order_id: string; iva_applied: number; net_profit: number }>(
+        `SELECT order_id, iva_applied, net_profit FROM order_items WHERE account_id = $1 ORDER BY order_id`,
+        [account.id]
+      );
+
+      // Borrar el monto vuelve a 0 (no al 21% teórico: no es Responsable Inscripto).
+      await saveIvaPayment(c, account.id, "2026-08", null);
+      await applyIvaPayments(c, account.id, false, { force: true });
+      const restored = await c.query<{ order_id: string; iva_applied: number; net_profit: number }>(
+        `SELECT order_id, iva_applied, net_profit FROM order_items WHERE account_id = $1 ORDER BY order_id`,
+        [account.id]
+      );
+      return { untouched, loaded: loaded.rows, restored: restored.rows };
+    });
+
+    expect(out.untouched).toBe(0);
+    const by = Object.fromEntries(out.loaded.map((r) => [r.order_id, r]));
+    expect(Number(by.A1.iva_applied)).toBeCloseTo(4000, 2);
+    expect(Number(by.A1.net_profit)).toBeCloseTo(20000 - 4000, 2);
+    // Septiembre no tiene monto: no se estima, queda sin IVA.
+    expect(Number(by.S1.iva_applied)).toBe(0);
+    expect(Number(by.S1.net_profit)).toBe(20000);
+    const restored = Object.fromEntries(out.restored.map((r) => [r.order_id, r]));
+    expect(Number(restored.A1.iva_applied)).toBe(0);
+    expect(Number(restored.A1.net_profit)).toBeCloseTo(20000, 2);
+  });
+
+  it("un sync (recalcular el producto) mantiene el IVA cargado de una cuenta Exento", async () => {
+    const { withScope } = await import("@/db/client");
+    const { createAccount } = await import("@/db/accounts");
+    const { saveIvaPayment, applyIvaPayments } = await import("./iva-payments");
+    const { recalculateProduct } = await import("./sync-service");
+    const account = await withScope({ isAdmin: true }, (c) => createAccount(c, "Exento 2", `exento2.${nanoid(6)}@example.com`.toLowerCase()));
+    const row = await withScope({ accountId: account.id }, async (c) => {
+      await c.query(`INSERT INTO orders (account_id, id, date_created, status) VALUES ($1, 'O1', '2026-08-10T15:00:00Z', 'paid')`, [account.id]);
+      await c.query(
+        `INSERT INTO order_items (account_id, order_id, product_id, unit_price, quantity, ml_commission, shipping_cost, ads_cost_allocated, cost_applied, tax_applied, iva_applied, net_profit)
+         VALUES ($1, 'O1', 'P1', 20000, 1, 3000, 0, 0, 8000, 0, 0, 9000)`,
+        [account.id]
+      );
+      await saveIvaPayment(c, account.id, "2026-08", 1000);
+      await applyIvaPayments(c, account.id, false, { force: true });
+      await c.query(`INSERT INTO product_costs (account_id, product_id, cost, valid_from) VALUES ($1, 'P1', 10000, now())`, [account.id]);
+      await recalculateProduct(c, account.id, "P1", true, 0, false);
       return (await c.query<{ iva_applied: number; net_profit: number }>(`SELECT iva_applied, net_profit FROM order_items WHERE account_id = $1`, [account.id])).rows[0];
     });
     expect(Number(row.iva_applied)).toBeCloseTo(1000, 2);

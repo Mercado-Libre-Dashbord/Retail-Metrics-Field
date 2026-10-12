@@ -24,7 +24,6 @@ export function IvaPaid({ appliesIva, conditionLabel }: { appliesIva: boolean; c
   const [message, setMessage] = useState<{ period: string; text: string; error?: boolean } | null>(null);
 
   useEffect(() => {
-    if (!appliesIva) return;
     fetch("/api/account/iva")
       .then((r) => (r.ok ? r.json() : Promise.reject()))
       .then((data) => {
@@ -32,27 +31,13 @@ export function IvaPaid({ appliesIva, conditionLabel }: { appliesIva: boolean; c
         setAvailable(data.available !== false);
       })
       .catch(() => setMonths([]));
-  }, [appliesIva]);
-
-  if (!appliesIva) {
-    return (
-      <>
-        <h2 className="section-title">IVA que pagaste</h2>
-        <div className="day-card" style={{ maxWidth: 620 }}>
-          <p className="field-hint" style={{ margin: 0 }}>
-            Esta cuenta figura como <strong>{conditionLabel}</strong>, así que hoy no se descuenta IVA de sus ventas.
-            Si es Responsable Inscripto y la pusiste así para cargar el IVA a mano, ya no hace falta: elegí
-            &quot;Responsable Inscripto&quot; arriba, apretá Guardar, y acá vas a poder cargar el IVA que pagó cada mes.
-            Con eso calculamos su % de IVA real y lo descontamos de cada venta.
-          </p>
-        </div>
-      </>
-    );
-  }
+  }, []);
 
   const loadedRates = (months ?? []).filter((m) => m.effectiveRate !== null);
   /** % que se usa en un mes sin monto: el del último mes cargado anterior, o el primero cargado. */
   const rateFor = (period: string) => {
+    // Cuentas que no son Responsable Inscripto: los meses sin cargar no se estiman.
+    if (!appliesIva) return null;
     const prior = loadedRates.filter((m) => m.period <= period).sort((a, b) => b.period.localeCompare(a.period))[0];
     const first = [...loadedRates].sort((a, b) => a.period.localeCompare(b.period))[0];
     return prior ?? first ?? null;
@@ -92,8 +77,10 @@ export function IvaPaid({ appliesIva, conditionLabel }: { appliesIva: boolean; c
       <div className="day-card" style={{ maxWidth: 880 }}>
         <p className="field-hint" style={{ marginTop: 0 }}>
           Cargá el IVA que pagaste cada mes (el saldo que te pasa tu contador). Calculamos tu % de IVA real sobre lo
-          que facturaste ese mes y lo usamos en tus ventas en lugar del cálculo al 21%. Los meses que no cargues
-          usan el % del último mes cargado.
+          que facturaste ese mes y lo usamos en tus ventas.{" "}
+          {appliesIva
+            ? "Los meses que no cargues usan el % del último mes cargado."
+            : `Tu régimen figura como ${conditionLabel}: solo se descuenta el IVA de los meses que cargues acá; los demás meses quedan sin IVA.`}
         </p>
         {!available && (
           <p className="field-error" role="alert">
@@ -166,7 +153,7 @@ export function IvaPaid({ appliesIva, conditionLabel }: { appliesIva: boolean; c
                             {pct(source.effectiveRate)} (estimado)
                           </span>
                         ) : (
-                          <span className="field-hint">21% teórico</span>
+                          <span className="field-hint">{appliesIva ? "21% teórico" : "sin IVA"}</span>
                         )}
                       </td>
                     </tr>

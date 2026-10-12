@@ -36,10 +36,16 @@ describe("/api/account/iva", () => {
     expect((await PUT(req({ period: "2026-08", amount: 1 }))).status).toBe(401);
   });
 
-  it("solo para Responsable Inscripto", async () => {
-    vi.mocked(resolveCurrentAccount).mockResolvedValue(account("monotributo"));
-    expect((await PUT(req({ period: "2026-08", amount: 1000 }))).status).toBe(400);
-    expect(saveIvaPayment).not.toHaveBeenCalled();
+  it("cualquier régimen puede cargar el IVA pagado: Exento y Monotributo también", async () => {
+    vi.mocked(applyIvaPayments).mockResolvedValue(3);
+    for (const taxCondition of ["exento", "monotributo"]) {
+      vi.mocked(resolveCurrentAccount).mockResolvedValue(account(taxCondition));
+      const res = await PUT(req({ period: "2026-08", amount: 1000 }));
+      expect(res.status).toBe(200);
+      // Para ellos los meses sin cargar no se estiman: appliesIva = false.
+      expect(applyIvaPayments).toHaveBeenLastCalledWith({}, "acc1", false, { force: true });
+    }
+    expect(saveIvaPayment).toHaveBeenCalledTimes(2);
   });
 
   it("valida mes y monto", async () => {
@@ -58,7 +64,7 @@ describe("/api/account/iva", () => {
     expect(res.status).toBe(200);
     expect(vi.mocked(withScope).mock.calls[0][0]).toEqual({ accountId: "acc1" });
     expect(saveIvaPayment).toHaveBeenCalledWith({}, "acc1", "2026-08", 150000);
-    expect(applyIvaPayments).toHaveBeenCalledWith({}, "acc1", { force: true });
+    expect(applyIvaPayments).toHaveBeenCalledWith({}, "acc1", true, { force: true });
     expect((await res.json()).updated).toBe(12);
   });
 
