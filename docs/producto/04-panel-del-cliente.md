@@ -109,6 +109,14 @@ una columna al lado que muestra **lo que nosotros calculamos** para comisión y
 envío. Es una herramienta de auditoría: si las dos columnas no cierran, nuestro
 cálculo tiene un problema.
 
+Algunas facturas de ML no llegan por la API de facturación (vienen por otro
+canal). Para esas, el cliente puede **cargarlas a mano** con "Agregar una
+factura de ML a mano": fecha, concepto (comisión, envío, impuestos, publicidad,
+Full u otros), importe (negativo para una nota de crédito) y un detalle
+opcional. Se guardan en `billing_charges` junto a las sincronizadas (con
+`detail_type = 'MANUAL'`, así el sync nunca las pisa), suman en esta tabla y en
+los costos de Full, y se pueden borrar. No requiere migración.
+
 > ⚠️ Estos cargos **no entran** en la ganancia neta. La comisión y el envío ya se
 > descuentan por orden; sumarlos otra vez los contaría dos veces. Están
 > pendientes de que el cliente valide que los números cierran antes de decidir

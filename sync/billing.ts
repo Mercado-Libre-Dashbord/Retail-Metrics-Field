@@ -9,6 +9,40 @@ export const BUCKET_LABEL: Record<ChargeBucket, string> = {
   otro: "Otros cargos",
 };
 
+export const CHARGE_BUCKETS = Object.keys(BUCKET_LABEL) as ChargeBucket[];
+
+export function isChargeBucket(value: unknown): value is ChargeBucket {
+  return typeof value === "string" && (CHARGE_BUCKETS as string[]).includes(value);
+}
+
+/**
+ * Cargos que el vendedor carga a mano porque no llegan por la API de
+ * facturación (facturas que ML manda por otro canal, ajustes, etc.). Viven
+ * en la misma tabla billing_charges que los sincronizados, así entran en la
+ * conciliación y en los costos de Full sin tocar nada más.
+ *
+ * El vendedor elige el concepto: se guarda en `detail_sub_type` como
+ * "manual:<bucket>" y `classifyCharge` lo respeta tal cual, sin pasar por el
+ * detector de palabras clave (la descripción libre podría confundirlo). El
+ * `detail_id` lleva el prefijo "manual-" y nunca choca con un id de ML, así
+ * el sync no los pisa ni los borra.
+ */
+export const MANUAL_DETAIL_TYPE = "MANUAL";
+const MANUAL_SUB_TYPE_PREFIX = "manual:";
+
+export function manualSubType(bucket: ChargeBucket): string {
+  return MANUAL_SUB_TYPE_PREFIX + bucket;
+}
+
+function manualBucket(fields: (string | null | undefined)[]): ChargeBucket | null {
+  for (const f of fields) {
+    if (!f?.startsWith(MANUAL_SUB_TYPE_PREFIX)) continue;
+    const bucket = f.slice(MANUAL_SUB_TYPE_PREFIX.length);
+    if (isChargeBucket(bucket)) return bucket;
+  }
+  return null;
+}
+
 // Candidatos de `detail_sub_type` para cargos de Full, SIN confirmar contra
 // una respuesta real de la API — salieron de una investigación externa, no
 // de un log en vivo. Se buscan como código exacto (no como texto libre)
@@ -35,6 +69,8 @@ const FULL_DETAIL_SUB_TYPES = new Set([
  * cargo sin clasificar sigue siendo plata que salió y tiene que verse.
  */
 export function classifyCharge(...fields: (string | null | undefined)[]): ChargeBucket {
+  const manual = manualBucket(fields);
+  if (manual) return manual;
   if (fields.some((f) => f && FULL_DETAIL_SUB_TYPES.has(f.trim().toLowerCase()))) return "full";
 
   const haystack = fields.filter(Boolean).join(" ").toLowerCase();
