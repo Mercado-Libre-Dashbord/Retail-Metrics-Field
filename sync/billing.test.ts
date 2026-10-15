@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyCharge, classifyFullChargeDetail } from "./billing";
+import { classifyCharge, classifyFullChargeDetail, MANUAL_DETAIL_TYPE, manualSubType } from "./billing";
 
 describe("classifyCharge", () => {
   it("recognises tax perceptions and withholdings", () => {
@@ -85,5 +85,17 @@ describe("classifyFullChargeDetail", () => {
   it("cae en 'otro' cuando no reconoce el concepto", () => {
     expect(classifyFullChargeDetail("Cargo de Full sin descripción clara")).toBe("otro");
     expect(classifyFullChargeDetail(null, undefined)).toBe("otro");
+  });
+});
+
+describe("manual charges", () => {
+  it("keeps the concept the seller picked, ignoring keywords in the description", () => {
+    // La descripción dice "envío" pero el vendedor eligió comisión.
+    expect(classifyCharge("Factura por envío A-123", MANUAL_DETAIL_TYPE, manualSubType("comision"))).toBe("comision");
+    expect(classifyCharge(null, MANUAL_DETAIL_TYPE, manualSubType("full"))).toBe("full");
+  });
+
+  it("falls back to keyword detection for an unknown manual bucket", () => {
+    expect(classifyCharge("Percepción IVA", MANUAL_DETAIL_TYPE, "manual:inexistente")).toBe("impuesto");
   });
 });

@@ -8,6 +8,7 @@ import {
 import { SyncButton } from "./SyncButton";
 import { NoAccountState } from "./NoAccountState";
 import { PeriodBar } from "./PeriodBar";
+import { ManualBillingCharges } from "./ManualBillingCharges";
 import { Period, rangeForPeriod, toDateStr } from "@/lib/period";
 import { countsAsRevenue } from "@/lib/order-status";
 
@@ -1027,9 +1028,16 @@ export default function HomePage() {
       )}
 
 
-      {billing?.available && billing.buckets.length > 0 && (
+      {billing?.available && (
         <>
           <h2 className="section-title">Lo que Mercado Libre te facturó</h2>
+          {billing.buckets.length === 0 ? (
+            <div className="empty-state">
+              <p style={{ margin: 0 }}>
+                No hay cargos de Mercado Libre en este período. Si te llegó una factura que no aparece, cargala abajo.
+              </p>
+            </div>
+          ) : (
           <div className="table-wrap">
             <table>
               <thead>
@@ -1064,6 +1072,12 @@ export default function HomePage() {
               </tbody>
             </table>
           </div>
+          )}
+          <ManualBillingCharges
+            from={from}
+            to={to}
+            onChange={() => safeFetch<Billing | null>(`/api/billing?from=${from}&to=${to}`, setBilling, null)}
+          />
           <details className="explain-box">
             <summary>¿Qué es esta tabla?</summary>
             <p>
@@ -1071,6 +1085,11 @@ export default function HomePage() {
               facturación: comisiones, envíos, percepciones impositivas y publicidad. El resto del dashboard
               estima estos costos venta por venta; acá ves lo que ML efectivamente te cobró, para poder
               comparar.
+            </p>
+            <p>
+              Si Mercado Libre te mandó una factura que no aparece acá (por ejemplo, porque llegó por otro
+              canal), cargala con &quot;Agregar una factura de ML a mano&quot;: se suma en la tabla según la
+              fecha y el concepto que elijas, y la podés borrar si te equivocaste.
             </p>
             <p>
               Todavía <strong>no</strong> entran en la ganancia neta: la comisión y el envío ya se descuentan
