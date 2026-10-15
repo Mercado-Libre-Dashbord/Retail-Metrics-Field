@@ -6,6 +6,6 @@
  * DEMO_VIDEO_URL: link de inserción (YouTube "embed" o Loom "embed"). Vacío,
  * la landing muestra el ejemplo de desglose en lugar del video.
  */
-export const CONTACT_EMAIL = "hola@metricsfield.com";
+export const CONTACT_EMAIL = "info@metricsfield.com";
 export const DEMO_VIDEO_URL = "";
 export const PRODUCT_NAME = "Retail ML";
