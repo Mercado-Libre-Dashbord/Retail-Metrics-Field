@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { NoAccountState } from "../NoAccountState";
+import { ImportCosts } from "./ImportCosts";
 
 interface Product {
   id: string;
@@ -888,6 +889,7 @@ export default function ProductosPage() {
         (IIBB, internos) se configura una sola vez en <a href="/configuracion">Configuración</a>.
       </p>
       {loadError && <p className="field-error" role="alert" style={{ marginBottom: "var(--space-3)" }}>{loadError}</p>}
+      {products && products.length > 0 && <ImportCosts products={products} onDone={load} />}
       {products && (
         <NegativeMarginPanel
           products={products}
