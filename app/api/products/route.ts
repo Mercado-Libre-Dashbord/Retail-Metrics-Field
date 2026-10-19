@@ -25,6 +25,8 @@ export async function GET(request: NextRequest) {
     const fullCols = hasFull
       ? `p.logistic_type as "logisticType", p.full_stock_qty as "fullStockQty", p.full_stock_unavailable_qty as "fullStockUnavailableQty",`
       : `NULL::text as "logisticType", NULL::integer as "fullStockQty", NULL::integer as "fullStockUnavailableQty",`;
+    // SKU de variantes y EAN (migración 023), para el importador de costos.
+    const codesCols = (await hasColumn(client, "products", "gtins")) ? `p.skus, p.gtins,` : "";
     const hasLowStock = await hasColumn(client, "products", "low_stock_threshold");
     const lowStockCol = hasLowStock ? `p.low_stock_threshold as "lowStockThreshold"` : `NULL::integer as "lowStockThreshold"`;
     // TC guardado junto con el último costo cargado (ver migración 019): deja
@@ -50,7 +52,7 @@ export async function GET(request: NextRequest) {
     }
 
     const result = await client.query(
-      `SELECT p.id, p.title, p.sku, p.current_price as "currentPrice", p.stock,
+      `SELECT p.id, p.title, p.sku, ${codesCols} p.current_price as "currentPrice", p.stock,
               ${thumbnailColumn} as thumbnail,
               ${fullCols}
               ${lowStockCol},
@@ -75,6 +77,8 @@ export async function GET(request: NextRequest) {
       id: string;
       title: string;
       sku: string | null;
+      skus?: string[];
+      gtins?: string[];
       currentPrice: number;
       stock: number;
       thumbnail: string | null;

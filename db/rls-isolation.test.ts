@@ -81,7 +81,7 @@ describe("RLS account isolation (real Postgres, not mocked)", () => {
     // order the same day — the scenario most likely to leak data across
     // accounts if a query is ever missing its account_id filter.
     vi.mocked(listProducts).mockResolvedValueOnce([
-      { id: "MLA9", title: "Item de A", sku: null, price: 500, stock: 1, permalink: "url", categoryId: "MLA1234", categoryName: "Categoría de prueba", thumbnail: null, logisticType: null, inventoryId: null },
+      { id: "MLA9", title: "Item de A", sku: null, price: 500, stock: 1, permalink: "url", categoryId: "MLA1234", categoryName: "Categoría de prueba", thumbnail: null, logisticType: null, inventoryId: null, skus: [], gtins: [] },
     ]);
     vi.mocked(listOrders).mockResolvedValueOnce(["ORD-A"]);
     vi.mocked(getOrderDetail).mockResolvedValueOnce({
@@ -95,7 +95,7 @@ describe("RLS account isolation (real Postgres, not mocked)", () => {
     await withScope({ accountId: accountA.id }, (client) => runSync(client, accountA.id, "SELLER-A", "2020-01-01T00:00:00Z"));
 
     vi.mocked(listProducts).mockResolvedValueOnce([
-      { id: "MLA9", title: "Item de B", sku: null, price: 900, stock: 1, permalink: "url", categoryId: "MLA1234", categoryName: "Categoría de prueba", thumbnail: null, logisticType: null, inventoryId: null },
+      { id: "MLA9", title: "Item de B", sku: null, price: 900, stock: 1, permalink: "url", categoryId: "MLA1234", categoryName: "Categoría de prueba", thumbnail: null, logisticType: null, inventoryId: null, skus: [], gtins: [] },
     ]);
     vi.mocked(listOrders).mockResolvedValueOnce(["ORD-B"]);
     vi.mocked(getOrderDetail).mockResolvedValueOnce({

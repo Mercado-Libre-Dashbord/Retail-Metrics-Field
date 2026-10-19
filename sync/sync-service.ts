@@ -35,6 +35,7 @@ interface ProductColumnFlags {
   hasCategory: boolean;
   hasThumbnail: boolean;
   hasLogistics: boolean;
+  hasCodes: boolean;
 }
 
 /**
@@ -46,7 +47,7 @@ interface ProductColumnFlags {
  * como ficha mínima de una corrida anterior.
  */
 function buildOptionalProductColumns(
-  p: { categoryId?: string | null; categoryName?: string | null; thumbnail?: string | null; logisticType?: string | null; inventoryId?: string | null } | undefined,
+  p: { categoryId?: string | null; categoryName?: string | null; thumbnail?: string | null; logisticType?: string | null; inventoryId?: string | null; skus?: string[]; gtins?: string[] } | undefined,
   flags: ProductColumnFlags,
   updateOnConflict: boolean
 ): { cols: string[]; vals: unknown[]; updateSet: string[] } {
@@ -68,6 +69,11 @@ function buildOptionalProductColumns(
     vals.push(p?.logisticType ?? null, p?.inventoryId ?? null);
     if (updateOnConflict) updateSet.push("logistic_type = excluded.logistic_type", "inventory_id = excluded.inventory_id");
   }
+  if (flags.hasCodes) {
+    cols.push("skus", "gtins");
+    vals.push(p?.skus ?? [], p?.gtins ?? []);
+    if (updateOnConflict) updateSet.push("skus = excluded.skus", "gtins = excluded.gtins");
+  }
   return { cols, vals, updateSet };
 }
 
@@ -76,6 +82,7 @@ async function productColumnFlags(db: QueryExecutor): Promise<ProductColumnFlags
     hasCategory: await hasColumn(db, "products", "category_id"),
     hasThumbnail: await hasColumn(db, "products", "thumbnail"),
     hasLogistics: await hasColumn(db, "products", "logistic_type"),
+    hasCodes: await hasColumn(db, "products", "gtins"),
   };
 }
 
@@ -423,6 +430,7 @@ export async function backfillMissingProducts(
     hasCategory: await hasColumn(db, "products", "category_id"),
     hasThumbnail: await hasColumn(db, "products", "thumbnail"),
     hasLogistics: await hasColumn(db, "products", "logistic_type"),
+    hasCodes: await hasColumn(db, "products", "gtins"),
   };
   const now = new Date().toISOString();
 

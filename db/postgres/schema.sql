@@ -122,6 +122,10 @@ CREATE TABLE IF NOT EXISTS products (
   -- es la fecha real de ingreso al depósito (ML no la expone por API), sirve
   -- para estimar antigüedad de ahí en más.
   full_since TIMESTAMPTZ,
+  -- Todos los SKU (publicación y variantes) y los EAN/GTIN, para cruzar la
+  -- planilla de costos del vendedor (ver migración 023).
+  skus TEXT[] NOT NULL DEFAULT '{}',
+  gtins TEXT[] NOT NULL DEFAULT '{}',
   updated_at TIMESTAMPTZ NOT NULL,
   PRIMARY KEY (account_id, id)
 );

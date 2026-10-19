@@ -38,7 +38,7 @@ describe("runSync", () => {
   it("persists products, orders and a computed net_profit per order item", async () => {
     const { listProducts, listOrders, getOrderDetail, getAdsSpend } = await import("@/mcp/tools");
     vi.mocked(listProducts).mockResolvedValueOnce([
-      { id: "MLA1", title: "Producto 1", sku: "SKU1", price: 1000, stock: 5, permalink: "url", categoryId: "MLA1234", categoryName: "Categoría de prueba", thumbnail: null, logisticType: null, inventoryId: null },
+      { id: "MLA1", title: "Producto 1", sku: "SKU1", price: 1000, stock: 5, permalink: "url", categoryId: "MLA1234", categoryName: "Categoría de prueba", thumbnail: null, logisticType: null, inventoryId: null, skus: [], gtins: [] },
     ]);
     vi.mocked(listOrders).mockResolvedValueOnce(["ORD1"]);
     vi.mocked(getOrderDetail).mockResolvedValueOnce({
@@ -142,7 +142,7 @@ describe("runSync", () => {
   it("keeps products and orders synced even when getAdsSpend fails", async () => {
     const { listProducts, listOrders, getOrderDetail, getAdsSpend } = await import("@/mcp/tools");
     vi.mocked(listProducts).mockResolvedValueOnce([
-      { id: "MLA4", title: "Producto 4", sku: null, price: 100, stock: 1, permalink: "url", categoryId: "MLA1234", categoryName: "Categoría de prueba", thumbnail: null, logisticType: null, inventoryId: null },
+      { id: "MLA4", title: "Producto 4", sku: null, price: 100, stock: 1, permalink: "url", categoryId: "MLA1234", categoryName: "Categoría de prueba", thumbnail: null, logisticType: null, inventoryId: null, skus: [], gtins: [] },
     ]);
     vi.mocked(listOrders).mockResolvedValueOnce(["ORD4"]);
     vi.mocked(getOrderDetail).mockResolvedValueOnce({
@@ -183,8 +183,8 @@ describe("syncProductsPage", () => {
     const { scanProductIds, getProductDetails } = await import("@/mcp/tools");
     vi.mocked(scanProductIds).mockResolvedValueOnce({ ids: ["MLA1", "MLA2"], nextScrollId: "scroll-next" });
     vi.mocked(getProductDetails).mockResolvedValueOnce([
-      { id: "MLA1", title: "Producto 1", sku: null, price: 100, stock: 1, permalink: "url1", categoryId: null, categoryName: null, thumbnail: null, logisticType: null, inventoryId: null },
-      { id: "MLA2", title: "Producto 2", sku: null, price: 200, stock: 2, permalink: "url2", categoryId: null, categoryName: null, thumbnail: null, logisticType: null, inventoryId: null },
+      { id: "MLA1", title: "Producto 1", sku: null, price: 100, stock: 1, permalink: "url1", categoryId: null, categoryName: null, thumbnail: null, logisticType: null, inventoryId: null, skus: [], gtins: [] },
+      { id: "MLA2", title: "Producto 2", sku: null, price: 200, stock: 2, permalink: "url2", categoryId: null, categoryName: null, thumbnail: null, logisticType: null, inventoryId: null, skus: [], gtins: [] },
     ]);
 
     const { withScope } = await import("@/db/client");
@@ -210,7 +210,7 @@ describe("syncProductsPage", () => {
     const { scanProductIds, getProductDetails } = await import("@/mcp/tools");
     vi.mocked(scanProductIds).mockResolvedValueOnce({ ids: ["MLA9"], nextScrollId: undefined });
     vi.mocked(getProductDetails).mockResolvedValueOnce([
-      { id: "MLA9", title: "Producto 9", sku: null, price: 50, stock: 1, permalink: "url9", categoryId: null, categoryName: null, thumbnail: null, logisticType: null, inventoryId: null },
+      { id: "MLA9", title: "Producto 9", sku: null, price: 50, stock: 1, permalink: "url9", categoryId: null, categoryName: null, thumbnail: null, logisticType: null, inventoryId: null, skus: [], gtins: [] },
     ]);
 
     const { withScope } = await import("@/db/client");
@@ -277,7 +277,7 @@ describe("backfillMissingProducts", () => {
       {
         id: "MLA999", title: "Luz De Emergencia 30 Led", sku: "SKU1", price: 12000,
         stock: 0, permalink: "https://ml/p", categoryId: null, categoryName: null,
-        thumbnail: "https://thumb", logisticType: null, inventoryId: null,
+        thumbnail: "https://thumb", logisticType: null, inventoryId: null, skus: [], gtins: [],
       },
     ]);
 
@@ -390,7 +390,7 @@ describe("backfillMissingProducts", () => {
       {
         id: "MLA555", title: "Producto recuperado", sku: "SKU5", price: 5000, stock: 3,
         permalink: "https://ml/p5", categoryId: "MLA1", categoryName: "Categoría",
-        thumbnail: "https://thumb5", logisticType: "fulfillment", inventoryId: "INV5",
+        thumbnail: "https://thumb5", logisticType: "fulfillment", inventoryId: "INV5", skus: [], gtins: [],
       },
     ]);
 

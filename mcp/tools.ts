@@ -16,6 +16,44 @@ export interface MlProduct {
   logisticType: string | null;
   /** Id para consultar /inventories/{id}/stock/fulfillment. Sin confirmar. */
   inventoryId: string | null;
+  /** Todos los SKU de la publicación: el de la publicación y el de cada variante. */
+  skus: string[];
+  /** Códigos de barras (EAN/GTIN) de la publicación y de sus variantes. */
+  gtins: string[];
+}
+
+function attributeValues(attributes: any, id: string): string[] {
+  if (!Array.isArray(attributes)) return [];
+  const out: string[] = [];
+  for (const a of attributes) {
+    if (a?.id !== id) continue;
+    // value_name puede traer varios códigos separados por coma ("779…, 779…").
+    for (const v of String(a.value_name ?? "").split(/[,;]+/)) if (v.trim()) out.push(v.trim());
+    for (const v of Array.isArray(a.values) ? a.values : []) if (v?.name) out.push(String(v.name).trim());
+  }
+  return out;
+}
+
+/**
+ * SKU y EAN de una publicación, para cruzarla con la planilla de costos del
+ * vendedor. ML los guarda en lugares distintos según la publicación: el SKU en
+ * `seller_custom_field` o en el atributo SELLER_SKU, y en las publicaciones con
+ * variantes, en cada variante. El EAN es el atributo GTIN. Los atributos de las
+ * variantes solo vienen si se piden con `include_attributes=all`.
+ */
+export function extractCodes(body: any): { skus: string[]; gtins: string[] } {
+  const skus = new Set<string>();
+  const gtins = new Set<string>();
+  const addSku = (v: unknown) => { if (typeof v === "string" && v.trim()) skus.add(v.trim()); };
+  addSku(body?.seller_custom_field);
+  attributeValues(body?.attributes, "SELLER_SKU").forEach(addSku);
+  attributeValues(body?.attributes, "GTIN").forEach((g) => gtins.add(g));
+  for (const variation of Array.isArray(body?.variations) ? body.variations : []) {
+    addSku(variation?.seller_custom_field);
+    attributeValues(variation?.attributes, "SELLER_SKU").forEach(addSku);
+    attributeValues(variation?.attributes, "GTIN").forEach((g) => gtins.add(g));
+  }
+  return { skus: [...skus], gtins: [...gtins].filter((g) => /^\d{8,14}$/.test(g)) };
 }
 
 /** Sin confirmar todavía dónde vive exactamente en la respuesta de /items:
@@ -126,7 +164,7 @@ export async function getProductDetails(accountId: string, ids: string[]): Promi
   const batchResults: any[] = [];
   for (let i = 0; i < batches.length; i += ITEMS_BATCH_CONCURRENCY) {
     const chunk = batches.slice(i, i + ITEMS_BATCH_CONCURRENCY);
-    batchResults.push(...(await Promise.all(chunk.map((batch) => mlFetch(`/items?ids=${batch.join(",")}`, token)))));
+    batchResults.push(...(await Promise.all(chunk.map((batch) => mlFetch(`/items?ids=${batch.join(",")}&include_attributes=all`, token)))));
   }
 
   const products: MlProduct[] = [];
@@ -147,6 +185,7 @@ export async function getProductDetails(accountId: string, ids: string[]): Promi
         // el navegador lo bloquea como contenido mixto en una página https.
         thumbnail: entry.body.secure_thumbnail ?? entry.body.thumbnail ?? null,
         ...extractLogistics(entry.body),
+        ...extractCodes(entry.body),
       });
     }
   }
@@ -185,7 +224,7 @@ export async function getProductsByIds(accountId: string, ids: string[]): Promis
     const batch = ids.slice(i, i + ML_ITEMS_BATCH_SIZE);
     let details: any[];
     try {
-      details = await mlFetch(`/items?ids=${batch.join(",")}`, token);
+      details = await mlFetch(`/items?ids=${batch.join(",")}&include_attributes=all`, token);
     } catch (err) {
       console.warn(`No se pudieron traer las publicaciones ${batch.join(",")}:`, (err as Error).message);
       continue;
@@ -207,6 +246,7 @@ export async function getProductsByIds(accountId: string, ids: string[]): Promis
         categoryName: null,
         thumbnail: body.secure_thumbnail ?? body.thumbnail ?? null,
         ...extractLogistics(body),
+        ...extractCodes(body),
       });
     }
   }

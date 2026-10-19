@@ -27,7 +27,19 @@ export async function POST(request: NextRequest) {
   const account = await resolveCurrentAccount();
   if (!account) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
 
-  const body = (await request.json().catch(() => ({}))) as { items?: unknown };
+  const body = (await request.json().catch(() => ({}))) as { items?: unknown; validFrom?: unknown };
+  // Fecha desde la que vale el costo: la de la planilla (por ejemplo, la fecha
+  // de corte del stock), así el historial de costos queda bien aunque se suba
+  // una planilla vieja. Sin fecha, vale desde ahora.
+  let validFrom = new Date().toISOString();
+  if (body.validFrom !== undefined && body.validFrom !== null) {
+    const ok = typeof body.validFrom === "string" && /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(body.validFrom);
+    const asDate = ok ? new Date(`${body.validFrom}T03:00:00Z`) : null;
+    if (!asDate || Number.isNaN(asDate.getTime()) || asDate.getTime() > Date.now() + 86_400_000 || asDate.getUTCFullYear() < 2000) {
+      return NextResponse.json({ error: "validFrom tiene que ser una fecha AAAA-MM-DD, no futura." }, { status: 400 });
+    }
+    validFrom = asDate.toISOString();
+  }
   if (!Array.isArray(body.items) || body.items.length === 0) {
     return NextResponse.json({ error: "Mandá items con al menos un costo." }, { status: 400 });
   }
@@ -58,14 +70,13 @@ export async function POST(request: NextRequest) {
       if (current.rows.length === 0) { missing++; continue; }
       const currentCost = current.rows[0].cost;
       if (currentCost !== null && currentCost !== undefined && Math.abs(Number(currentCost) - item.cost) < 0.005) { unchanged++; continue; }
-      const now = new Date().toISOString();
       if (hasFx) {
         await client.query(
           `INSERT INTO product_costs (account_id, product_id, cost, valid_from, exchange_rate, cost_currency) VALUES ($1, $2, $3, $4, NULL, 'ARS')`,
-          [account.id, item.productId, item.cost, now]
+          [account.id, item.productId, item.cost, validFrom]
         );
       } else {
-        await client.query(`INSERT INTO product_costs (account_id, product_id, cost, valid_from) VALUES ($1, $2, $3, $4)`, [account.id, item.productId, item.cost, now]);
+        await client.query(`INSERT INTO product_costs (account_id, product_id, cost, valid_from) VALUES ($1, $2, $3, $4)`, [account.id, item.productId, item.cost, validFrom]);
       }
       itemsUpdated += await recalculateProduct(client, account.id, item.productId, hasIva, account.otherTaxRate, appliesIva(account.taxCondition));
       updated++;

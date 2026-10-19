@@ -53,4 +53,13 @@ describe("POST /api/products/import-costs", () => {
     expect(inserts.map(([, p]) => (p as unknown[])[1])).toEqual(["A", "C"]);
     expect(inserts.every(([, p]) => (p as unknown[])[0] === "acc1")).toBe(true);
   });
+
+  it("usa la fecha de la planilla como vigencia del costo y rechaza fechas futuras o mal escritas", async () => {
+    const query = db({ A: null });
+    await POST(req({ items: [{ productId: "A", cost: 10 }], validFrom: "2026-10-09" }));
+    const insert = query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO product_costs"))!;
+    expect((insert[1] as unknown[])[3]).toBe("2026-10-09T03:00:00.000Z");
+    expect((await POST(req({ items: [{ productId: "A", cost: 10 }], validFrom: "2999-01-01" }))).status).toBe(400);
+    expect((await POST(req({ items: [{ productId: "A", cost: 10 }], validFrom: "9/10/2026" }))).status).toBe(400);
+  });
 });

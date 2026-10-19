@@ -52,7 +52,7 @@ describe("listProducts", () => {
     expect(products).toHaveLength(2);
     expect(products[0]).toEqual({
       id: "MLA1", title: "Producto 1", sku: "SKU1", price: 1000, stock: 5, permalink: "url1",
-      categoryId: null, categoryName: null, thumbnail: null, logisticType: null, inventoryId: null,
+      categoryId: null, categoryName: null, thumbnail: null, logisticType: null, inventoryId: null, skus: ["SKU1"], gtins: [],
     });
   });
 
@@ -1329,5 +1329,25 @@ describe("getProductAdsReport", () => {
     const report = await getProductAdsReport("acc1", "2020-01-01", new Date().toISOString().slice(0, 10));
     expect(report.clamped).toBe(true);
     expect(report.from! > "2020-01-01").toBe(true);
+  });
+});
+
+describe("extractCodes", () => {
+  it("junta los SKU y EAN de la publicación y de sus variantes", async () => {
+    const { extractCodes } = await import("./tools");
+    const codes = extractCodes({
+      seller_custom_field: "JM2125",
+      attributes: [{ id: "GTIN", value_name: "7798353739823" }, { id: "BRAND", value_name: "X" }],
+      variations: [
+        { seller_custom_field: null, attributes: [{ id: "SELLER_SKU", value_name: "JM2125-N" }, { id: "GTIN", value_name: "7798353739830, 7798353739847" }] },
+        { attributes: [{ id: "GTIN", value_name: "no es un ean" }] },
+      ],
+    });
+    expect(codes.skus).toEqual(["JM2125", "JM2125-N"]);
+    expect(codes.gtins).toEqual(["7798353739823", "7798353739830", "7798353739847"]);
+  });
+  it("no rompe con una publicación sin atributos", async () => {
+    const { extractCodes } = await import("./tools");
+    expect(extractCodes({})).toEqual({ skus: [], gtins: [] });
   });
 });
