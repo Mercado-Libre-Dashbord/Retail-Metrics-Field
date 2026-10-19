@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseAmount, parseCsv, detectColumns, extractRows, buildPreview, normalizeCode, normalizeEan, type Cell } from "./cost-import";
+import { parseAmount, parseCsv, detectColumns, extractRows, buildPreview, normalizeCode, normalizeEan, namesMatch, detectPackUnits, selectedByDefault, type Cell } from "./cost-import";
 
 describe("parseAmount", () => {
   it.each([
@@ -68,29 +68,41 @@ describe("planilla de stock", () => {
   it("cruza primero por EAN, después por SKU (de la publicación o de una variante) o ID", () => {
     const r = extractRows(SHEET, d.headerRow, d);
     const products = [
-      { id: "MLA1", title: "Insecticida", sku: null, skus: ["b4"], gtins: [], currentCost: null },
-      { id: "MLA2", title: "Plato playo", sku: "OTRO-SKU", skus: [], gtins: ["7790000000011"], currentCost: 1545 },
-      { id: "MLA3", title: "Jarro gris", sku: null, skus: [], gtins: ["7790000000028"], currentCost: 1200 },
+      { id: "MLA1", title: "Insecticida Power Bait 250 gr", sku: null, skus: ["b4"], gtins: [], currentCost: null },
+      { id: "MLA2", title: "Plato Playo Ceramica", sku: "OTRO-SKU", skus: [], gtins: ["7790000000011"], currentCost: 1545 },
+      { id: "MLA3", title: "Jarro Gris Mug", sku: null, skus: [], gtins: ["7790000000028"], currentCost: 1200 },
       { id: "MLA4", title: "Sin códigos", sku: null, skus: [], gtins: [], currentCost: null },
     ];
     const p = buildPreview(r.rows, products);
-    expect(p.toUpdate.map((x) => [x.products.map((y) => y.id), x.by])).toEqual([[["MLA1"], "sku"], [["MLA3"], "ean"]]);
-    expect(p.unchanged.map((x) => x.products[0].id)).toEqual(["MLA2"]);
+    expect(p.items.map((x) => [x.row.code, x.product.id, x.by, x.nameOk])).toEqual([
+      ["B4", "MLA1", "sku", true],
+      ["PLATO110", "MLA2", "ean", true],
+      ["1", "MLA3", "ean", true],
+    ]);
     expect(p.notFound).toEqual([]);
     expect(p.stillWithoutCost.map((x) => x.id)).toEqual(["MLA4"]);
   });
-  it("marca conflicto cuando dos artículos con costos distintos caen en la misma publicación", () => {
-    const products = [{ id: "MLA9", title: "Combo", sku: "X", gtins: ["7790000000028"], currentCost: null }];
+
+  it("no aplica sin revisar un cruce por código con nombres que no tienen nada que ver (EAN reutilizado)", () => {
+    const row = { code: "21", rawCode: "21", ean: "7797483002678", name: "JARRO BOMBE RAYADO VERDE PASTEL", cost: 1612.74 };
+    const p = buildPreview([row], [
+      { id: "MLA7", title: "Fibras Fibrones Marcadores Plumones X 80 Doble Punta Multicolor", sku: null, gtins: ["7797483002678"], currentCost: null },
+    ]);
+    expect(p.items[0].nameOk).toBe(false);
+    expect(selectedByDefault(p.items[0])).toBe(false);
+  });
+
+  it("marca conflicto cuando dos artículos con costos distintos caen en la misma publicación, y no aplica ninguno solo", () => {
+    const products = [{ id: "MLA9", title: "Combo Jarro y Taza", sku: "X", gtins: ["7790000000028"], currentCost: null }];
     const p = buildPreview(
       [
-        { code: "X", rawCode: "X", ean: null, name: null, cost: 10 },
-        { code: "Y", rawCode: "Y", ean: "7790000000028", name: null, cost: 20 },
+        { code: "X", rawCode: "X", ean: null, name: "Jarro", cost: 10 },
+        { code: "Y", rawCode: "Y", ean: "7790000000028", name: "Taza", cost: 20 },
       ],
       products
     );
-    expect(p.toUpdate).toHaveLength(1);
-    expect(p.toUpdate[0].cost).toBe(10);
-    expect(p.conflicts.map((c) => c.rows.map((x) => x.cost))).toEqual([[10, 20]]);
+    expect(p.items.map((x) => x.conflict)).toEqual([true, true]);
+    expect(p.items.some(selectedByDefault)).toBe(false);
   });
   it("avisa los artículos repetidos con costos distintos", () => {
     const r = extractRows([["codigo", "costo"], ["A", "10"], ["A.", "12"]], 0, { codeCol: 0, costCol: 1, eanCol: -1, nameCol: -1 });
@@ -107,4 +119,26 @@ describe("CSV", () => {
       { code: "02509ST/BHA6", rawCode: "02509ST/BHA6", ean: "6950182205608", name: "VASO 310 ML.", cost: 737.29 },
     ]);
   });
+});
+
+describe("namesMatch", () => {
+  it.each([
+    ["BOYA CHICA", "Boya Dosificadora De Cloro Para Pileta", true],
+    ["BASE MULTIFUNCIONAL CON RUEDAS (26017IC06000031X-CH)", "Base Móvil Con 4 Ruedas Adaptable Heladera", true],
+    ["JARRO BOMBE GRIS PASTEL 330 CC", "Set X6 Jarro Liso Mug Taza De Cerámica", true],
+    ["JARRO BOMBE BEIGE PASTEL 330 CC", "Escobilla Cepillo Baño Limpia Inodoro Con Tapa Bambu", false],
+    ["PERCHAS TERCIOPELO NEGRAS", "Perchas Negras Percha Terciopelo Pack De 20 Unidades", true],
+  ])("%s / %s", (a, t, ok) => expect(namesMatch(a, t)).toBe(ok));
+});
+
+describe("detectPackUnits", () => {
+  it.each([
+    ["Set X6 Jarro Liso Mug Taza De Cerámica", "JARRO BOMBE GRIS PASTEL 330 CC", 6],
+    ["Perchas Negras Percha Terciopelo Pack De 20 Unidades Color Negro", "PERCHA TERCIOPELO", 20],
+    ["X6 Unidades Jarros Submarino Cafe Vaso Vidrio 285ml", "VASO SUBMARINO", 6],
+    ["Hormiguicida En Polvo X 250 Gr Power Bait", "HORMIGUICIDA EN POLVO X 250 GR.", 1],
+    ["Set X 3 Botellas Motivacionales", "SET X 3 BOTELLAS MOTIVACIONALES AS", 1],
+    ["Boya Dosificadora De Cloro Para Pileta", "BOYA CHICA", 1],
+    ["Fibras Marcadores X 80 Doble Punta", "FIBRAS X 80", 1],
+  ])("%s → %i", (title, article, n) => expect(detectPackUnits(title, article)).toBe(n));
 });

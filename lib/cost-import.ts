@@ -196,26 +196,93 @@ export function extractRows(rows: Cell[][], headerRow: number, cols: Columns): E
 
 export type MatchedBy = "ean" | "sku";
 
-export interface PreviewItem extends ImportRow {
-  products: ProductRef[];
-  by: MatchedBy;
+const STOPWORDS = new Set([
+  "con", "sin", "para", "por", "del", "las", "los", "una", "uno", "unidades", "unidad", "set", "pack", "kit", "combo",
+  "the", "and", "de", "la", "el", "en", "y", "x", "cm", "mm", "ml", "cc", "gr", "kg", "lts", "color", "nuevo", "nueva",
+  "original", "premium", "envio", "gratis", "oferta", "colores", "varios", "surtido", "surtidos",
+]);
+
+/** Palabras con significado de un nombre de producto, sin acentos ni plurales simples. */
+export function nameTokens(name: string | null | undefined): Set<string> {
+  const words = (name ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, " ") // el despacho de importación entre paréntesis
+    .split(/[^a-z0-9]+/);
+  const out = new Set<string>();
+  for (const w of words) {
+    if (w.length < 3 || STOPWORDS.has(w) || /^\d+$/.test(w)) continue;
+    out.add(w.length > 4 && w.endsWith("es") ? w.slice(0, -2) : w.length > 3 && w.endsWith("s") ? w.slice(0, -1) : w);
+  }
+  return out;
 }
 
-export interface Conflict {
+/**
+ * Si el nombre del artículo y el título de la publicación comparten al menos
+ * una palabra. Es una red de seguridad: hay vendedores que reutilizan un mismo
+ * EAN o SKU en publicaciones distintas, y un cruce por código con nombres que
+ * no tienen nada que ver ("Jarro" contra "Marcadores") no se aplica sin que
+ * alguien lo mire.
+ */
+export function namesMatch(articleName: string | null | undefined, title: string): boolean {
+  const a = nameTokens(articleName);
+  if (a.size === 0) return true; // sin nombre en la planilla no hay con qué comparar
+  const t = nameTokens(title);
+  for (const w of a) {
+    for (const v of t) if (w === v || (w.length >= 5 && v.length >= 5 && (w.startsWith(v) || v.startsWith(w)))) return true;
+  }
+  return false;
+}
+
+const MEASURE_AFTER = /^\s*(?:gr|g|grs|gramos|ml|cc|cm|mm|m|mts|kg|l|lt|lts|litros|w|watts|v|mah|hojas|pulgadas)\b/;
+
+/**
+ * Cuántas unidades del artículo trae la publicación, leído del título: "Set X6
+ * Jarro", "Pack De 20 Unidades", "Kit 3 Botellas", "10 unidades". Si el
+ * artículo de la planilla ya es ese pack ("SET X 3 BOTELLAS"), es 1. Ante la
+ * duda (una medida como "x 250 gr"), 1.
+ */
+export function detectPackUnits(title: string, articleName?: string | null): number {
+  const norm = (v: string) => v.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const t = norm(title);
+  const patterns = [
+    /\b(?:set|pack|kit|combo|caja|lote)\s*(?:de\s*)?x?\s*(\d{1,3})\b/g,
+    /(?:^|\s)x\s*(\d{1,3})\b/g,
+    /\b(\d{1,3})\s*(?:unidades|unid|u|piezas|pzas|pz)\b/g,
+  ];
+  for (const re of patterns) {
+    for (const m of t.matchAll(re)) {
+      const n = Number(m[1]);
+      const rest = t.slice((m.index ?? 0) + m[0].length);
+      if (!Number.isFinite(n) || n < 2 || n > 500 || MEASURE_AFTER.test(rest)) continue;
+      const a = norm(articleName ?? "");
+      if (new RegExp(`(?:x|set|pack|kit)\\s*(?:de\\s*)?x?\\s*${n}\\b|\\b${n}\\s*(?:unidades|u)\\b`).test(a)) return 1;
+      return n;
+    }
+  }
+  return 1;
+}
+
+export interface MatchItem {
+  /** Única por artículo + publicación. */
+  key: string;
+  row: ImportRow;
   product: ProductRef;
-  /** Las filas de la planilla que pedían costos distintos para la misma publicación; se usó la primera. */
-  rows: ImportRow[];
+  by: MatchedBy;
+  /** Si el nombre del artículo y el título de la publicación comparten alguna palabra. */
+  nameOk: boolean;
+  /** Unidades del artículo por publicación sugeridas por el título. */
+  packUnits: number;
+  /** La publicación coincide con más de un artículo de la planilla con costos distintos. */
+  conflict: boolean;
 }
 
 export interface Preview {
-  /** Costos que cambian algo. */
-  toUpdate: PreviewItem[];
-  /** La publicación ya tiene exactamente ese costo. */
-  unchanged: PreviewItem[];
+  items: MatchItem[];
   /** Artículos de la planilla que no coinciden con ninguna publicación. */
   notFound: ImportRow[];
-  conflicts: Conflict[];
-  /** Publicaciones que van a seguir sin costo después de importar: lo que queda para cargar a mano. */
+  /** Publicaciones que no coinciden con ningún artículo: lo que queda para cargar a mano. */
   stillWithoutCost: ProductRef[];
 }
 
@@ -233,18 +300,17 @@ function index(products: ProductRef[], keysOf: (p: ProductRef) => string[]): Map
 }
 
 /**
- * Cruza la planilla con las publicaciones: primero por EAN (el código de
- * barras es único y no depende de cómo cargó el SKU), y si no, por SKU o ID de
- * publicación. Un mismo artículo puede estar en varias publicaciones.
+ * Cruza la planilla con las publicaciones: primero por EAN y, si no, por SKU o
+ * ID de publicación. Un artículo puede estar en varias publicaciones. Cada
+ * cruce se devuelve aparte, con lo necesario para decidir si se aplica: si los
+ * nombres coinciden, cuántas unidades trae la publicación y si hay conflicto.
  */
 export function buildPreview(rows: ImportRow[], products: ProductRef[]): Preview {
   const byEan = index(products, (p) => (p.gtins ?? []).map((g) => normalizeEan(g) ?? ""));
   const byCode = index(products, (p) => [p.sku, ...(p.skus ?? []), p.id].map((c) => normalizeCode(c)));
 
-  const assigned = new Map<string, { cost: number; row: ImportRow }>();
-  const conflicts = new Map<string, Conflict>();
-  const preview: Preview = { toUpdate: [], unchanged: [], notFound: [], conflicts: [], stillWithoutCost: [] };
-
+  const items: MatchItem[] = [];
+  const notFound: ImportRow[] = [];
   for (const row of rows) {
     let by: MatchedBy = "ean";
     let matches = row.ean ? byEan.get(row.ean) : undefined;
@@ -252,25 +318,33 @@ export function buildPreview(rows: ImportRow[], products: ProductRef[]): Preview
       by = "sku";
       matches = row.code ? byCode.get(row.code) : undefined;
     }
-    if (!matches?.length) { preview.notFound.push(row); continue; }
-
-    const mine: ProductRef[] = [];
-    for (const p of matches) {
-      const prev = assigned.get(p.id);
-      if (!prev) { assigned.set(p.id, { cost: row.cost, row }); mine.push(p); continue; }
-      if (Math.abs(prev.cost - row.cost) >= 0.005) {
-        const c = conflicts.get(p.id) ?? { product: p, rows: [prev.row] };
-        c.rows.push(row);
-        conflicts.set(p.id, c);
-      }
+    if (!matches?.length) { notFound.push(row); continue; }
+    for (const product of matches) {
+      items.push({
+        key: `${row.code}|${row.ean ?? ""}|${product.id}`,
+        row,
+        product,
+        by,
+        nameOk: namesMatch(row.name, product.title),
+        packUnits: detectPackUnits(product.title, row.name),
+        conflict: false,
+      });
     }
-    if (mine.length === 0) continue;
-    const changing = mine.filter((p) => p.currentCost === null || Math.abs(p.currentCost - row.cost) >= 0.005);
-    if (changing.length > 0) preview.toUpdate.push({ ...row, products: changing, by });
-    if (changing.length < mine.length) preview.unchanged.push({ ...row, products: mine.filter((p) => !changing.includes(p)), by });
   }
 
-  preview.conflicts = [...conflicts.values()];
-  preview.stillWithoutCost = products.filter((p) => p.currentCost === null && !assigned.has(p.id));
-  return preview;
+  // Una publicación con varios artículos de costos distintos (un combo, o un
+  // código reutilizado): ninguno se aplica solo.
+  const byProduct = new Map<string, MatchItem[]>();
+  for (const it of items) byProduct.set(it.product.id, [...(byProduct.get(it.product.id) ?? []), it]);
+  for (const list of byProduct.values()) {
+    if (new Set(list.map((it) => it.row.cost)).size > 1) list.forEach((it) => (it.conflict = true));
+  }
+
+  const matched = new Set(items.map((it) => it.product.id));
+  return { items, notFound, stillWithoutCost: products.filter((p) => p.currentCost === null && !matched.has(p.id)) };
+}
+
+/** Si un cruce se aplica sin que nadie lo marque: nombres que coinciden y sin conflicto. */
+export function selectedByDefault(it: MatchItem): boolean {
+  return it.nameOk && !it.conflict;
 }
