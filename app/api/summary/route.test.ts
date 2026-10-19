@@ -5,12 +5,21 @@ vi.mock("@/lib/current-account", () => ({ resolveCurrentAccount: vi.fn(), getCur
 // Las visitas salen de la API de ML en vivo; acá no interesan salvo en su
 // propio test, así que por defecto responden "sin dato".
 vi.mock("@/mcp/tools", () => ({ getStoreVisits: vi.fn().mockResolvedValue(null) }));
+// Los ajustes del período (publicidad sin repartir, Full, otros cargos) tienen
+// su propio test contra Postgres real (sync/period-charges.pg.test.ts); acá se
+// prueba que el Resumen los sume.
+const ZERO_ADJ = { adSpend: 0, adsInSales: 0, adsNotInSales: 0, full: 0, otherCharges: 0, ivaCredit: 0, total: 0 };
+vi.mock("@/sync/period-charges", () => ({
+  periodAdjustments: vi.fn(),
+  monthlyAdjustments: vi.fn(),
+}));
 
 import { GET } from "./route";
 import { withScope } from "@/db/client";
 import { resolveCurrentAccount, getCurrentUser } from "@/lib/current-account";
 import { resetColumnCache } from "@/db/schema-capabilities";
 import { getStoreVisits } from "@/mcp/tools";
+import { periodAdjustments, monthlyAdjustments } from "@/sync/period-charges";
 
 const account = { id: "acc1", name: "Cuenta", ownerEmail: "a@example.com", mlSellerId: "S1", otherTaxRate: 0, taxCondition: "responsable_inscripto" as const, taxConditionConfirmed: true, createdAt: "2026-01-01" };
 
@@ -21,6 +30,8 @@ describe("GET /api/summary", () => {
     vi.mocked(resolveCurrentAccount).mockResolvedValue(account);
     vi.mocked(getCurrentUser).mockResolvedValue({ email: "a@example.com", isAdmin: false });
     vi.mocked(getStoreVisits).mockResolvedValue(null);
+    vi.mocked(periodAdjustments).mockResolvedValue(ZERO_ADJ);
+    vi.mocked(monthlyAdjustments).mockResolvedValue([]);
   });
 
   it("returns 401 when there is no active account", async () => {
@@ -309,5 +320,39 @@ describe("GET /api/summary", () => {
     // 0 visitas y "no sabemos" son distintos: con null no se muestra conversión.
     expect(body.visits).toBeNull();
     expect(body.conversionRate).toBeNull();
+  });
+
+  it("suma a la ganancia de las ventas los ajustes del período (publicidad sin repartir, Full, otros cargos)", async () => {
+    vi.mocked(periodAdjustments).mockResolvedValue({ ...ZERO_ADJ, adsNotInSales: 300, otherCharges: 6000, ivaCredit: 1000, total: -5300 });
+    const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes("information_schema.columns")) return { rows: [] };
+      if (sql.includes("FROM ads_spend")) return { rows: [{ total: 300 }] };
+      if (sql.includes("COUNT(DISTINCT o.id) as orders")) return { rows: [{ orders: 2, grossSales: 20000, totalCommission: 0, totalShipping: 0, totalCost: 0, totalIva: 0, netProfit: 9000, itemsMissingCost: 0, ordersWithCost: 2 }] };
+      return { rows: [] };
+    });
+    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
+    const request = { nextUrl: { searchParams: new URLSearchParams({ from: "2026-09-01", to: "2026-09-30" }) } } as any;
+    const body = await (await GET(request)).json();
+    expect(body.salesProfit).toBe(9000);
+    expect(body.netProfit).toBe(3700);
+    expect(body.profitPct).toBeCloseTo(3700 / 20000);
+    expect(body.adjustments.otherCharges).toBe(6000);
+  });
+
+  it("aplica los ajustes de cada mes en la serie mensual", async () => {
+    vi.mocked(monthlyAdjustments).mockResolvedValue([
+      { month: "2026-09", ...ZERO_ADJ, total: -6000 },
+      { month: "2026-10", ...ZERO_ADJ, total: -100 },
+    ]);
+    const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes("information_schema.columns")) return { rows: [] };
+      return { rows: [{ month: "2026-09", netProfit: 10000 }] };
+    });
+    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
+    const request = { nextUrl: { searchParams: new URLSearchParams({ groupBy: "month" }) } } as any;
+    expect(await (await GET(request)).json()).toEqual([
+      { month: "2026-09", netProfit: 4000 },
+      { month: "2026-10", netProfit: -100 },
+    ]);
   });
 });

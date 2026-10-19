@@ -36,23 +36,44 @@ describe("GET /api/billing", () => {
 
   it("groups real ML charges by concept, biggest first", async () => {
     client([
-      { concept: "Sales charge", detailType: null, detailSubType: null, amount: 1000 },
-      { concept: "Comisión por venta", detailType: null, detailSubType: null, amount: 500 },
-      { concept: "Percepción IVA RG 4310", detailType: null, detailSubType: null, amount: 300 },
-      { concept: "Mercado Envios charge", detailType: null, detailSubType: null, amount: 200 },
+      { month: "2026-09", concept: "Sales charge", detailType: null, detailSubType: null, linked: true, count: 3, amount: 1000 },
+      { month: "2026-09", concept: "Comisión por venta", detailType: null, detailSubType: null, linked: true, count: 1, amount: 500 },
+      { month: "2026-09", concept: "Percepción IVA RG 4310", detailType: null, detailSubType: null, linked: false, count: 1, amount: 300 },
+      { month: "2026-09", concept: "Mercado Envios charge", detailType: null, detailSubType: null, linked: true, count: 2, amount: 200 },
     ]);
 
     const body = await (await GET(request)).json();
 
     expect(body.available).toBe(true);
-    expect(body.buckets[0]).toEqual({ bucket: "comision", label: "Comisiones de venta", amount: 1500 });
+    expect(body.buckets[0]).toMatchObject({ bucket: "comision", label: "Comisiones de venta", amount: 1500, subtracted: 0 });
+    expect(body.buckets[0].treatments).toEqual([{ treatment: "per_sale", label: "Ya restado venta por venta", amount: 1500 }]);
     expect(body.buckets.map((b: any) => b.bucket)).toEqual(["comision", "impuesto", "envio"]);
     expect(body.total).toBe(2000);
+    expect(body.subtracted).toBe(0);
+  });
+
+  it("marca qué se resta de la ganancia: Full y otros sin venta, y lo cargado a mano", async () => {
+    client([
+      { month: "2026-09", concept: null, detailType: "MANUAL", detailSubType: "manual:otro", linked: false, count: 1, amount: 6094850 },
+      { month: "2026-09", concept: "Cargo por almacenamiento Full", detailType: "CHARGE", detailSubType: null, linked: false, count: 1, amount: 42710 },
+      { month: "2026-09", concept: "Cargo varios", detailType: "CHARGE", detailSubType: null, linked: true, count: 4, amount: 900 },
+      { month: "2026-09", concept: "Product Ads", detailType: "CHARGE", detailSubType: "PADS", linked: false, count: 1, amount: 1000 },
+    ]);
+    const body = await (await GET(request)).json();
+    const otro = body.buckets.find((b: any) => b.bucket === "otro");
+    expect(otro.subtracted).toBe(6094850);
+    expect(otro.details.map((d: any) => [d.concept, d.treatment])).toEqual([
+      ["Cargado a mano", "subtracted"],
+      ["Cargo varios", "per_sale"],
+    ]);
+    expect(body.buckets.find((b: any) => b.bucket === "full").subtracted).toBe(42710);
+    expect(body.buckets.find((b: any) => b.bucket === "publicidad").subtracted).toBe(0);
+    expect(body.subtracted).toBe(6094850 + 42710);
   });
 
   it("reports unavailable instead of failing when the billing table is not migrated yet", async () => {
     client([], { hasTable: false });
     const body = await (await GET(request)).json();
-    expect(body).toEqual({ available: false, buckets: [], total: 0 });
+    expect(body).toEqual({ available: false, buckets: [], total: 0, subtracted: 0 });
   });
 });

@@ -5,6 +5,8 @@ import { hasColumn } from "@/db/schema-capabilities";
 import { resolveCurrentAccount } from "@/lib/current-account";
 import { revenueStatusFilter } from "@/lib/order-status";
 import { recommendAdsAction } from "@/lib/ads-recommendation";
+import { appliesIva } from "@/db/accounts";
+import { monthlyAdjustments } from "@/sync/period-charges";
 
 export const runtime = "nodejs";
 /** Movimientos puede tener decenas de miles de filas (todo el historial). */
@@ -43,6 +45,8 @@ interface MonthRow {
   iva: number;
   netProfit: number;
   adSpend: number;
+  /** Full y otros cargos de la factura de ML que no son de una venta. */
+  mlCharges: number;
   refundOrders: number;
   refundAmount: number;
 }
@@ -77,7 +81,7 @@ function periodKey(month: string, granularity: Granularity): { key: string; labe
 function emptyRow(): Omit<MonthRow, "month"> {
   return {
     orders: 0, units: 0, revenue: 0, commission: 0, shipping: 0, cost: 0,
-    otherTax: 0, iva: 0, netProfit: 0, adSpend: 0, refundOrders: 0, refundAmount: 0,
+    otherTax: 0, iva: 0, netProfit: 0, adSpend: 0, mlCharges: 0, refundOrders: 0, refundAmount: 0,
   };
 }
 
@@ -92,6 +96,7 @@ function addRows(into: Omit<MonthRow, "month">, from: Omit<MonthRow, "month">) {
   into.iva += from.iva;
   into.netProfit += from.netProfit;
   into.adSpend += from.adSpend;
+  into.mlCharges += from.mlCharges;
   into.refundOrders += from.refundOrders;
   into.refundAmount += from.refundAmount;
 }
@@ -144,6 +149,7 @@ const PERIOD_COLUMNS: { header: string; key: string; width: number; fmt?: string
   { header: "Comisión ML", key: "commission", width: 16, fmt: CURRENCY_FMT, sum: true },
   { header: "Envío", key: "shipping", width: 14, fmt: CURRENCY_FMT, sum: true },
   { header: "Publicidad", key: "adSpend", width: 14, fmt: CURRENCY_FMT, sum: true },
+  { header: "Full y otros cargos ML", key: "mlCharges", width: 20, fmt: CURRENCY_FMT, sum: true },
   { header: "Costo de producto", key: "cost", width: 18, fmt: CURRENCY_FMT, sum: true },
   { header: "Otros impuestos", key: "otherTax", width: 16, fmt: CURRENCY_FMT, sum: true },
   { header: "IVA", key: "iva", width: 14, fmt: CURRENCY_FMT, sum: true },
@@ -374,6 +380,7 @@ function addOverviewSheet(
     ["Comisión ML", grandTotal.commission, CURRENCY_FMT],
     ["Envío", grandTotal.shipping, CURRENCY_FMT],
     ["Publicidad", grandTotal.adSpend, CURRENCY_FMT],
+    ["Full y otros cargos ML", grandTotal.mlCharges, CURRENCY_FMT],
     ["Costo de producto", grandTotal.cost, CURRENCY_FMT],
     ["Otros impuestos", grandTotal.otherTax, CURRENCY_FMT],
     ["IVA", grandTotal.iva, CURRENCY_FMT],
@@ -505,6 +512,15 @@ export async function GET() {
     for (const r of adsResult.rows) {
       const row = get(String(r.month));
       row.adSpend = Number(r.adSpend);
+    }
+    // Mismo cálculo que la Ganancia neta de Resumen: a lo que dejan las ventas
+    // se le resta la publicidad no repartida y los cargos de ML que no son de
+    // una venta, mes por mes (ver sync/period-charges.ts).
+    for (const m of await monthlyAdjustments(client, account.id, "1970-01-01", "9999-12-31", appliesIva(account.taxCondition))) {
+      const row = get(m.month);
+      row.netProfit += m.total;
+      row.iva -= m.ivaCredit;
+      row.mlCharges = m.full + m.otherCharges;
     }
     const monthRows = [...byMonth.values()].sort((a, b) => a.month.localeCompare(b.month));
 

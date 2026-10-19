@@ -2,21 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { withScope } from "@/db/client";
 import { hasColumn } from "@/db/schema-capabilities";
 import { resolveCurrentAccount } from "@/lib/current-account";
-import { classifyCharge, BUCKET_LABEL, type ChargeBucket } from "@/sync/billing";
+import { BUCKET_LABEL, type ChargeBucket } from "@/sync/billing";
+import { chargeDetails, TREATMENT_LABEL, type ChargeTreatment } from "@/sync/period-charges";
 
 export const runtime = "nodejs";
 
-interface ChargeRow {
-  concept: string | null;
-  detailType: string | null;
-  detailSubType: string | null;
-  amount: number;
-}
-
 /**
  * Lo que Mercado Libre efectivamente facturó en el período, agrupado por
- * concepto. Es el número "de verdad" contra el que conciliar lo que la app
- * estima orden por orden.
+ * concepto, con el detalle de cada cargo y qué hace la ganancia neta con él
+ * (ya restado venta por venta, se resta aparte, o no se resta). Es el número
+ * "de verdad" contra el que conciliar lo que la app calcula.
  */
 export async function GET(request: NextRequest) {
   const account = await resolveCurrentAccount();
@@ -30,31 +25,48 @@ export async function GET(request: NextRequest) {
     // La tabla llega por migración manual; sin ella se devuelve vacío en vez
     // de romper la página (ver db/schema-capabilities.ts).
     if (!(await hasColumn(client, "billing_charges", "detail_id"))) {
-      return { available: false, buckets: [], total: 0 };
+      return { available: false, buckets: [], total: 0, subtracted: 0 };
     }
 
-    const result = await client.query<ChargeRow>(
-      `SELECT concept, detail_type as "detailType", detail_sub_type as "detailSubType", amount
-       FROM billing_charges
-       WHERE account_id = $1 AND (charged_at IS NULL OR charged_at::date BETWEEN $2::date AND $3::date)`,
-      [account.id, from, to]
-    );
-
-    const totals = new Map<ChargeBucket, number>();
-    for (const row of result.rows) {
-      const bucket = classifyCharge(row.concept, row.detailType, row.detailSubType);
-      totals.set(bucket, (totals.get(bucket) ?? 0) + Number(row.amount));
+    const details = await chargeDetails(client, account.id, from, to);
+    const byBucket = new Map<ChargeBucket, { amount: number; byTreatment: Partial<Record<ChargeTreatment, number>>; details: typeof details }>();
+    for (const d of details) {
+      const b = byBucket.get(d.bucket) ?? { amount: 0, byTreatment: {}, details: [] };
+      b.amount += d.amount;
+      b.byTreatment[d.treatment] = (b.byTreatment[d.treatment] ?? 0) + d.amount;
+      b.details.push(d);
+      byBucket.set(d.bucket, b);
     }
 
-    const buckets = [...totals.entries()]
-      .map(([bucket, amount]) => ({ bucket, label: BUCKET_LABEL[bucket], amount }))
+    const buckets = [...byBucket.entries()]
+      .map(([bucket, b]) => ({
+        bucket,
+        label: BUCKET_LABEL[bucket],
+        amount: b.amount,
+        subtracted: b.byTreatment.subtracted ?? 0,
+        treatments: Object.entries(b.byTreatment).map(([t, amount]) => ({
+          treatment: t as ChargeTreatment,
+          label: TREATMENT_LABEL[t as ChargeTreatment],
+          amount,
+        })),
+        details: b.details.map((d) => ({
+          concept: d.concept,
+          linkedToOrder: d.linkedToOrder,
+          manual: d.manual,
+          treatment: d.treatment,
+          treatmentLabel: TREATMENT_LABEL[d.treatment],
+          count: d.count,
+          amount: d.amount,
+        })),
+      }))
       .sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
 
     return {
       available: true,
       buckets,
       total: buckets.reduce((sum, b) => sum + b.amount, 0),
-      charges: result.rows.length,
+      subtracted: buckets.reduce((sum, b) => sum + b.subtracted, 0),
+      charges: details.reduce((n, d) => n + d.count, 0),
     };
   });
 

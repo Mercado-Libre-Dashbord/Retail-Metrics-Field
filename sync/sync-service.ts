@@ -1,5 +1,6 @@
 import type { QueryExecutor } from "@/db/client";
 import { listProducts, listOrders, getOrderDetail, getAdsSpend, listBillingPeriods, getBillingCharges, getProductsByIds, getOrderItemTitles, getFullStock, scanProductIds, getProductDetails, type MlProduct } from "@/mcp/tools";
+import { revenueStatusFilter } from "@/lib/order-status";
 import { getCostEntryAtDate, allocateAdsCost, calculateNetProfit, calculateIva } from "./profitability";
 import { applyIvaPayments } from "./iva-payments";
 import { hasColumn } from "@/db/schema-capabilities";
@@ -722,6 +723,8 @@ interface OrderItemRow {
   unitprice: number;
   mlcommission: number;
   shippingcost: number;
+  /** Si la orden cuenta como venta (no cancelada). Undefined en filas viejas de tests: cuenta. */
+  counts?: boolean;
 }
 
 /**
@@ -759,7 +762,7 @@ async function reallocateAdsCosts(
   const itemsResult = await db.query<OrderItemRow>(
     `SELECT oi.id, oi.product_id as productId, oi.quantity, o.date_created as dateCreated,
             oi.unit_price as unitPrice, oi.ml_commission as mlCommission,
-            oi.shipping_cost as shippingCost
+            oi.shipping_cost as shippingCost, (${revenueStatusFilter()}) as counts
      FROM order_items oi JOIN orders o ON o.account_id = oi.account_id AND o.id = oi.order_id
      WHERE oi.account_id = $1
      ORDER BY oi.id`,
@@ -773,7 +776,10 @@ async function reallocateAdsCosts(
   // catálogo (para el caso real de hoy: ver más abajo).
   const unitsSoldByProductDate = new Map<string, number>();
   const unitsSoldByDate = new Map<string, number>();
+  // Solo las ventas que cuentan (no las canceladas) reciben publicidad: si
+  // una cancelada se llevaba su parte, esa plata quedaba fuera de la ganancia.
   for (const it of items) {
+    if (it.counts === false) continue;
     const dateStr = new Date(it.datecreated).toISOString().slice(0, 10);
     const key = `${it.productid}|${dateStr}`;
     unitsSoldByProductDate.set(key, (unitsSoldByProductDate.get(key) ?? 0) + Number(it.quantity));
@@ -860,7 +866,7 @@ async function reallocateAdsCosts(
         unitsSoldByProductDate.get(productDateKey) ?? 0,
         Number(it.quantity)
       );
-      const adsCostAllocated = unattributedAds + attributedAds;
+      const adsCostAllocated = it.counts === false ? 0 : unattributedAds + attributedAds;
       const entry = getCostEntryAtDate(costsByProduct.get(it.productid) ?? [], new Date(it.datecreated).toISOString());
       const profitInput = {
         unitPrice: Number(it.unitprice),

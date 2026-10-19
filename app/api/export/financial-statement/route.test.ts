@@ -3,6 +3,8 @@ import ExcelJS from "exceljs";
 
 vi.mock("@/db/client", () => ({ withScope: vi.fn() }));
 vi.mock("@/lib/current-account", () => ({ resolveCurrentAccount: vi.fn() }));
+// Los ajustes del período tienen su test contra Postgres real.
+vi.mock("@/sync/period-charges", () => ({ monthlyAdjustments: vi.fn().mockResolvedValue([]) }));
 
 import { GET } from "./route";
 import { withScope } from "@/db/client";
@@ -111,8 +113,9 @@ describe("GET /api/export/financial-statement", () => {
     expect(mensual.getRow(3).getCell("A").value).toBe("Mar 2026");
     expect(mensual.getRow(3).getCell("D").value).toBe(1000); // revenue
     expect(mensual.getRow(3).getCell("G").value).toBe(80); // adSpend
-    expect(mensual.getRow(3).getCell("M").value).toBe(1); // refundOrders
-    expect(mensual.getRow(3).getCell("N").value).toBe(400); // refundAmount
+    expect(mensual.getRow(3).getCell("H").value).toBe(0); // Full y otros cargos ML
+    expect(mensual.getRow(3).getCell("N").value).toBe(1); // refundOrders
+    expect(mensual.getRow(3).getCell("O").value).toBe(400); // refundAmount
     expect(mensual.getRow(4).getCell("A").value).toBe("May 2026");
     const total = mensual.getRow(5);
     expect(total.getCell("A").value).toBe("TOTAL");

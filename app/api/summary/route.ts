@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { withScope } from "@/db/client";
+import { withScope, type QueryExecutor } from "@/db/client";
 import { hasColumn, missingMigrations } from "@/db/schema-capabilities";
 import { getCurrentUser, resolveCurrentAccount } from "@/lib/current-account";
 import { revenueStatusFilter } from "@/lib/order-status";
 import { getStoreVisits } from "@/mcp/tools";
+import { appliesIva } from "@/db/accounts";
+import { monthlyAdjustments, periodAdjustments } from "@/sync/period-charges";
 
 export const runtime = "nodejs";
 
@@ -21,7 +23,7 @@ function previousRange(from: string, to: string): { from: string; to: string } |
   return { from: prevFrom.toISOString().slice(0, 10), to: prevTo.toISOString().slice(0, 10) };
 }
 
-async function totalsFor(client: { query: (sql: string, args: unknown[]) => Promise<{ rows: Record<string, string | number>[] }> }, accountId: string, from: string, to: string) {
+async function totalsFor(client: QueryExecutor, accountId: string, from: string, to: string, withIva: boolean) {
   const totalsResult = await client.query(
     `SELECT
        COUNT(DISTINCT o.id) as orders,
@@ -36,7 +38,9 @@ async function totalsFor(client: { query: (sql: string, args: unknown[]) => Prom
   const row = totalsResult.rows[0];
   const orders = Number(row.orders);
   const grossSales = Number(row.grossSales);
-  const netProfit = Number(row.netProfit);
+  // Misma cuenta que el período actual: ventas + publicidad y cargos de ML
+  // que no son de una venta (ver sync/period-charges.ts).
+  const netProfit = Number(row.netProfit) + (await periodAdjustments(client, accountId, from, to, withIva)).total;
   const refunds = await refundsFor(client, accountId, from, to);
   return {
     orders,
@@ -94,7 +98,12 @@ export async function GET(request: NextRequest) {
          GROUP BY month ORDER BY month`,
         [account.id, from, to]
       );
-      return result.rows;
+      const adj = new Map(
+        (await monthlyAdjustments(client, account.id, from, to, appliesIva(account.taxCondition))).map((m) => [m.month, m.total])
+      );
+      const months = new Set([...result.rows.map((r: { month: string }) => r.month), ...adj.keys()]);
+      const sales = new Map(result.rows.map((r: { month: string; netProfit: number }) => [r.month, Number(r.netProfit)]));
+      return [...months].sort().map((month) => ({ month, netProfit: (sales.get(month) ?? 0) + (adj.get(month) ?? 0) }));
     });
     return NextResponse.json(rows);
   }
@@ -209,7 +218,13 @@ export async function GET(request: NextRequest) {
     const adSpend = Number(adSpendResult.rows[0].total);
     const revenue = Number(totals.grossSales);
     const orders = Number(totals.orders);
-    const netProfit = Number(totals.netProfit);
+    // Ganancia de las ventas (venta por venta) + lo que no es de ninguna
+    // venta: publicidad no repartida y cargos de ML como Full u otros. Ver
+    // sync/period-charges.ts para qué entra y qué no (y por qué no se duplica).
+    const withIva = appliesIva(account.taxCondition);
+    const salesProfit = Number(totals.netProfit);
+    const adjustments = await periodAdjustments(client, account.id, from, to, withIva);
+    const netProfit = salesProfit + adjustments.total;
     const ordersWithCost = Number(totals.ordersWithCost);
 
     const refunds = await refundsFor(client, account.id, from, to);
@@ -247,7 +262,7 @@ export async function GET(request: NextRequest) {
         : null;
 
     const prevRange = previousRange(from, to);
-    const previous = prevRange ? await totalsFor(client, account.id, prevRange.from, prevRange.to) : null;
+    const previous = prevRange ? await totalsFor(client, account.id, prevRange.from, prevRange.to, withIva) : null;
 
     // Solo para el dueño de la app (admin): avisa en la UI que falta correr
     // una migración, con el SQL exacto. El cliente final nunca lo ve.
@@ -259,6 +274,8 @@ export async function GET(request: NextRequest) {
       grossSales: revenue,
       aov: orders > 0 ? revenue / orders : 0,
       netProfit,
+      salesProfit,
+      adjustments,
       profitPct: revenue > 0 ? netProfit / revenue : 0,
       netRevenue: revenue - Number(totals.totalCommission) - Number(totals.totalShipping),
       totalCommission: Number(totals.totalCommission),

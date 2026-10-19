@@ -38,9 +38,23 @@ interface Summary {
   totalCommission: number;
   totalShipping: number;
   adSpend: number;
+  /** Ganancia sumando venta por venta, antes de los ajustes del período. */
+  salesProfit?: number;
+  /** Lo que se resta del período además de las ventas (ver sync/period-charges.ts). */
+  adjustments?: Adjustments;
   previous: PreviousTotals | null;
   /** SQL de migraciones pendientes — solo llega si sos admin. */
   pendingMigrations?: string[];
+}
+
+interface Adjustments {
+  adSpend: number;
+  adsInSales: number;
+  adsNotInSales: number;
+  full: number;
+  otherCharges: number;
+  ivaCredit: number;
+  total: number;
 }
 
 interface DailyBreakdown {
@@ -55,16 +69,32 @@ interface DailyBreakdown {
   netProfit: number;
 }
 
+type ChargeTreatment = "subtracted" | "per_sale" | "in_ads" | "tax";
+
+interface BillingDetail {
+  concept: string;
+  linkedToOrder: boolean;
+  manual: boolean;
+  treatment: ChargeTreatment;
+  treatmentLabel: string;
+  count: number;
+  amount: number;
+}
+
 interface BillingBucket {
   bucket: string;
   label: string;
   amount: number;
+  subtracted?: number;
+  treatments?: { treatment: ChargeTreatment; label: string; amount: number }[];
+  details?: BillingDetail[];
 }
 
 interface Billing {
   available: boolean;
   buckets: BillingBucket[];
   total: number;
+  subtracted?: number;
   charges?: number;
 }
 
@@ -283,6 +313,150 @@ function DeltaPill({ current, previous }: { current: number; previous: number | 
 
 
 /**
+ * La ganancia neta, paso a paso: lo que dejan las ventas (venta por venta) y
+ * lo que se resta del período porque no es de ninguna venta. Existe para que
+ * el número de la tarjeta se pueda verificar, no solo creer.
+ */
+function NetProfitBreakdown({ salesProfit, adj, netProfit }: { salesProfit: number; adj: Adjustments; netProfit: number }) {
+  const rows: { label: string; hint: string; value: number; sign: "−" | "+" }[] = [
+    {
+      label: "Publicidad que no está en ninguna venta",
+      hint: "Meta, Google y TikTok que cargaste a mano, y Mercado Ads de días sin ventas.",
+      value: adj.adsNotInSales,
+      sign: "−",
+    },
+    { label: "Mercado Envíos Full", hint: "Almacenamiento y retiros de stock, de tu factura de Mercado Libre.", value: adj.full, sign: "−" },
+    {
+      label: "Otros cargos de Mercado Libre",
+      hint: "Cargos de tu factura que no son de una venta (multas, cargos varios), incluidos los que cargaste a mano.",
+      value: adj.otherCharges,
+      sign: "−",
+    },
+    {
+      label: "IVA a favor por esos cargos",
+      hint: "El IVA que trae lo que te factura Mercado Libre es crédito fiscal: baja el IVA a pagar.",
+      value: adj.ivaCredit,
+      sign: "+",
+    },
+  ];
+  return (
+    <div className="day-card" style={{ marginBottom: "var(--space-4)" }}>
+      <h3 className="chart-card-title" style={{ marginTop: 0 }}>Cómo se calcula tu ganancia neta</h3>
+      <div className="table-wrap">
+        <table>
+          <tbody>
+            <tr>
+              <td>
+                <strong>Ganancia de tus ventas</strong>
+                <div className="field-hint" style={{ margin: 0 }}>
+                  Venta por venta: precio − comisión − envío − costo − IVA − otros impuestos − la parte de Mercado Ads de ese día.
+                  Solo ventas con costo cargado.
+                </div>
+              </td>
+              <td className="num">{fmt(salesProfit)}</td>
+            </tr>
+            {rows.filter((r) => Math.abs(r.value) >= 0.5).map((r) => (
+              <tr key={r.label}>
+                <td>
+                  {r.sign} {r.label}
+                  <div className="field-hint" style={{ margin: 0 }}>{r.hint}</div>
+                </td>
+                <td className="num">{r.sign === "−" ? fmt(-r.value) : fmt(r.value)}</td>
+              </tr>
+            ))}
+            <tr>
+              <td style={{ fontWeight: 700 }}>= Ganancia neta</td>
+              <td className="num" style={{ fontWeight: 700, color: netProfit >= 0 ? "var(--positive)" : "var(--negative)" }}>{fmt(netProfit)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p className="field-hint" style={{ marginBottom: 0 }}>
+        Publicidad total del período: {fmt(adj.adSpend)} ({fmt(adj.adsInSales)} ya dentro de las ventas + {fmt(adj.adsNotInSales)} restado acá).
+        La comisión y el envío de tu factura de Mercado Libre no se vuelven a restar: ya están en cada venta.
+      </p>
+    </div>
+  );
+}
+
+const TREATMENT_SHORT: Record<ChargeTreatment, string> = {
+  subtracted: "Se resta",
+  per_sale: "Ya en cada venta",
+  in_ads: "Ya en Publicidad",
+  tax: "No se resta (impuestos)",
+};
+
+/**
+ * La factura de Mercado Libre por concepto, con qué hace la ganancia neta con
+ * cada uno. Cada concepto se abre para ver los cargos que lo forman: es la
+ * forma de comprobar que un cargo cayó en el concepto correcto.
+ */
+function BillingTable({ billing, summary }: { billing: Billing; summary: Summary | null }) {
+  const [open, setOpen] = useState<string | null>(null);
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Concepto</th>
+            <th className="num">Importe</th>
+            <th className="num">Lo que calculamos</th>
+            <th>En la ganancia neta</th>
+          </tr>
+        </thead>
+        <tbody>
+          {billing.buckets.map((b) => {
+            // Solo comisión y envío son comparables: son los dos cargos
+            // que la app también calcula por orden.
+            const estimated =
+              b.bucket === "comision" ? summary?.totalCommission :
+              b.bucket === "envio" ? summary?.totalShipping : undefined;
+            const treatments = b.treatments ?? [];
+            const isOpen = open === b.bucket;
+            return (
+              <Fragment key={b.bucket}>
+                <tr onClick={() => setOpen(isOpen ? null : b.bucket)} style={{ cursor: b.details?.length ? "pointer" : undefined }}>
+                  <td>
+                    {b.details?.length ? <span aria-hidden="true">{isOpen ? "▾ " : "▸ "}</span> : null}
+                    {b.label}
+                  </td>
+                  <td className="num">{fmt(b.amount)}</td>
+                  <td className="num" style={{ color: "var(--text-dim)" }}>{estimated === undefined ? "—" : fmt(estimated)}</td>
+                  <td>
+                    {treatments.length === 1
+                      ? TREATMENT_SHORT[treatments[0].treatment]
+                      : treatments.map((t) => `${TREATMENT_SHORT[t.treatment]}: ${fmt(t.amount)}`).join(" · ")}
+                  </td>
+                </tr>
+                {isOpen &&
+                  b.details?.map((d, i) => (
+                    <tr key={`${b.bucket}-${i}`} style={{ background: "var(--surface-2, transparent)" }}>
+                      <td style={{ paddingLeft: 28 }}>
+                        <span className="field-hint" style={{ margin: 0 }}>
+                          {d.concept} · {d.count} cargo(s){d.manual ? "" : d.linkedToOrder ? " · atado a una venta" : " · sin venta asociada"}
+                        </span>
+                      </td>
+                      <td className="num"><span className="field-hint" style={{ margin: 0 }}>{fmt(d.amount)}</span></td>
+                      <td />
+                      <td><span className="field-hint" style={{ margin: 0 }}>{d.treatmentLabel}</span></td>
+                    </tr>
+                  ))}
+              </Fragment>
+            );
+          })}
+          <tr>
+            <td style={{ fontWeight: 600 }}>Total facturado por ML</td>
+            <td className="num" style={{ fontWeight: 600 }}>{fmt(billing.total)}</td>
+            <td className="num">—</td>
+            <td style={{ fontWeight: 600 }}>{billing.subtracted ? `Se resta: ${fmt(billing.subtracted)}` : "—"}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/**
  * En qué se repartió la facturación del período: parte-de-un-todo con pocas
  * porciones, que es el caso en que una torta se lee de un vistazo. Los montos
  * y porcentajes van en la leyenda, porque comparar arcos parecidos a ojo no
@@ -292,7 +466,7 @@ function DeltaPill({ current, previous }: { current: number; previous: number | 
  * la misma descomposición de la facturación, uno por día y otro agregado, y
  * la evolución en el tiempo ya la cubre "Rendimiento de ventas".
  */
-function RevenueSplitPie({ daily }: { daily: DailyBreakdown[] }) {
+function RevenueSplitPie({ daily, adjustments }: { daily: DailyBreakdown[]; adjustments?: Adjustments }) {
   const totals = daily.reduce(
     (acc, d) => ({
       commission: acc.commission + d.commission,
@@ -306,6 +480,16 @@ function RevenueSplitPie({ daily }: { daily: DailyBreakdown[] }) {
     }),
     { commission: 0, shipping: 0, tax: 0, iva: 0, cost: 0, ads: 0, netProfit: 0, revenue: 0 }
   );
+  // Lo que no es de ninguna venta (publicidad sin repartir, Full, otros
+  // cargos de ML) se suma a su porción y se resta de la ganancia, así la torta
+  // muestra la misma ganancia neta que la tarjeta de arriba.
+  const adj = adjustments;
+  const otherMl = adj ? adj.full + adj.otherCharges : 0;
+  if (adj) {
+    totals.ads += adj.adsNotInSales;
+    totals.iva -= adj.ivaCredit;
+    totals.netProfit += adj.total;
+  }
 
   // El color va pegado al concepto, no a la posición. Antes salía de un
   // índice sobre la lista ya filtrada: a un vendedor sin "otros impuestos" se
@@ -318,6 +502,7 @@ function RevenueSplitPie({ daily }: { daily: DailyBreakdown[] }) {
     { name: "IVA", value: totals.iva, color: "var(--chart-iva)" },
     { name: "Otros impuestos", value: totals.tax, color: "var(--chart-tax)" },
     { name: "Publicidad", value: totals.ads, color: "var(--chart-ads)" },
+    { name: "Full y otros cargos de ML", value: otherMl, color: "var(--ramp-3)" },
     { name: "Ganancia neta", value: totals.netProfit, color: "var(--positive)" },
   ];
   const revenue = totals.revenue;
@@ -977,7 +1162,7 @@ export default function HomePage() {
           <div className="value"><KpiValue>{summary ? fmt(summary.aov) : "-"}</KpiValue></div>
         </div>
         <div className="kpi-card">
-          <div className="kpi-card-head"><KpiIcon name="profit" /><span className="label">Ganancia neta</span><KpiInfo>Facturación − comisión de Mercado Libre − envío − publicidad − costo del producto − IVA − otros impuestos. Si a un producto le falta el costo cargado, sus ventas quedan afuera de este número: no se inventa un valor.</KpiInfo></div>
+          <div className="kpi-card-head"><KpiIcon name="profit" /><span className="label">Ganancia neta</span><KpiInfo>Facturación − comisión de Mercado Libre − envío − costo del producto − IVA − otros impuestos − toda la publicidad − Full y otros cargos de Mercado Libre. El paso a paso está en &quot;Cómo se calcula tu ganancia neta&quot;, más abajo. Si a un producto le falta el costo cargado, sus ventas quedan afuera de este número: no se inventa un valor.</KpiInfo></div>
           <div className="value"><KpiValue>{summary ? fmt(summary.netProfit) : "-"}</KpiValue></div>
           {summary && <DeltaPill current={summary.netProfit} previous={summary.previous?.netProfit} />}
         </div>
@@ -990,7 +1175,7 @@ export default function HomePage() {
           <div className="value"><KpiValue>{summary ? fmt(summary.netRevenue) : "-"}</KpiValue></div>
         </div>
         <div className="kpi-card">
-          <div className="kpi-card-head"><KpiIcon name="ads" /><span className="label">Costos en Ads</span><KpiInfo>Lo que gastaste en publicidad en el período: Mercado Ads más lo que cargaste a mano de Meta, Google o TikTok. Ya está descontado de la Ganancia neta. Detalle por campaña en <a href="/campanas">Campañas</a>.</KpiInfo></div>
+          <div className="kpi-card-head"><KpiIcon name="ads" /><span className="label">Costos en Ads</span><KpiInfo>Lo que gastaste en publicidad en el período: Mercado Ads más lo que cargaste a mano de Meta, Google o TikTok. Está descontado completo de la Ganancia neta. Detalle por campaña en <a href="/campanas">Campañas</a>.</KpiInfo></div>
           <div className="value"><KpiValue>{summary ? fmt(summary.adSpend) : "-"}</KpiValue></div>
         </div>
       </div>
@@ -1001,6 +1186,10 @@ export default function HomePage() {
           items={summary.itemsMissingCost}
           products={summary.productsMissingCost ?? []}
         />
+      )}
+
+      {summary?.adjustments && summary.salesProfit !== undefined && (
+        <NetProfitBreakdown salesProfit={summary.salesProfit} adj={summary.adjustments} netProfit={summary.netProfit} />
       )}
 
       <h2 className="section-title">Rendimiento</h2>
@@ -1022,7 +1211,7 @@ export default function HomePage() {
           <RevenueStackedArea daily={daily} />
           <div className="chart-split-even">
             <TopProductsCard rows={products ?? []} />
-            <RevenueSplitPie daily={daily} />
+            <RevenueSplitPie daily={daily} adjustments={summary?.adjustments} />
           </div>
         </>
       )}
@@ -1038,45 +1227,12 @@ export default function HomePage() {
               </p>
             </div>
           ) : (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Concepto</th>
-                  <th className="num">Importe</th>
-                  <th className="num">Lo que calculamos</th>
-                </tr>
-              </thead>
-              <tbody>
-                {billing.buckets.map((b) => {
-                  // Solo comisión y envío son comparables: son los dos cargos
-                  // que la app también estima por orden.
-                  const estimated =
-                    b.bucket === "comision" ? summary?.totalCommission :
-                    b.bucket === "envio" ? summary?.totalShipping : undefined;
-                  return (
-                    <tr key={b.bucket}>
-                      <td>{b.label}</td>
-                      <td className="num">{fmt(b.amount)}</td>
-                      <td className="num" style={{ color: "var(--text-dim)" }}>
-                        {estimated === undefined ? "—" : fmt(estimated)}
-                      </td>
-                    </tr>
-                  );
-                })}
-                <tr>
-                  <td style={{ fontWeight: 600 }}>Total facturado por ML</td>
-                  <td className="num" style={{ fontWeight: 600 }}>{fmt(billing.total)}</td>
-                  <td className="num">—</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+          <BillingTable billing={billing} summary={summary} />
           )}
           <ManualBillingCharges
             from={from}
             to={to}
-            onChange={() => safeFetch<Billing | null>(`/api/billing?from=${from}&to=${to}`, setBilling, null)}
+            onChange={loadAll}
           />
           <details className="explain-box">
             <summary>¿Qué es esta tabla?</summary>
@@ -1092,10 +1248,16 @@ export default function HomePage() {
               fecha y el concepto que elijas, y la podés borrar si te equivocaste.
             </p>
             <p>
-              Todavía <strong>no</strong> entran en la ganancia neta: la comisión y el envío ya se descuentan
-              por orden, así que sumarlos otra vez los contaría dos veces. Si los números de las dos columnas
-              no cierran, avisanos y ajustamos el cálculo.
+              La columna <strong>En la ganancia neta</strong> dice qué se hace con cada cargo, para que nada se
+              reste dos veces ni quede afuera:
             </p>
+            <ul>
+              <li><strong>Ya restado venta por venta:</strong> comisión y envío, y cualquier cargo que Mercado Libre ate a una orden. Ya están en cada venta.</li>
+              <li><strong>Ya restado en Publicidad:</strong> lo de Mercado Ads; la publicidad se resta completa desde el gasto de cada día.</li>
+              <li><strong>Se resta de la ganancia:</strong> Full (almacenamiento, retiros) y otros cargos que no son de una venta, incluidos los que cargás a mano.</li>
+              <li><strong>No se resta:</strong> percepciones e impuestos que ML te cobra a cuenta; el IIBB y el IVA ya se restan con la alícuota de tu cuenta.</li>
+            </ul>
+            <p>Tocá un concepto para ver de qué cargos está hecho.</p>
           </details>
         </>
       )}
