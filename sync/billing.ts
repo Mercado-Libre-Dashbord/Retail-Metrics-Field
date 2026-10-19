@@ -90,7 +90,9 @@ export function classifyCharge(...fields: (string | null | undefined)[]): Charge
   if (/percep|retenc|impuesto|iva|iibb|ingresos brutos|ganancias|tax/.test(haystack)) return "impuesto";
   if (/env[ií]o|envios|shipping|mercado envios|flete|logisti/.test(haystack)) return "envio";
   if (/product ads|publicidad|advertis|campaign|ads/.test(haystack)) return "publicidad";
-  if (/comisi[oó]n|comision|sale fee|selling fee|sales charge|cargo por venta|venta/.test(haystack)) return "comision";
+  // "Cargo por vender" es como Mercado Libre Argentina nombra la comisión en
+  // la factura; "vender" no contiene "venta", así que caía en "otros".
+  if (/comisi[oó]n|comision|sale fee|selling fee|sales charge|cargo por venta|venta|vender|cargo fijo|costo fijo/.test(haystack)) return "comision";
   return "otro";
 }
 

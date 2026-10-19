@@ -4,6 +4,8 @@ import { classifyCharge, classifyFullChargeDetail, MANUAL_DETAIL_TYPE, manualSub
 describe("classifyCharge", () => {
   it("recognises tax perceptions and withholdings", () => {
     expect(classifyCharge("Percepción IVA RG 4310")).toBe("impuesto");
+    expect(classifyCharge("Cargo por vender")).toBe("comision");
+    expect(classifyCharge("Cargo fijo por unidad vendida")).toBe("comision");
     expect(classifyCharge("Retención IIBB Buenos Aires")).toBe("impuesto");
     expect(classifyCharge(null, "TAX", "Ingresos Brutos")).toBe("impuesto");
   });
