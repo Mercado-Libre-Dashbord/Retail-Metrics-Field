@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  buildPreview, detectColumns, extractRows, parseCsv, selectedByDefault,
+  buildPreview, detectColumns, detectPackUnits, extractRows, parseCsv, selectedByDefault,
   type Cell, type MatchItem, type ProductRef,
 } from "@/lib/cost-import";
 
@@ -54,18 +54,24 @@ export function ImportCosts({ products, onDone }: { products: ProductRef[]; onDo
   // sugiere el título; todo se puede cambiar antes de guardar.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [units, setUnits] = useState<Record<string, number>>({});
-  const [filter, setFilter] = useState<"review" | "all">("review");
+  const [filter, setFilter] = useState<"review" | "names" | "all">("review");
+  // En las sugerencias por nombre se puede elegir otro artículo candidato.
+  const [chosen, setChosen] = useState<Record<string, number>>({});
   useEffect(() => {
     if (!preview) return;
     setSelected(new Set(preview.items.filter(selectedByDefault).map((it) => it.key)));
     setUnits(Object.fromEntries(preview.items.map((it) => [it.key, it.packUnits])));
+    setChosen({});
   }, [preview]);
+  const rowOf = (it: MatchItem) => (it.alternatives && chosen[it.key] !== undefined ? it.alternatives[chosen[it.key]].row : it.row);
   const unitsOf = (it: MatchItem) => units[it.key] ?? it.packUnits;
-  const newCost = (it: MatchItem) => it.row.cost * unitsOf(it);
+  const newCost = (it: MatchItem) => rowOf(it).cost * unitsOf(it);
   const changes = (it: MatchItem) => it.product.currentCost === null || Math.abs(it.product.currentCost - newCost(it)) >= 0.005;
   const items = preview?.items ?? [];
-  const review = items.filter((it) => !selectedByDefault(it) || it.packUnits > 1);
-  const shown = filter === "review" ? review : items;
+  // Las más parecidas primero: ahí está lo que se confirma rápido.
+  const byName = items.filter((it) => it.by === "name").sort((x, y) => (y.score ?? 0) - (x.score ?? 0));
+  const review = items.filter((it) => it.by !== "name" && (!selectedByDefault(it) || it.packUnits > 1));
+  const shown = filter === "review" ? review : filter === "names" ? byName : items;
   const toSave = items.filter((it) => selected.has(it.key) && changes(it));
   // Una publicación recibe un solo costo aunque se marquen dos artículos.
   const dupSelected = new Set<string>();
@@ -216,7 +222,8 @@ export function ImportCosts({ products, onDone }: { products: ProductRef[]; onDo
           <div style={{ display: "grid", gap: "var(--space-2)" }}>
             <p style={{ margin: 0 }}>
               {extracted.rows.length} artículos con costo en la planilla. Coinciden con <strong>{new Set(items.map((it) => it.product.id)).size}</strong>{" "}
-              publicaciones ({items.filter((it) => it.by === "ean").length} cruces por EAN y {items.filter((it) => it.by === "sku").length} por SKU).{" "}
+              publicaciones ({items.filter((it) => it.by === "ean").length} cruces por EAN, {items.filter((it) => it.by === "sku").length} por SKU
+              y {byName.length} sugerencias por nombre para publicaciones que no tienen ni EAN ni SKU que coincida).{" "}
               {preview.notFound.length} artículos no están publicados o no coinciden.
               {extracted.skipped > 0 && ` Se ignoraron ${extracted.skipped} filas de títulos, totales o artículos sin costo.`}
             </p>
@@ -224,7 +231,8 @@ export function ImportCosts({ products, onDone }: { products: ProductRef[]; onDo
               Quedan sin marcar los cruces para revisar: cuando el nombre del artículo no se parece al de la publicación
               (pasa cuando un mismo EAN o SKU se usa en publicaciones distintas) o cuando una publicación coincide con
               varios artículos de costos distintos. Si la publicación es un pack (&quot;Set X6&quot;, &quot;Pack de 20&quot;), el costo se
-              multiplica por esas unidades: revisá el número en la columna Unid.
+              multiplica por esas unidades: revisá el número en la columna Unid. Las sugerencias por nombre nunca vienen
+              marcadas: confirmá cada una y, si no es el artículo correcto, elegí otro de la lista.
             </p>
             {extracted.duplicates.length > 0 && (
               <p className="field-hint" style={{ margin: 0 }}>
@@ -235,6 +243,9 @@ export function ImportCosts({ products, onDone }: { products: ProductRef[]; onDo
             <div style={{ display: "flex", gap: "var(--space-2)", flexWrap: "wrap" }}>
               <button type="button" className={`btn btn-sm ${filter === "review" ? "btn-primary" : "btn-secondary"}`} onClick={() => setFilter("review")}>
                 Para revisar ({review.length})
+              </button>
+              <button type="button" className={`btn btn-sm ${filter === "names" ? "btn-primary" : "btn-secondary"}`} onClick={() => setFilter("names")}>
+                Sugeridos por nombre ({byName.length})
               </button>
               <button type="button" className={`btn btn-sm ${filter === "all" ? "btn-primary" : "btn-secondary"}`} onClick={() => setFilter("all")}>
                 Todos ({items.length})
@@ -261,15 +272,36 @@ export function ImportCosts({ products, onDone }: { products: ProductRef[]; onDo
                         !it.nameOk && "El nombre no se parece",
                         it.conflict && "Varios artículos con costos distintos",
                         dupSelected.has(it.product.id) && selected.has(it.key) && "Marcado dos veces: se usa el primero",
+                        it.by === "name" && "Sugerido por nombre: confirmalo",
                       ].filter(Boolean);
+                      const row = rowOf(it);
                       return (
                         <tr key={it.key} style={selected.has(it.key) ? undefined : { opacity: 0.6 }}>
                           <td>
-                            <input type="checkbox" aria-label={`Aplicar ${it.row.rawCode} a ${it.product.title}`} checked={selected.has(it.key)} onChange={() => toggle(it.key)} />
+                            <input type="checkbox" aria-label={`Aplicar ${row.rawCode} a ${it.product.title}`} checked={selected.has(it.key)} onChange={() => toggle(it.key)} />
                           </td>
-                          <td>{it.row.rawCode || it.row.ean}{it.row.name ? <span className="field-hint"> {it.row.name}</span> : null}</td>
+                          <td>
+                            {it.alternatives && it.alternatives.length > 1 ? (
+                              <select
+                                aria-label="Artículo de la planilla"
+                                value={chosen[it.key] ?? 0}
+                                onChange={(e) => {
+                                  const idx = Number(e.target.value);
+                                  setChosen((c) => ({ ...c, [it.key]: idx }));
+                                  setUnits((u) => ({ ...u, [it.key]: detectPackUnits(it.product.title, it.alternatives![idx].row.name) }));
+                                }}
+                                style={{ maxWidth: 280, padding: "3px 4px" }}
+                              >
+                                {it.alternatives.map((a, i) => (
+                                  <option key={i} value={i}>{`${a.row.rawCode || a.row.ean} · ${a.row.name} (${Math.round(a.score * 100)}%)`}</option>
+                                ))}
+                              </select>
+                            ) : (
+                              <>{row.rawCode || row.ean}{row.name ? <span className="field-hint"> {row.name}</span> : null}</>
+                            )}
+                          </td>
                           <td>{it.product.title}</td>
-                          <td>{it.by === "ean" ? "EAN" : "SKU"}</td>
+                          <td>{it.by === "ean" ? "EAN" : it.by === "sku" ? "SKU" : `Nombre ${Math.round((it.alternatives?.[chosen[it.key] ?? 0]?.score ?? it.score ?? 0) * 100)}%`}</td>
                           <td><span className={flags.length ? "field-error" : "field-hint"} style={{ margin: 0 }}>{flags.length ? flags.join(" · ") : "OK"}</span></td>
                           <td className="num">
                             <input

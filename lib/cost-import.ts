@@ -194,7 +194,7 @@ export function extractRows(rows: Cell[][], headerRow: number, cols: Columns): E
   return { rows: [...byKey.values()], skipped, duplicates: [...duplicates] };
 }
 
-export type MatchedBy = "ean" | "sku";
+export type MatchedBy = "ean" | "sku" | "name";
 
 const STOPWORDS = new Set([
   "con", "sin", "para", "por", "del", "las", "los", "una", "uno", "unidades", "unidad", "set", "pack", "kit", "combo",
@@ -243,9 +243,8 @@ const MEASURE_AFTER = /^\s*(?:gr|g|grs|gramos|ml|cc|cm|mm|m|mts|kg|l|lt|lts|litr
  * artículo de la planilla ya es ese pack ("SET X 3 BOTELLAS"), es 1. Ante la
  * duda (una medida como "x 250 gr"), 1.
  */
-export function detectPackUnits(title: string, articleName?: string | null): number {
-  const norm = (v: string) => v.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-  const t = norm(title);
+function packCount(text: string): number {
+  const t = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\([^)]*\)/g, " ");
   const patterns = [
     /\b(?:set|pack|kit|combo|caja|lote)\s*(?:de\s*)?x?\s*(\d{1,3})\b/g,
     /(?:^|\s)x\s*(\d{1,3})\b/g,
@@ -256,12 +255,25 @@ export function detectPackUnits(title: string, articleName?: string | null): num
       const n = Number(m[1]);
       const rest = t.slice((m.index ?? 0) + m[0].length);
       if (!Number.isFinite(n) || n < 2 || n > 500 || MEASURE_AFTER.test(rest)) continue;
-      const a = norm(articleName ?? "");
-      if (new RegExp(`(?:x|set|pack|kit)\\s*(?:de\\s*)?x?\\s*${n}\\b|\\b${n}\\s*(?:unidades|u)\\b`).test(a)) return 1;
       return n;
     }
   }
   return 1;
+}
+
+/**
+ * Cuántas unidades del artículo trae la publicación, leído del título: "Set X6
+ * Jarro", "Pack De 20 Unidades", "Kit 3 Botellas", "10 unidades". Si el
+ * artículo de la planilla ya es un pack, se divide: una publicación "Pack de 20"
+ * de un artículo "Percha x10" son 2. Ante la duda (una medida como "x 250 gr",
+ * o packs que no se dividen justo), 1.
+ */
+export function detectPackUnits(title: string, articleName?: string | null): number {
+  const inTitle = packCount(title);
+  if (inTitle <= 1) return 1;
+  const inArticle = packCount(articleName ?? "");
+  if (inArticle <= 1) return inTitle;
+  return inTitle % inArticle === 0 ? inTitle / inArticle : 1;
 }
 
 export interface MatchItem {
@@ -276,6 +288,9 @@ export interface MatchItem {
   packUnits: number;
   /** La publicación coincide con más de un artículo de la planilla con costos distintos. */
   conflict: boolean;
+  /** Solo en cruces por nombre: qué tan parecido es (0 a 1) y otros artículos candidatos, del más al menos parecido. */
+  score?: number;
+  alternatives?: { row: ImportRow; score: number }[];
 }
 
 export interface Preview {
@@ -341,10 +356,79 @@ export function buildPreview(rows: ImportRow[], products: ProductRef[]): Preview
   }
 
   const matched = new Set(items.map((it) => it.product.id));
-  return { items, notFound, stillWithoutCost: products.filter((p) => p.currentCost === null && !matched.has(p.id)) };
+  const withoutCost = products.filter((p) => p.currentCost === null && !matched.has(p.id));
+  const suggestions = suggestByName(rows, withoutCost);
+  items.push(...suggestions);
+  const suggested = new Set(suggestions.map((it) => it.product.id));
+  return { items, notFound, stillWithoutCost: withoutCost.filter((p) => !suggested.has(p.id)) };
+}
+
+/** Palabras y medidas para comparar nombres: "Jarro 330 cc" → jarro, 330. "22,5 cm" → 225. */
+function scoreTokens(name: string | null | undefined): string[] {
+  const base = [...nameTokens(name)];
+  const nums = ((name ?? "").replace(/\([^)]*\)/g, " ").match(/\d+(?:[.,]\d+)?/g) ?? [])
+    .map((n) => n.replace(/[.,]/g, ""))
+    .filter((n) => n.length >= 2 && n !== "00");
+  return [...new Set([...base, ...nums])];
+}
+
+const MIN_NAME_SCORE = 0.34;
+
+/**
+ * Para publicaciones sin costo que no cruzaron por EAN ni SKU: el artículo de
+ * la planilla con el nombre más parecido. Las palabras raras pesan más que las
+ * comunes ("bombe" dice más que "jarro" en una planilla con 40 jarros) y las
+ * medidas cuentan ("330", "225"). Nunca se aplica solo: es una sugerencia.
+ */
+export function suggestByName(rows: ImportRow[], products: ProductRef[]): MatchItem[] {
+  const named = rows.filter((r) => r.name);
+  if (named.length === 0 || products.length === 0) return [];
+  const rowTokens = named.map((r) => scoreTokens(r.name));
+  const df = new Map<string, number>();
+  for (const toks of rowTokens) for (const t of toks) df.set(t, (df.get(t) ?? 0) + 1);
+  const idf = (t: string) => Math.log(1 + named.length / (df.get(t) ?? 0.5));
+  const inverted = new Map<string, number[]>();
+  rowTokens.forEach((toks, i) => toks.forEach((t) => inverted.set(t, [...(inverted.get(t) ?? []), i])));
+  const weight = (toks: string[]) => toks.reduce((sum, t) => sum + idf(t), 0);
+
+  const out: MatchItem[] = [];
+  for (const product of products) {
+    const ptoks = scoreTokens(product.title);
+    if (ptoks.length === 0) continue;
+    const pset = new Set(ptoks);
+    const candidates = new Set<number>();
+    for (const t of ptoks) for (const i of inverted.get(t) ?? []) candidates.add(i);
+    const scored: { row: ImportRow; score: number }[] = [];
+    for (const i of candidates) {
+      const shared = rowTokens[i].filter((t) => pset.has(t));
+      const sharedWords = shared.filter((t) => !/^\d+$/.test(t));
+      if (sharedWords.length === 0) continue; // solo una medida en común no alcanza
+      // Qué parte del nombre del artículo aparece en el título (pesado por
+      // rareza), corregido un poco por lo largo del título.
+      const cover = weight(shared) / weight(rowTokens[i]);
+      const precision = weight(shared) / weight(ptoks);
+      const score = 0.75 * cover + 0.25 * precision;
+      if (score >= MIN_NAME_SCORE) scored.push({ row: named[i], score });
+    }
+    if (scored.length === 0) continue;
+    scored.sort((a, b) => b.score - a.score);
+    const best = scored[0];
+    out.push({
+      key: `name|${product.id}`,
+      row: best.row,
+      product,
+      by: "name",
+      nameOk: true,
+      packUnits: detectPackUnits(product.title, best.row.name),
+      conflict: false,
+      score: best.score,
+      alternatives: scored.slice(0, 5),
+    });
+  }
+  return out;
 }
 
 /** Si un cruce se aplica sin que nadie lo marque: nombres que coinciden y sin conflicto. */
 export function selectedByDefault(it: MatchItem): boolean {
-  return it.nameOk && !it.conflict;
+  return it.by !== "name" && it.nameOk && !it.conflict;
 }

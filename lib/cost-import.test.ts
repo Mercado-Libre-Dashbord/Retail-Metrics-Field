@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseAmount, parseCsv, detectColumns, extractRows, buildPreview, normalizeCode, normalizeEan, namesMatch, detectPackUnits, selectedByDefault, type Cell } from "./cost-import";
+import { parseAmount, parseCsv, detectColumns, extractRows, buildPreview, normalizeCode, normalizeEan, namesMatch, detectPackUnits, selectedByDefault, suggestByName, type Cell } from "./cost-import";
 
 describe("parseAmount", () => {
   it.each([
@@ -140,5 +140,44 @@ describe("detectPackUnits", () => {
     ["Set X 3 Botellas Motivacionales", "SET X 3 BOTELLAS MOTIVACIONALES AS", 1],
     ["Boya Dosificadora De Cloro Para Pileta", "BOYA CHICA", 1],
     ["Fibras Marcadores X 80 Doble Punta", "FIBRAS X 80", 1],
+    ["Perchas Negras Percha Terciopelo Pack De 20 Unidades", "PERCHA PARA ROPA DE TERCIOPELO X10 (26017IC05)", 2],
+    ["Pack X 15 Perchas", "PERCHA X10", 1],
   ])("%s → %i", (title, article, n) => expect(detectPackUnits(title, article)).toBe(n));
+});
+
+describe("suggestByName", () => {
+  const rows = [
+    { code: "JM3816", rawCode: "JM3816.", ean: null, name: "TERMOMETRO DIGITAL P/COMIDAS (26017IC06000789F)", cost: 1495 },
+    { code: "BAL1", rawCode: "BAL1", ean: null, name: "BALANZA DE COCINA DIGITAL", cost: 3000 },
+    { code: "BNFW90", rawCode: "BNFW90.", ean: null, name: "ENSALADERA 22,5 CM. (26017IC06000598D)", cost: 1595 },
+    { code: "BNFW75", rawCode: "BNFW75.", ean: null, name: "ENSALADERA 19 CM.", cost: 1195 },
+    { code: "WR10", rawCode: "WR6553-10", ean: null, name: "PERCHA PARA ROPA DE TERCIOPELO X10", cost: 4000 },
+  ];
+  const p = (title: string) => ({ id: title, title, sku: null, currentCost: null });
+
+  it("sugiere el artículo más parecido y usa las medidas para desempatar", () => {
+    const s = suggestByName(rows, [p("Termómetro Digital Para Comidas Cocina Pinche"), p("Ensaladera 22,5 Cm Cuadrada Negra")]);
+    expect(s.map((x) => x.row.code)).toEqual(["JM3816", "BNFW90"]);
+    expect(s.every((x) => x.by === "name" && !selectedByDefault(x))).toBe(true);
+  });
+
+  it("ajusta las unidades cuando el artículo ya es un pack", () => {
+    const [s] = suggestByName(rows, [p("Perchas Negras Percha Terciopelo Pack De 20 Unidades")]);
+    expect(s.row.code).toBe("WR10");
+    expect(s.packUnits).toBe(2);
+  });
+
+  it("no sugiere nada si no hay palabras en común", () => {
+    expect(suggestByName(rows, [p("Auriculares Bluetooth Inalambricos Gamer")])).toEqual([]);
+  });
+
+  it("buildPreview agrega las sugerencias solo para publicaciones sin costo que no cruzaron por código", () => {
+    const prev = buildPreview(rows, [
+      { id: "A", title: "Termómetro Digital Para Comidas", sku: "JM3816", currentCost: null },
+      { id: "B", title: "Ensaladera 22,5 Cm", sku: null, currentCost: null },
+      { id: "C", title: "Ensaladera 19 Cm", sku: null, currentCost: 900 },
+    ]);
+    expect(prev.items.map((x) => [x.product.id, x.by])).toEqual([["A", "sku"], ["B", "name"]]);
+    expect(prev.stillWithoutCost).toEqual([]);
+  });
 });
