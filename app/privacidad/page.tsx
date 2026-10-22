@@ -33,6 +33,11 @@ export default function PrivacyPage() {
           <strong>Solicitudes de prueba:</strong> nombre, email, tienda, volumen de ventas, teléfono (opcional) y de qué
           campaña llegaste (parámetros utm), para contactarte y medir nuestras campañas.
         </li>
+        <li>
+          <strong>Uso del sitio:</strong> usamos Google Analytics, que guarda cookies para medir de forma agregada qué
+          páginas se visitan y desde dónde se llega. No le enviamos tus ventas, costos ni datos de tu cuenta de Mercado
+          Libre.
+        </li>
       </ul>
 
       <h2>Para qué los usamos</h2>
