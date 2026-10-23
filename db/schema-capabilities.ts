@@ -147,6 +147,11 @@ export const EXPECTED_COLUMNS: { table: string; column: string; ddl: string }[] 
     column: "cost_currency",
     ddl: "-- Correr db/postgres/migrations/019-costo-en-dolares.sql (costo cargado en pesos y en dólares).",
   },
+  {
+    table: "question_drafts",
+    column: "draft_source",
+    ddl: "-- Correr db/postgres/migrations/024-respuestas-con-ia.sql (respuestas a consultas con IA).",
+  },
 ];
 
 export async function missingMigrations(client: QueryExecutor): Promise<{ table: string; column: string; ddl: string }[]> {

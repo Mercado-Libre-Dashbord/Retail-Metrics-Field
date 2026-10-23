@@ -494,6 +494,24 @@ CREATE POLICY iva_payments_isolation ON iva_payments
   USING (account_id = app_current_account_id())
   WITH CHECK (account_id = app_current_account_id());
 
+-- ── Respuestas a consultas con IA (ver migración 024) ────────────────────
+CREATE TABLE IF NOT EXISTS answer_settings (
+  account_id TEXT PRIMARY KEY REFERENCES accounts(id),
+  seller_info TEXT NOT NULL DEFAULT '',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE answer_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE answer_settings FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS answer_settings_isolation ON answer_settings;
+CREATE POLICY answer_settings_isolation ON answer_settings
+  USING (account_id = app_current_account_id())
+  WITH CHECK (account_id = app_current_account_id());
+
+ALTER TABLE question_drafts ADD COLUMN IF NOT EXISTS draft_source TEXT NOT NULL DEFAULT 'rules';
+ALTER TABLE question_drafts ADD COLUMN IF NOT EXISTS ai_confident BOOLEAN;
+ALTER TABLE question_drafts ADD COLUMN IF NOT EXISTS ai_missing TEXT;
+
 -- ── Grants ───────────────────────────────────────────────────────────────
 GRANT EXECUTE ON FUNCTION app_current_account_id(), app_is_admin(), app_current_user_email(), app_current_loyalty_key_hash(), app_credential_lookup_email(), app_current_credential_invite_hash() TO app_user;
 -- Solo app_user: con EXECUTE para PUBLIC (el default de Postgres) cualquiera

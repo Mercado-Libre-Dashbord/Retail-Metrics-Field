@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { NoAccountState } from "../NoAccountState";
 import { IvaPaid } from "./IvaPaid";
+import { AnswerInfo } from "./AnswerInfo";
 
 type TaxCondition = "responsable_inscripto" | "monotributo" | "exento";
 
@@ -172,6 +173,8 @@ export default function ConfiguracionPage() {
           conditionLabel={TAX_CONDITION_LABEL[savedTaxCondition]}
         />
       )}
+
+      <AnswerInfo />
     </div>
   );
 }

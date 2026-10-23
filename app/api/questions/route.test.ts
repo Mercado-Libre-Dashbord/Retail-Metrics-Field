@@ -64,6 +64,9 @@ describe("GET /api/questions", () => {
         questionText: "¿Tienen stock?",
         draftAnswer: "Sí, tenemos stock disponible (5 unidades).",
         dateCreated: "2026-01-01T00:00:00.000Z",
+        draftSource: "rules",
+        aiConfident: null,
+        aiMissing: null,
       },
     ]);
   });

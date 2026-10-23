@@ -1614,3 +1614,73 @@ export async function getFullStock(accountId: string, inventoryIds: string[]): P
 
   return results;
 }
+
+/** Lo que Mercado Libre sabe de una publicación y sirve para responder consultas. */
+export interface ItemKnowledge {
+  title: string;
+  price: number;
+  currency: string;
+  stock: number;
+  condition: string | null;
+  freeShipping: boolean;
+  logisticType: string | null;
+  /** Garantía, plazo de entrega, etc. tal como los cargó el vendedor en la publicación. */
+  saleTerms: string[];
+  /** Ficha técnica: "Marca: X", "Modelo: Y"... */
+  attributes: string[];
+  /** Variantes con stock: "Color: Rojo, Talle: M (3 u.)". */
+  variations: string[];
+  description: string;
+  /** Preguntas ya respondidas de esta misma publicación, de la más nueva a la más vieja. */
+  pastAnswers: { question: string; answer: string }[];
+}
+
+const MAX_ATTRIBUTES = 60;
+const MAX_PAST_ANSWERS = 15;
+
+/**
+ * Publicación, descripción y respuestas anteriores. La descripción y las
+ * respuestas son opcionales: si ML falla en alguna de esas dos, se sigue con
+ * lo que haya en vez de dejar al vendedor sin borrador.
+ */
+export async function getItemKnowledge(accountId: string, itemId: string): Promise<ItemKnowledge> {
+  const token = await getValidAccessToken(accountId);
+  const id = encodeURIComponent(itemId);
+  const [item, description, answered] = await Promise.all([
+    mlFetch(`/items/${id}?include_attributes=all`, token),
+    mlFetch(`/items/${id}/description`, token).catch(() => null),
+    mlFetch(`/questions/search?item=${id}&status=ANSWERED&sort_fields=date_created&sort_types=DESC&limit=${MAX_PAST_ANSWERS}`, token).catch(() => null),
+  ]);
+
+  const valueOf = (a: any) => a?.value_name ?? (Array.isArray(a?.values) ? a.values.map((v: any) => v?.name).filter(Boolean).join(", ") : null);
+  const attributes = (item.attributes ?? [])
+    .map((a: any) => (a?.name && valueOf(a) ? `${a.name}: ${valueOf(a)}` : null))
+    .filter(Boolean)
+    .slice(0, MAX_ATTRIBUTES) as string[];
+  const saleTerms = (item.sale_terms ?? [])
+    .map((t: any) => (t?.name && valueOf(t) ? `${t.name}: ${valueOf(t)}` : null))
+    .filter(Boolean) as string[];
+  const variations = (item.variations ?? [])
+    .map((v: any) => {
+      const combo = (v.attribute_combinations ?? []).map((c: any) => `${c.name}: ${c.value_name}`).join(", ");
+      return combo ? `${combo} (${Number(v.available_quantity ?? 0)} u.)` : null;
+    })
+    .filter(Boolean) as string[];
+
+  return {
+    title: item.title ?? "",
+    price: Number(item.price ?? 0),
+    currency: item.currency_id ?? "ARS",
+    stock: Number(item.available_quantity ?? 0),
+    condition: item.condition ?? null,
+    freeShipping: Boolean(item.shipping?.free_shipping),
+    logisticType: item.shipping?.logistic_type ?? null,
+    saleTerms,
+    attributes,
+    variations,
+    description: String(description?.plain_text ?? "").trim(),
+    pastAnswers: (answered?.questions ?? [])
+      .filter((q: any) => q?.text && q?.answer?.text)
+      .map((q: any) => ({ question: String(q.text), answer: String(q.answer.text) })),
+  };
+}

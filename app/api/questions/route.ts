@@ -50,10 +50,14 @@ export async function GET() {
       }
 
       const thumbnailColumn = (await hasColumn(client, "products", "thumbnail")) ? "p.thumbnail" : "NULL::text";
+      const aiColumns = (await hasColumn(client, "question_drafts", "draft_source"))
+        ? "qd.draft_source as draftSource, qd.ai_confident as aiConfident, qd.ai_missing as aiMissing"
+        : "'rules'::text as draftSource, NULL::boolean as aiConfident, NULL::text as aiMissing";
       const result = await client.query<QuestionRow>(
         `SELECT qd.ml_question_id as mlQuestionId, qd.product_id as productId, p.title as productTitle,
                 ${thumbnailColumn} as thumbnail,
-                qd.question_text as questionText, qd.draft_answer as draftAnswer, qd.date_created as dateCreated
+                qd.question_text as questionText, qd.draft_answer as draftAnswer, qd.date_created as dateCreated,
+                ${aiColumns}
          FROM question_drafts qd
          LEFT JOIN products p ON p.account_id = qd.account_id AND p.id = qd.product_id
          WHERE qd.account_id = $1 AND qd.status = 'draft'
@@ -72,6 +76,9 @@ export async function GET() {
         questionText: r.questiontext,
         draftAnswer: r.draftanswer,
         dateCreated: new Date(r.datecreated).toISOString(),
+        draftSource: r.draftsource ?? "rules",
+        aiConfident: r.aiconfident ?? null,
+        aiMissing: r.aimissing ?? null,
       }))
     );
   } catch (err) {
@@ -103,13 +110,20 @@ export async function PATCH(request: NextRequest) {
     }
   }
 
-  await withScope({ accountId: account.id }, (client) =>
-    client.query(
+  await withScope({ accountId: account.id }, async (client) => {
+    await client.query(
       `UPDATE question_drafts SET draft_answer = $1, status = $2, answered_at = CASE WHEN $2 = 'sent' THEN now() ELSE answered_at END
        WHERE account_id = $3 AND ml_question_id = $4`,
       [answer, action === "send" ? "sent" : "draft", account.id, mlQuestionId]
-    )
-  );
+    );
+    // Un borrador que el vendedor guardó a mano ya no lo reescribe la IA sola.
+    if (action === "save" && (await hasColumn(client, "question_drafts", "draft_source"))) {
+      await client.query(
+        `UPDATE question_drafts SET draft_source = 'manual' WHERE account_id = $1 AND ml_question_id = $2`,
+        [account.id, mlQuestionId]
+      );
+    }
+  });
 
   return NextResponse.json({ ok: true });
 }

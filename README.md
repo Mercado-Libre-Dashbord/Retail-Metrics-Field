@@ -40,6 +40,10 @@ cuenta (ver "Seguridad" más abajo).
      como redirect URI autorizado.
    - `NEXTAUTH_SECRET`: cualquier string random largo (`openssl rand -base64 32`).
    - `ADMIN_EMAILS`: tu email de Google, separado por coma si hay más de un admin.
+     `ADMIN_EMAILS_EXTRA` suma más admins sin tocar la anterior.
+   - `ANTHROPIC_API_KEY` (opcional): activa las respuestas a consultas con IA
+     (Consultas). Sin ella se usan los borradores por palabras clave.
+     `ANSWERS_MODEL` cambia el modelo (por defecto `claude-opus-5-5`).
 4. `npm run dev`
 5. Entrá a `http://localhost:3000`, iniciá sesión con Google.
 6. Si sos admin: andá a `/admin` y creá una cuenta por cada cliente (nombre +
