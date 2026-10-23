@@ -83,3 +83,22 @@ describe("authorizeCredentials()", () => {
     expect(result).toBeNull();
   });
 });
+
+describe("isAdminEmail", () => {
+  it("suma los admins de ADMIN_EMAILS y de ADMIN_EMAILS_EXTRA, sin importar mayúsculas", async () => {
+    const { isAdminEmail } = await import("./auth-options");
+    const prev = { a: process.env.ADMIN_EMAILS, b: process.env.ADMIN_EMAILS_EXTRA };
+    process.env.ADMIN_EMAILS = "dueno@example.com";
+    process.env.ADMIN_EMAILS_EXTRA = " LCaseresPlaza@gmail.com ";
+    try {
+      expect(isAdminEmail("dueno@example.com")).toBe(true);
+      expect(isAdminEmail("lcaseresplaza@gmail.com")).toBe(true);
+      expect(isAdminEmail("otro@example.com")).toBe(false);
+      delete process.env.ADMIN_EMAILS_EXTRA;
+      expect(isAdminEmail("lcaseresplaza@gmail.com")).toBe(false);
+    } finally {
+      process.env.ADMIN_EMAILS = prev.a;
+      if (prev.b === undefined) delete process.env.ADMIN_EMAILS_EXTRA; else process.env.ADMIN_EMAILS_EXTRA = prev.b;
+    }
+  });
+});

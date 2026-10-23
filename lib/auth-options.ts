@@ -5,9 +5,15 @@ import { withScope } from "@/db/client";
 import { getCredentialUserByEmail, recordFailedLogin, recordSuccessfulLogin } from "@/db/credentials";
 import { verifyPassword } from "@/lib/credentials-auth";
 
-function isAdminEmail(email: string | null | undefined): boolean {
+/**
+ * Admins: los mails de ADMIN_EMAILS más los de ADMIN_EMAILS_EXTRA. La segunda
+ * existe porque en Vercel ADMIN_EMAILS es una variable "sensible" que no se
+ * puede leer: para sumar un admin sin pisar la lista (y sin conocerla) se
+ * agrega acá.
+ */
+export function isAdminEmail(email: string | null | undefined): boolean {
   if (!email) return false;
-  const admins = (process.env.ADMIN_EMAILS || "")
+  const admins = `${process.env.ADMIN_EMAILS || ""},${process.env.ADMIN_EMAILS_EXTRA || ""}`
     .split(",")
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean);
