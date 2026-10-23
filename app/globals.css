@@ -1479,3 +1479,5 @@ details.disclosure > .disclosure-body { border-top: 1px solid var(--border-soft)
 .per100 li.lead { padding-top: var(--space-3); border-top: 1px solid var(--border-soft); }
 .per100 li.lead .per100-label { font-weight: 700; }
 .per100 li.lead .per100-value { font-size: 18px; }
+.link-btn-quiet { font-size: 12px; font-weight: 500; color: var(--text-dim); }
+.link-btn-quiet:hover { color: var(--negative); }
