@@ -41,7 +41,7 @@ interface CallBody {
   recalcOffset?: number;
 }
 
-export function SyncButton() {
+export function SyncButton({ compact = false }: { compact?: boolean } = {}) {
   const [status, setStatus] = useState<"idle" | "syncing" | "done" | "error">("idle");
   const [message, setMessage] = useState("");
   const [progress, setProgress] = useState<string | null>(null);
@@ -192,9 +192,14 @@ export function SyncButton() {
   const syncing = status === "syncing";
 
   return (
-    <div style={{ marginBottom: "var(--space-4)" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: "var(--space-3)", flexWrap: "wrap" }}>
-        <button className="btn btn-primary" onClick={handleSync} disabled={syncing}>
+    <div style={compact ? undefined : { marginBottom: "var(--space-4)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "var(--space-3)", flexWrap: "wrap", justifyContent: compact ? "flex-end" : undefined }}>
+        <button
+          className="btn btn-primary"
+          onClick={handleSync}
+          disabled={syncing}
+          title={compact ? "Trae tus ventas nuevas y recalcula envíos, IVA y ganancia de todo el historial." : undefined}
+        >
           {syncing ? "Sincronizando…" : "Sincronizar"}
         </button>
         {progress && (
@@ -214,10 +219,10 @@ export function SyncButton() {
           </span>
         )}
       </div>
-      <p className="field-hint" style={{ maxWidth: "70ch" }}>
+      {!compact && <p className="field-hint" style={{ maxWidth: "70ch" }}>
         Trae tus ventas nuevas y recalcula envíos, IVA y ganancia de todo el historial. La primera vez puede
         tardar varios minutos; después es cuestión de segundos porque saltea lo que ya está al día.
-      </p>
+      </p>}
     </div>
   );
 }

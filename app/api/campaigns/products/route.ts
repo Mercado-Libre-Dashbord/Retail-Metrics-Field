@@ -4,6 +4,7 @@ import { resolveCurrentAccount } from "@/lib/current-account";
 import { revenueStatusFilter } from "@/lib/order-status";
 import { attributedAdsMetrics, type AttributedRecommendation } from "@/lib/ads-recommendation";
 import { getProductAdsReport, AdsTimeBudgetError, type AdsItemMetrics } from "@/mcp/tools";
+import { buildAdvice, daysBetween, type AdviceSummary } from "@/lib/ads-advisor";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -71,6 +72,8 @@ export interface AdsReportResponse {
   } | null;
   campaigns: AdsCampaignRow[];
   products: AdsProductRow[];
+  /** Qué hacer con cada publicación y con cuánto por día (ver lib/ads-advisor.ts). */
+  advice?: AdviceSummary;
 }
 
 const ratio = (a: number, b: number) => (b > 0 ? a / b : null);
@@ -147,7 +150,22 @@ export async function GET(request: NextRequest) {
         WHERE oi.account_id = $1 AND o.date_created::date BETWEEN $2::date AND $3::date AND ${revenueStatusFilter()}`,
       [account.id, range.from, range.to]
     );
-    return { perProduct: perProduct.rows, accountRevenue: Number(accountRevenue.rows[0]?.revenue ?? 0) };
+    // Publicaciones que vendieron en el rango y no tienen anuncio: candidatas
+    // a publicitar si dejan margen.
+    const candidates = await client.query<{
+      productId: string; title: string | null; units: number; revenue: number; netBeforeAds: number | null; missingCost: string | number;
+    }>(
+      `SELECT oi.product_id as "productId", MAX(p.title) as title, SUM(oi.quantity) as units,
+              SUM(oi.unit_price * oi.quantity) as revenue, SUM(oi.net_profit + oi.ads_cost_allocated) as "netBeforeAds",
+              COUNT(*) FILTER (WHERE oi.net_profit IS NULL) as "missingCost"
+         FROM order_items oi JOIN orders o ON o.account_id = oi.account_id AND o.id = oi.order_id
+         LEFT JOIN products p ON p.account_id = oi.account_id AND p.id = oi.product_id
+        WHERE oi.account_id = $1 AND NOT (oi.product_id = ANY($2::text[]))
+          AND o.date_created::date BETWEEN $3::date AND $4::date AND ${revenueStatusFilter()}
+        GROUP BY oi.product_id`,
+      [account.id, ids, range.from, range.to]
+    );
+    return { perProduct: perProduct.rows, candidates: candidates.rows, accountRevenue: Number(accountRevenue.rows[0]?.revenue ?? 0) };
   });
 
   const byId = new Map(db.perProduct.map((r) => [r.productId ?? "", r]));
@@ -205,6 +223,21 @@ export async function GET(request: NextRequest) {
     .map((c) => ({ ...c, roas: ratio(c.adRevenue, c.spend), acos: ratio(c.spend, c.adRevenue) }))
     .sort((a, b) => b.spend - a.spend);
 
+  const advice = buildAdvice(
+    products.map((p) => ({ productId: p.productId, title: p.title, spend: p.spend, adRevenue: p.adRevenue, adUnits: p.adUnits, breakevenAcos: p.breakevenAcos })),
+    db.candidates.map((c) => {
+      const revenue = Number(c.revenue);
+      return {
+        productId: c.productId,
+        title: c.title ?? c.productId,
+        units: Number(c.units),
+        revenue,
+        marginBeforeAds: Number(c.missingCost) === 0 && revenue > 0 && c.netBeforeAds !== null ? Number(c.netBeforeAds) / revenue : null,
+      };
+    }),
+    daysBetween(range.from, range.to)
+  );
+
   const body: AdsReportResponse = {
     available: true,
     from: range.from,
@@ -222,6 +255,7 @@ export async function GET(request: NextRequest) {
     },
     campaigns,
     products,
+    advice,
   };
   return NextResponse.json(body);
 }

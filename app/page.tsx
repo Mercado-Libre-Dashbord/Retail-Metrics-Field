@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useState, type ReactNode } from "react";
 import {
   XAxis, YAxis, Tooltip, Legend, CartesianGrid, ResponsiveContainer,
-  PieChart, Pie, Cell, AreaChart, Area,
+  PieChart, Pie, Cell, AreaChart, Area, ComposedChart, Bar, Line,
 } from "recharts";
 import { SyncButton } from "./SyncButton";
 import { NoAccountState } from "./NoAccountState";
@@ -126,7 +126,7 @@ function fmt(n: number) {
   return n.toLocaleString("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 0 });
 }
 function pct(n: number) {
-  return `${(n * 100).toFixed(2)}%`;
+  return `${(n * 100).toLocaleString("es-AR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
 }
 
 const ESTADO_LABEL: Record<string, string> = { paid: "Pagado", cancelled: "Cancelado", pending: "Pendiente" };
@@ -311,6 +311,196 @@ function DeltaPill({ current, previous }: { current: number; previous: number | 
   );
 }
 
+
+/**
+ * Cambio contra el período anterior, en palabras y con su ventana. Verde o
+ * durazno según si es bueno o malo (para estas métricas, subir es bueno); un
+ * período anterior en cero no se compara.
+ */
+function Delta({ current, previous }: { current: number; previous: number | null | undefined }) {
+  if (previous === null || previous === undefined || previous <= 0) {
+    return <span className="sub">sin período anterior para comparar</span>;
+  }
+  const change = (current - previous) / previous;
+  if (!Number.isFinite(change)) return <span className="sub">—</span>;
+  const txt = `${change >= 0 ? "+" : "−"}${Math.abs(change * 100).toLocaleString("es-AR", { maximumFractionDigits: 1 })}%`;
+  return (
+    <span className="sub">
+      <span className={Math.abs(change) < 0.005 ? "" : change > 0 ? "pos" : "neg"}>{txt}</span> vs. período anterior
+    </span>
+  );
+}
+
+function KpiStripSkeleton() {
+  return (
+    <div className="kpi-strip" style={{ ["--kpi-cols" as string]: 5 }} aria-hidden="true">
+      {Array.from({ length: 5 }, (_, i) => (
+        <div key={i}>
+          <div className="skel" style={{ width: "50%", height: 12 }} />
+          <div className="skel" style={{ width: "75%", height: 26, marginTop: 8 }} />
+          <div className="skel" style={{ width: "60%", height: 10, marginTop: 8 }} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+interface InsightRow {
+  id: string;
+  tone: "neg" | "pos" | "info";
+  parts: (string | { strong: string })[];
+  action?: { label: string; href: string };
+}
+
+/**
+ * Lo importante del período, en pocas frases y con su acción (ver
+ * lib/insights.ts). Va antes que cualquier gráfico: es lo que el vendedor
+ * tiene que mirar hoy.
+ */
+function InsightsPanel({ from, to }: { from: string; to: string }) {
+  const [rows, setRows] = useState<InsightRow[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    setRows(null);
+    setFailed(false);
+    fetch(`/api/insights?from=${from}&to=${to}`)
+      .then(async (r) => {
+        if (!r.ok) throw new Error(String(r.status));
+        setRows(await r.json());
+      })
+      .catch(() => setFailed(true));
+  }, [from, to]);
+
+  if (failed) return null;
+  return (
+    <section className="panel insights" aria-labelledby="insights-title">
+      <div className="panel-head">
+        <h2 id="insights-title">Lo importante de este período</h2>
+      </div>
+      {rows === null ? (
+        <ul className="insight-list" aria-hidden="true">
+          {[0, 1, 2].map((i) => (
+            <li key={i}><div className="skel" style={{ width: `${70 - i * 12}%`, height: 14 }} /></li>
+          ))}
+        </ul>
+      ) : rows.length === 0 ? (
+        <p className="insight-empty">Nada fuera de lo común: sin productos a pérdida, sin costos faltantes y con el margen estable.</p>
+      ) : (
+        <ul className="insight-list">
+          {rows.map((r) => (
+            <li key={r.id} className={`insight insight-${r.tone}`}>
+              <span className="insight-dot" aria-hidden="true" />
+              <span className="insight-text">
+                {r.parts.map((p, i) => (typeof p === "string" ? <Fragment key={i}>{p}</Fragment> : <strong key={i}>{p.strong}</strong>))}
+              </span>
+              {r.action && <a className="insight-action" href={r.action.href}>{r.action.label}</a>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Ventas y ganancia por día: la facturación como una línea gris de contexto y
+ * la ganancia en barras, en el color de los datos. Los días que perdieron
+ * plata van en durazno. Un solo eje en pesos para las dos.
+ */
+function DailySalesChart({ daily }: { daily: DailyBreakdown[] }) {
+  const data = daily.map((d) => ({ day: d.day, revenue: d.revenue, netProfit: d.netProfit }));
+  const short = (d: string) => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
+  return (
+    <div className="chart-card">
+      <div className="chart-card-head">
+        <h3 className="chart-card-title">Ventas y ganancia por día</h3>
+        <span className="chart-legend">
+          <span><i className="swatch swatch-line" aria-hidden="true" /> Facturación</span>
+          <span><i className="swatch swatch-bar" aria-hidden="true" /> Ganancia (ventas con costo)</span>
+        </span>
+      </div>
+      <ResponsiveContainer width="100%" height={240}>
+        <ComposedChart data={data} margin={{ top: 8, right: 4, left: 0, bottom: 0 }}>
+          <CartesianGrid stroke="var(--border-soft)" vertical={false} />
+          <XAxis dataKey="day" tickFormatter={short} tick={{ fontSize: 12, fill: "var(--text-dim)" }} tickLine={false} axisLine={{ stroke: "var(--border)" }} minTickGap={28} />
+          <YAxis tick={{ fontSize: 12, fill: "var(--text-dim)" }} tickLine={false} axisLine={false} width={80} tickCount={5} tickFormatter={(v) => fmt(Number(v))} />
+          <Tooltip
+            cursor={{ fill: "var(--surface-2)" }}
+            contentStyle={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }}
+            labelFormatter={(d) => short(String(d))}
+            formatter={(v: number, name: string) => [fmt(Number(v)), name === "revenue" ? "Facturación" : "Ganancia"]}
+          />
+          <Bar dataKey="netProfit" radius={[3, 3, 0, 0]} isAnimationActive={false}>
+            {data.map((d) => (
+              <Cell key={d.day} fill={d.netProfit < 0 ? "var(--chart-shipping)" : "var(--series-strong)"} />
+            ))}
+          </Bar>
+          <Line dataKey="revenue" type="linear" stroke="var(--series-muted)" strokeWidth={2} dot={false} isAnimationActive={false} />
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+/**
+ * A dónde se va cada $100 que facturás: cinco grupos y lo que queda. Barras
+ * grises para lo que se va y el color de los datos solo en la ganancia, que
+ * es la respuesta.
+ */
+function Per100({ daily, adjustments }: { daily: DailyBreakdown[]; adjustments?: Adjustments }) {
+  const t = daily.reduce(
+    (a, d) => ({
+      revenue: a.revenue + d.revenue,
+      ml: a.ml + d.commission + d.shipping,
+      cost: a.cost + d.cost,
+      taxes: a.taxes + d.iva + d.tax,
+      ads: a.ads + d.ads,
+      net: a.net + d.netProfit,
+    }),
+    { revenue: 0, ml: 0, cost: 0, taxes: 0, ads: 0, net: 0 }
+  );
+  if (adjustments) {
+    t.ml += adjustments.full + adjustments.otherCharges;
+    t.ads += adjustments.adsNotInSales;
+    t.taxes -= adjustments.ivaCredit;
+    t.net += adjustments.total;
+  }
+  if (t.revenue <= 0) return null;
+  // Lo que no entra en ningún grupo son las ventas sin costo cargado: se
+  // muestra aparte para que los $100 cierren.
+  const unknown = Math.max(0, t.revenue - t.ml - t.cost - t.taxes - t.ads - t.net);
+  const rows = [
+    { label: "Costo de los productos", value: t.cost },
+    { label: "Mercado Libre (comisión, envío, Full y cargos)", value: t.ml },
+    { label: "Impuestos (IVA e IIBB)", value: t.taxes },
+    { label: "Publicidad", value: t.ads },
+    ...(unknown / t.revenue >= 0.005 ? [{ label: "Ventas sin costo cargado", value: unknown }] : []),
+    { label: "Te queda", value: t.net, lead: true },
+  ];
+  const max = Math.max(...rows.map((r) => Math.abs(r.value)), 1);
+  return (
+    <div className="chart-card">
+      <div className="chart-card-head">
+        <h3 className="chart-card-title">A dónde se va cada $100 que facturás</h3>
+      </div>
+      <ul className="per100">
+        {rows.map((r) => (
+          <li key={r.label} className={r.lead ? "lead" : undefined}>
+            <span className="per100-label">{r.label}</span>
+            <span className="per100-value">${((r.value / t.revenue) * 100).toLocaleString("es-AR", { maximumFractionDigits: 1 })}</span>
+            <span className="per100-track" aria-hidden="true">
+              <span
+                className={`per100-bar ${r.lead ? (r.value < 0 ? "neg" : "pos") : ""}`}
+                style={{ width: `${Math.max(1, (Math.abs(r.value) / max) * 100)}%` }}
+              />
+            </span>
+          </li>
+        ))}
+      </ul>
+      <p className="field-hint" style={{ margin: "var(--space-3) 0 0" }}>Facturación del período: {fmt(t.revenue)}.</p>
+    </div>
+  );
+}
 
 /**
  * La ganancia neta, paso a paso: lo que dejan las ventas (venta por venta) y
@@ -1094,7 +1284,10 @@ export default function HomePage() {
 
   return (
     <div>
-      <h1>Resumen de cuenta</h1>
+      <div className="title-row">
+        <h1>Resumen</h1>
+        <SyncButton compact />
+      </div>
       {mlConnected === false && (
         <p className="missing-cost">
           Todavía no conectaste Mercado Libre. <a href="/api/ml/login">Conectar ahora</a>
@@ -1103,12 +1296,11 @@ export default function HomePage() {
       {loadError && <p className="field-error" role="alert">{loadError}</p>}
       {summary?.pendingMigrations && summary.pendingMigrations.length > 0 && (
         <div className="migration-banner" role="alert">
-          <strong>Falta correr una migración en la base.</strong> Los impuestos por producto no se
-          están guardando ni mostrando hasta que corras esto en el SQL Editor de Supabase:
+          <strong>Falta correr una migración en la base.</strong> Algunos datos no se están guardando hasta que corras
+          esto en el SQL Editor de Supabase:
           <pre>{summary.pendingMigrations.join("\n")}</pre>
         </div>
       )}
-      <SyncButton />
 
       <PeriodBar
         period={period}
@@ -1119,74 +1311,48 @@ export default function HomePage() {
         onCustomToChange={setCustomTo}
       />
 
-      <p
-        className="field-hint"
-        style={{ margin: "var(--space-2) 0 0", textAlign: "right", display: "flex", gap: "var(--space-3)", justifyContent: "flex-end", flexWrap: "wrap" }}
-      >
-        <a href={`/api/export/orders?from=${from}&to=${to}`}>
-          Descargar detalle del período (CSV)
-        </a>
-        <a href="/api/export/financial-statement">
-          Descargar estado financiero (Excel)
-        </a>
+      <p className="downloads">
+        <a href={`/api/export/orders?from=${from}&to=${to}`}>Descargar ventas del período (CSV)</a>
+        <a href="/api/export/financial-statement">Descargar estado financiero (Excel)</a>
       </p>
 
-      <h2 className="section-title">Tienda</h2>
       {summary === null ? (
-        <KpiSkeleton />
+        <KpiStripSkeleton />
       ) : (
-      <div className="kpi-grid">
-        <div className="kpi-card kpi-hero">
-          <div className="kpi-card-head"><KpiIcon name="gross" /><span className="label">Facturación</span><KpiInfo>Suma de precio × cantidad de todo lo vendido, antes de descontar nada. Las órdenes canceladas no cuentan.</KpiInfo></div>
-          <div className="value"><KpiValue>{summary ? fmt(summary.grossSales) : "-"}</KpiValue></div>
-          {summary && <DeltaPill current={summary.grossSales} previous={summary.previous?.grossSales} />}
+        <div className="kpi-strip" style={{ ["--kpi-cols" as string]: 5 }}>
+          <div>
+            <span className="label">Ganancia neta</span>
+            <span className={`value lead ${summary.netProfit < 0 ? "num-neg" : ""}`}>{fmt(summary.netProfit)}</span>
+            <Delta current={summary.netProfit} previous={summary.previous?.netProfit} />
+          </div>
+          <div>
+            <span className="label">Facturación</span>
+            <span className="value">{fmt(summary.grossSales)}</span>
+            <Delta current={summary.grossSales} previous={summary.previous?.grossSales} />
+          </div>
+          <div>
+            <span className="label">Margen neto</span>
+            <span className="value">{pct(summary.profitPct)}</span>
+            <span className="sub">de cada $100, lo que te queda</span>
+          </div>
+          <div>
+            <span className="label">Órdenes</span>
+            <span className="value">{summary.orders.toLocaleString("es-AR")}</span>
+            <span className="sub">ticket promedio {fmt(summary.aov)}</span>
+          </div>
+          <div>
+            <span className="label">Publicidad</span>
+            <span className="value">{fmt(summary.adSpend)}</span>
+            <span className="sub">
+              {summary.grossSales > 0 ? `${pct(summary.adSpend / summary.grossSales)} de la facturación` : "—"}
+              {summary.refundOrders > 0 ? ` · ${summary.refundOrders} cancelada${summary.refundOrders === 1 ? "" : "s"}` : ""}
+            </span>
+          </div>
         </div>
-        <div className="kpi-card">
-          <div className="kpi-card-head"><KpiIcon name="orders" /><span className="label">Órdenes</span><KpiInfo>Cantidad de órdenes con al menos una venta en el período elegido, sin contar las canceladas.</KpiInfo></div>
-          <div className="value"><KpiValue>{summary?.orders ?? "-"}</KpiValue></div>
-          {summary && <DeltaPill current={summary.orders} previous={summary.previous?.orders} />}
-        </div>
-        <div className="kpi-card">
-          <div className="kpi-card-head"><KpiIcon name="refund" /><span className="label">Devoluciones</span><KpiInfo>Plata de órdenes canceladas. No suma a la facturación ni a la ganancia —la venta se cayó— pero se muestra para que veas cuánto se te va por ahí.</KpiInfo></div>
-          <div className="value"><KpiValue>{summary ? fmt(summary.refundAmount) : "-"}</KpiValue></div>
-          {summary && (
-            <div className="kpi-delta">
-              <span className="kpi-delta-caption">
-                {summary.refundOrders} orden(es) · {(summary.refundRate * 100).toLocaleString("es-AR", { maximumFractionDigits: 1 })}% de tus ventas
-              </span>
-            </div>
-          )}
-        </div>
-        <div className="kpi-card">
-          <div className="kpi-card-head"><KpiIcon name="aov" /><span className="label">Ticket promedio</span><KpiInfo>Facturación ÷ Órdenes. Cuánto gasta en promedio cada comprador.</KpiInfo></div>
-          <div className="value"><KpiValue>{summary ? fmt(summary.aov) : "-"}</KpiValue></div>
-        </div>
-        <div className="kpi-card">
-          <div className="kpi-card-head"><KpiIcon name="profit" /><span className="label">Ganancia neta</span><KpiInfo>Facturación − comisión de Mercado Libre − envío − costo del producto − IVA − otros impuestos − toda la publicidad − Full y otros cargos de Mercado Libre. El paso a paso está en &quot;Cómo se calcula tu ganancia neta&quot;, más abajo. Si a un producto le falta el costo cargado, sus ventas quedan afuera de este número: no se inventa un valor.</KpiInfo></div>
-          <div className="value"><KpiValue>{summary ? fmt(summary.netProfit) : "-"}</KpiValue></div>
-          {summary && <DeltaPill current={summary.netProfit} previous={summary.previous?.netProfit} />}
-        </div>
-        <div className="kpi-card">
-          <div className="kpi-card-head"><KpiIcon name="margin" /><span className="label">Margen neto</span><KpiInfo>Ganancia neta ÷ Facturación. De cada $100 que facturás, cuánto te queda de verdad.</KpiInfo></div>
-          <div className="value"><KpiValue>{summary ? pct(summary.profitPct) : "-"}</KpiValue></div>
-        </div>
-        <div className="kpi-card">
-          <div className="kpi-card-head"><KpiIcon name="net" /><span className="label">Facturación neta</span><KpiInfo>Facturación − comisión de Mercado Libre − envío. No descuenta el costo del producto ni los impuestos.</KpiInfo></div>
-          <div className="value"><KpiValue>{summary ? fmt(summary.netRevenue) : "-"}</KpiValue></div>
-        </div>
-        <div className="kpi-card">
-          <div className="kpi-card-head"><KpiIcon name="ads" /><span className="label">Costos en Ads</span><KpiInfo>Lo que gastaste en publicidad en el período: Mercado Ads más lo que cargaste a mano de Meta, Google o TikTok. Está descontado completo de la Ganancia neta. Detalle por campaña en <a href="/campanas">Campañas</a>.</KpiInfo></div>
-          <div className="value"><KpiValue>{summary ? fmt(summary.adSpend) : "-"}</KpiValue></div>
-        </div>
-      </div>
       )}
 
-      {summary && summary.itemsMissingCost > 0 && (
-        <MissingCostPanel
-          items={summary.itemsMissingCost}
-          products={summary.productsMissingCost ?? []}
-        />
-      )}
+      <InsightsPanel from={from} to={to} />
+
 
       {summary?.adjustments && summary.salesProfit !== undefined && (
         <NetProfitBreakdown salesProfit={summary.salesProfit} adj={summary.adjustments} netProfit={summary.netProfit} />
@@ -1208,10 +1374,10 @@ export default function HomePage() {
         </div>
       ) : (
         <>
-          <RevenueStackedArea daily={daily} />
+          <DailySalesChart daily={daily} />
           <div className="chart-split-even">
             <TopProductsCard rows={products ?? []} />
-            <RevenueSplitPie daily={daily} adjustments={summary?.adjustments} />
+            <Per100 daily={daily} adjustments={summary?.adjustments} />
           </div>
         </>
       )}
