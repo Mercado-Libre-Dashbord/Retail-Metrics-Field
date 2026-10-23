@@ -142,7 +142,21 @@ describe("detectPackUnits", () => {
     ["Fibras Marcadores X 80 Doble Punta", "FIBRAS X 80", 1],
     ["Perchas Negras Percha Terciopelo Pack De 20 Unidades", "PERCHA PARA ROPA DE TERCIOPELO X10 (26017IC05)", 2],
     ["Pack X 15 Perchas", "PERCHA X10", 1],
+    ["Pack Por 3 Toallones Algodón", "TOALLON ALGODON", 3],
+    ["Repasadores X6u Algodón", "REPASADOR", 6],
+    ["Vasos Vidrio Docena 300ml", "VASO 300", 12],
+    ["Media Docena De Copas", "COPA", 6],
+    ["2x Jarro Cerámica Gris", "JARRO GRIS", 2],
+    ["20 X 30 Cm Cuadro Decorativo", "CUADRO 20X30", 1],
+    ["Medias Soquete 3 Pares Hombre", "MEDIA SOQUETE", 3],
+    ["Combo De 4 Fibras", "FIBRA", 4],
   ])("%s → %i", (title, article, n) => expect(detectPackUnits(title, article)).toBe(n));
+
+  it("uses Mercado Libre's units-per-pack when the title does not say it", () => {
+    expect(detectPackUnits("Jarro Cerámica Gris Pastel", "JARRO GRIS", 6)).toBe(6);
+    expect(detectPackUnits("Perchas Terciopelo Negras", "PERCHA X10", 20)).toBe(2);
+    expect(detectPackUnits("Set X6 Jarro", "JARRO", 1)).toBe(6);
+  });
 });
 
 describe("suggestByName", () => {

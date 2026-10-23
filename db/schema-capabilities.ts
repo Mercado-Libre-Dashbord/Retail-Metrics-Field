@@ -152,6 +152,11 @@ export const EXPECTED_COLUMNS: { table: string; column: string; ddl: string }[] 
     column: "draft_source",
     ddl: "-- Correr db/postgres/migrations/024-respuestas-con-ia.sql (respuestas a consultas con IA).",
   },
+  {
+    table: "products",
+    column: "units_per_pack",
+    ddl: "ALTER TABLE products ADD COLUMN IF NOT EXISTS units_per_pack INTEGER;",
+  },
 ];
 
 export async function missingMigrations(client: QueryExecutor): Promise<{ table: string; column: string; ddl: string }[]> {

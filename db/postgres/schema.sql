@@ -126,6 +126,8 @@ CREATE TABLE IF NOT EXISTS products (
   -- planilla de costos del vendedor (ver migración 023).
   skus TEXT[] NOT NULL DEFAULT '{}',
   gtins TEXT[] NOT NULL DEFAULT '{}',
+  -- "Unidades por pack" de la ficha de ML (ver migración 025).
+  units_per_pack INTEGER,
   updated_at TIMESTAMPTZ NOT NULL,
   PRIMARY KEY (account_id, id)
 );

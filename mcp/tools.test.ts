@@ -52,7 +52,7 @@ describe("listProducts", () => {
     expect(products).toHaveLength(2);
     expect(products[0]).toEqual({
       id: "MLA1", title: "Producto 1", sku: "SKU1", price: 1000, stock: 5, permalink: "url1",
-      categoryId: null, categoryName: null, thumbnail: null, logisticType: null, inventoryId: null, skus: ["SKU1"], gtins: [],
+      categoryId: null, categoryName: null, thumbnail: null, logisticType: null, inventoryId: null, skus: ["SKU1"], gtins: [], unitsPerPack: null,
     });
   });
 
@@ -1348,6 +1348,23 @@ describe("extractCodes", () => {
   });
   it("no rompe con una publicación sin atributos", async () => {
     const { extractCodes } = await import("./tools");
-    expect(extractCodes({})).toEqual({ skus: [], gtins: [] });
+    expect(extractCodes({})).toEqual({ skus: [], gtins: [], unitsPerPack: null });
+  });
+});
+
+describe("extractUnitsPerPack", () => {
+  it("lee las unidades por pack de la publicación o, si coinciden, de sus variantes", async () => {
+    const { extractUnitsPerPack } = await import("./tools");
+    expect(extractUnitsPerPack({ attributes: [{ id: "UNITS_PER_PACK", value_name: "6" }] })).toBe(6);
+    expect(extractUnitsPerPack({ attributes: [{ id: "UNITS_PER_PACK", value_name: "12 u" }] })).toBe(12);
+    expect(extractUnitsPerPack({ variations: [
+      { attributes: [{ id: "UNITS_PER_PACK", value_name: "3" }] },
+      { attributes: [{ id: "UNITS_PER_PACK", value_name: "3" }] },
+    ] })).toBe(3);
+    expect(extractUnitsPerPack({ variations: [
+      { attributes: [{ id: "UNITS_PER_PACK", value_name: "3" }] },
+      { attributes: [{ id: "UNITS_PER_PACK", value_name: "6" }] },
+    ] })).toBeNull();
+    expect(extractUnitsPerPack({ attributes: [{ id: "UNITS_PER_PACK", value_name: "muchas" }] })).toBeNull();
   });
 });

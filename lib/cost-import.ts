@@ -16,6 +16,8 @@ export interface ProductRef {
   skus?: string[];
   /** EAN/GTIN de la publicación y de sus variantes (migración 023). */
   gtins?: string[];
+  /** "Unidades por pack" de la ficha de ML (migración 025). */
+  unitsPerPack?: number | null;
   currentCost: number | null;
 }
 
@@ -245,10 +247,19 @@ const MEASURE_AFTER = /^\s*(?:gr|g|grs|gramos|ml|cc|cm|mm|m|mts|kg|l|lt|lts|litr
  */
 function packCount(text: string): number {
   const t = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\([^)]*\)/g, " ");
+  if (/\bmedia\s+docena\b/.test(t)) return 6;
+  if (/\b(?:x\s*)?(?:1\s+)?docena\b/.test(t) && !/\b\d+\s+docenas\b/.test(t)) return 12;
   const patterns = [
-    /\b(?:set|pack|kit|combo|caja|lote)\s*(?:de\s*)?x?\s*(\d{1,3})\b/g,
-    /(?:^|\s)x\s*(\d{1,3})\b/g,
-    /\b(\d{1,3})\s*(?:unidades|unid|u|piezas|pzas|pz)\b/g,
+    // "Pack x 6", "Set de 3", "Combo por 4", "Kit 2"
+    /\b(?:set|pack|kit|combo|caja|lote|bolsa|blister)\s*(?:de\s*|por\s*)?x?\s*(\d{1,3})\b/g,
+    // "x6", "x 6", "x6u", "x 6 un."
+    /(?:^|\s)x\s*(\d{1,3})(?=u\b|un\b|\b)/g,
+    // "6 unidades", "6u", "12 piezas", "3 pares"
+    /\b(\d{1,3})\s*(?:unidades|unidad|unid|uds|un|u|piezas|pzas|pz|pares)\b/g,
+    // "6 pack", "6-pack"
+    /\b(\d{1,3})\s*-?\s*pack\b/g,
+    // "2x Jarro" al principio del título (y no "20 x 30 cm")
+    /^(\d{1,2})\s*x\s+(?=[a-z])/g,
   ];
   for (const re of patterns) {
     for (const m of t.matchAll(re)) {
@@ -268,8 +279,9 @@ function packCount(text: string): number {
  * de un artículo "Percha x10" son 2. Ante la duda (una medida como "x 250 gr",
  * o packs que no se dividen justo), 1.
  */
-export function detectPackUnits(title: string, articleName?: string | null): number {
-  const inTitle = packCount(title);
+export function detectPackUnits(title: string, articleName?: string | null, unitsPerPack?: number | null): number {
+  // La ficha de ML manda sobre el título cuando dice un pack de verdad (2 o más).
+  const inTitle = unitsPerPack && unitsPerPack >= 2 ? unitsPerPack : packCount(title);
   if (inTitle <= 1) return 1;
   const inArticle = packCount(articleName ?? "");
   if (inArticle <= 1) return inTitle;
@@ -341,7 +353,7 @@ export function buildPreview(rows: ImportRow[], products: ProductRef[]): Preview
         product,
         by,
         nameOk: namesMatch(row.name, product.title),
-        packUnits: detectPackUnits(product.title, row.name),
+        packUnits: detectPackUnits(product.title, row.name, product.unitsPerPack),
         conflict: false,
       });
     }
@@ -419,7 +431,7 @@ export function suggestByName(rows: ImportRow[], products: ProductRef[]): MatchI
       product,
       by: "name",
       nameOk: true,
-      packUnits: detectPackUnits(product.title, best.row.name),
+      packUnits: detectPackUnits(product.title, best.row.name, product.unitsPerPack),
       conflict: false,
       score: best.score,
       alternatives: scored.slice(0, 5),

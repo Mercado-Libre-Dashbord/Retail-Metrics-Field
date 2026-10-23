@@ -37,6 +37,7 @@ interface ProductColumnFlags {
   hasThumbnail: boolean;
   hasLogistics: boolean;
   hasCodes: boolean;
+  hasPackUnits: boolean;
 }
 
 /**
@@ -48,7 +49,7 @@ interface ProductColumnFlags {
  * como ficha mínima de una corrida anterior.
  */
 function buildOptionalProductColumns(
-  p: { categoryId?: string | null; categoryName?: string | null; thumbnail?: string | null; logisticType?: string | null; inventoryId?: string | null; skus?: string[]; gtins?: string[] } | undefined,
+  p: { categoryId?: string | null; categoryName?: string | null; thumbnail?: string | null; logisticType?: string | null; inventoryId?: string | null; skus?: string[]; gtins?: string[]; unitsPerPack?: number | null } | undefined,
   flags: ProductColumnFlags,
   updateOnConflict: boolean
 ): { cols: string[]; vals: unknown[]; updateSet: string[] } {
@@ -75,6 +76,11 @@ function buildOptionalProductColumns(
     vals.push(p?.skus ?? [], p?.gtins ?? []);
     if (updateOnConflict) updateSet.push("skus = excluded.skus", "gtins = excluded.gtins");
   }
+  if (flags.hasPackUnits) {
+    cols.push("units_per_pack");
+    vals.push(p?.unitsPerPack ?? null);
+    if (updateOnConflict) updateSet.push("units_per_pack = excluded.units_per_pack");
+  }
   return { cols, vals, updateSet };
 }
 
@@ -84,6 +90,7 @@ async function productColumnFlags(db: QueryExecutor): Promise<ProductColumnFlags
     hasThumbnail: await hasColumn(db, "products", "thumbnail"),
     hasLogistics: await hasColumn(db, "products", "logistic_type"),
     hasCodes: await hasColumn(db, "products", "gtins"),
+    hasPackUnits: await hasColumn(db, "products", "units_per_pack"),
   };
 }
 
@@ -432,6 +439,7 @@ export async function backfillMissingProducts(
     hasThumbnail: await hasColumn(db, "products", "thumbnail"),
     hasLogistics: await hasColumn(db, "products", "logistic_type"),
     hasCodes: await hasColumn(db, "products", "gtins"),
+    hasPackUnits: await hasColumn(db, "products", "units_per_pack"),
   };
   const now = new Date().toISOString();
 

@@ -20,6 +20,8 @@ export interface MlProduct {
   skus: string[];
   /** Códigos de barras (EAN/GTIN) de la publicación y de sus variantes. */
   gtins: string[];
+  /** "Unidades por pack" de la ficha de ML (null si la publicación no lo tiene). */
+  unitsPerPack?: number | null;
 }
 
 function attributeValues(attributes: any, id: string): string[] {
@@ -41,7 +43,7 @@ function attributeValues(attributes: any, id: string): string[] {
  * variantes, en cada variante. El EAN es el atributo GTIN. Los atributos de las
  * variantes solo vienen si se piden con `include_attributes=all`.
  */
-export function extractCodes(body: any): { skus: string[]; gtins: string[] } {
+export function extractCodes(body: any): { skus: string[]; gtins: string[]; unitsPerPack: number | null } {
   const skus = new Set<string>();
   const gtins = new Set<string>();
   const addSku = (v: unknown) => { if (typeof v === "string" && v.trim()) skus.add(v.trim()); };
@@ -53,7 +55,25 @@ export function extractCodes(body: any): { skus: string[]; gtins: string[] } {
     attributeValues(variation?.attributes, "SELLER_SKU").forEach(addSku);
     attributeValues(variation?.attributes, "GTIN").forEach((g) => gtins.add(g));
   }
-  return { skus: [...skus], gtins: [...gtins].filter((g) => /^\d{8,14}$/.test(g)) };
+  return { skus: [...skus], gtins: [...gtins].filter((g) => /^\d{8,14}$/.test(g)), unitsPerPack: extractUnitsPerPack(body) };
+}
+
+/**
+ * El atributo "Unidades por pack" (UNITS_PER_PACK) de la ficha. Es el dato más
+ * confiable de cuántas unidades del artículo trae una venta: el título a veces
+ * no lo dice o lo dice de una forma que no se puede leer. Si las variantes
+ * dicen cosas distintas, no hay un único número: null.
+ */
+export function extractUnitsPerPack(body: any): number | null {
+  const parse = (attrs: any) => {
+    const [v] = attributeValues(attrs, "UNITS_PER_PACK");
+    const n = Number(String(v ?? "").replace(",", ".").match(/\d+(?:\.\d+)?/)?.[0]);
+    return Number.isInteger(n) && n >= 1 && n <= 1000 ? n : null;
+  };
+  const root = parse(body?.attributes);
+  if (root !== null) return root;
+  const fromVariations = new Set((Array.isArray(body?.variations) ? body.variations : []).map((v: any) => parse(v?.attributes)).filter((n: number | null) => n !== null));
+  return fromVariations.size === 1 ? ([...fromVariations][0] as number) : null;
 }
 
 /** Sin confirmar todavía dónde vive exactamente en la respuesta de /items:
