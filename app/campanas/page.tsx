@@ -83,7 +83,7 @@ function AdsProfitTooltip({ active, payload, label }: any) {
       {payload.map((p: any) => (
         <div key={p.dataKey} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, padding: "2px 0" }}>
           <span style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--text)" }}>
-            <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: 2, background: p.dataKey === "ads" ? "var(--chart-ads)" : "var(--positive)", flexShrink: 0 }} />
+            <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: 2, background: p.dataKey === "ads" ? "var(--chart-ads)" : "var(--positive-fill)", flexShrink: 0 }} />
             {p.name}
           </span>
           <span style={{ color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>{fmt(Number(p.value) || 0)}</span>
@@ -471,7 +471,7 @@ export default function CampanasPage() {
               <Tooltip content={<AdsProfitTooltip />} />
               <Legend wrapperStyle={{ fontSize: 12, paddingTop: 8 }} iconType="square" />
               <Bar yAxisId="ads" dataKey="ads" name="Gasto en Ads" fill="var(--chart-ads)" isAnimationActive={false} />
-              <Line yAxisId="profit" type="monotone" dataKey="netProfit" name="Ganancia neta" stroke="var(--positive)" strokeWidth={2} dot={false} isAnimationActive={false} />
+              <Line yAxisId="profit" type="monotone" dataKey="netProfit" name="Ganancia neta" stroke="var(--positive-fill)" strokeWidth={2} dot={false} isAnimationActive={false} />
             </ComposedChart>
           </ResponsiveContainer>
         </div>

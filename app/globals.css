@@ -1,58 +1,71 @@
-/* Palette from the MetricsField brand manual: monochrome black/white/grey
-   as the primary system ("diseñar para entender, no para impresionar"),
-   with a single muted blue (Azul Niebla) reserved for metrics/data accents
-   and muted green/red kept separate for profit/loss so a black button never
-   reads as a data value. */
+/* Sistema visual compartido con MetricsField (DESIGN.md del repo de
+   MetricsField): superficies planas, grises que se leen (4,5:1 o más), el
+   dato en celeste, verde y durazno pastel solo para ganancia y pérdida, y el
+   azul de los links para la acción principal. El negro de marca queda para
+   el logo y la landing pública (--brand-ink). */
 :root {
   /* Los neutros tienen una pizca de calidez en vez de ser gris puro. Un
      #f7f7f7 exacto se lee como el gris que viene por defecto; medio grado
      hacia el papel se lee como un gris elegido, y no toca la marca: sigue
      siendo monocromo. */
-  --bg: #f6f6f4;
+  --bg: #f4f5f7;
   --surface: #ffffff;
-  --surface-2: #efeeea;
+  --surface-2: #f1f4f8;
   /* Dos pesos de línea: el borde que define una tarjeta contra el fondo, y
      el divisor interno entre filas, que tiene que desaparecer casi del todo.
      Con un solo gris, las tablas se veían como una grilla de contabilidad. */
-  --border: #e5e4df;
-  --border-soft: #f0efeb;
-  --text: #141412;
+  --border: #e4e6ea;
+  --border-soft: #eef0f3;
+  --text: #1a1a1a;
   /* Más oscuro que un muted-foreground típico para pasar WCAG AA 4.5:1 tanto
      sobre blanco como sobre --bg. */
-  --text-dim: #57564f;
-  --accent: #000000;
-  --accent-strong: #000000;
-  --accent-strong-hover: #1a1a1a;
-  --positive: #1f7a4d;
-  --negative: #a83232;
-  --focus-ring: #000000;
+  --text-dim: #666666;
+  --accent: #1f4e80;
+  --accent-strong: #1f4e80;
+  --accent-strong-hover: #183f68;
+  --positive: #0b5e40;
+  --negative: #8a3f00;
+  --focus-ring: #4f7aa8;
   /* Paleta categórica validada (dataviz skill) para el desglose de
      facturación — orden fijo, no se ciclan ni se reasignan por serie. */
-  --chart-commission: #2a78d6;
-  --chart-shipping: #eb6834;
-  --chart-tax: #1baf7a;
-  --chart-cost: #eda100;
-  --chart-iva: #8b5fd6;
+  --chart-commission: #6f9bcf;
+  --chart-shipping: #f4b886;
+  --chart-tax: #8fd1ae;
+  --chart-cost: #edd38a;
+  --chart-iva: #b9a7e3;
   /* Publicidad tenía el mismo verde que la ganancia neta. En un apilado donde
      una franja es lo que ganás y la otra lo que gastás, dos verdes se leen
      como la misma cosa. Frambuesa pasa las seis pruebas del validador contra
      el resto de la paleta. */
-  --chart-ads: #c2426d;
+  --chart-ads: #e8907e;
   /* Rampa neutra para el donut de categorías: parte-de-un-todo en un solo
      tono, de oscuro a claro (el manual de marca pide monocromo primero).
      La identidad de cada porción la da la leyenda con nombre y monto, no el
      color solo. */
-  --ramp-1: #1a1a1a;
-  --ramp-2: #454545;
-  --ramp-3: #707070;
-  --ramp-4: #9b9b9b;
-  --ramp-5: #c2c2c2;
-  --ramp-6: #dedede;
+  --ramp-1: #3f6e9f;
+  --ramp-2: #6f9bcf;
+  --ramp-3: #8fb3da;
+  --ramp-4: #a9c5e6;
+  --ramp-5: #c6d9ee;
+  --ramp-6: #d9e6f4;
   /* Serie protagonista vs. contexto en el gráfico de rendimiento. */
-  --series-strong: #1a1a1a;
-  --series-muted: #b8b8b8;
+  --series-strong: #6f9bcf;
+  --series-muted: #b8bec8;
   /* Azul Niebla — manual's secondary color for métricas/datos primarios. */
   --mist: #c8d8e8;
+  /* Fondos de estado: bien (ganancia) y para mejorar (pérdida), y la marca
+     de "elegido" (filtro, período, pestaña). */
+  --positive-bg: #eaf7f0;
+  /* Relleno de "ganancia" en gráficos: el verde pastel; el oscuro
+     (--positive) queda para el texto. */
+  --positive-fill: #8fd1ae;
+  --negative-bg: #fff4e8;
+  --negative-line: #f4d3b5;
+  --selected-bg: #eef4fb;
+  --selected-ring: #a9c5e6;
+  --note-bg: #f4f7fb;
+  /* Negro de marca: logo y landing pública, nunca una acción del panel. */
+  --brand-ink: #000000;
 
   --radius-sm: 7px;
   --radius-md: 12px;
@@ -68,7 +81,7 @@
   /* Dos capas, no una: una sombra de contacto muy corta que apoya la tarjeta
      sobre el fondo, y una difusa que le da aire. Una sola sombra plana es lo
      que hace que una interfaz se vea barata. */
-  --shadow-sm: 0 1px 1px rgba(20, 20, 18, 0.03), 0 1px 3px rgba(20, 20, 18, 0.04);
+  --shadow-sm: none;
   --shadow-md: 0 1px 2px rgba(20, 20, 18, 0.04), 0 10px 28px -6px rgba(20, 20, 18, 0.10);
   --shadow-lift: 0 2px 4px rgba(20, 20, 18, 0.05), 0 16px 40px -12px rgba(20, 20, 18, 0.14);
 
@@ -138,7 +151,7 @@ select:focus-visible,
   height: 32px;
   flex-shrink: 0;
   border-radius: var(--radius-sm);
-  background: var(--accent-strong);
+  background: var(--brand-ink);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -148,7 +161,7 @@ select:focus-visible,
 
 .sidebar-account { padding: var(--space-3) 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .sidebar-account label { display: flex; flex-direction: column; gap: 4px; }
-.sidebar-account-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); }
+.sidebar-account-label { font-size: 12px; font-weight: 500; color: var(--text-dim); }
 .sidebar-account select { width: 100%; }
 
 .sidebar-links { display: flex; flex-direction: column; gap: 2px; }
@@ -166,7 +179,7 @@ select:focus-visible,
   transition: background-color var(--duration-fast) var(--ease-out), color var(--duration-fast) var(--ease-out);
 }
 .sidebar-link:hover { background: var(--surface-2); color: var(--text); }
-.sidebar-link.active { background: var(--accent-strong); color: #fff; font-weight: 600; }
+.sidebar-link.active { background: var(--surface-2); color: var(--text); font-weight: 600; }
 
 .sidebar-spacer { flex: 1 1 auto; }
 .sidebar-user { display: flex; flex-direction: column; gap: var(--space-2); padding-top: var(--space-3); border-top: 1px solid var(--border); }
@@ -193,11 +206,10 @@ h2.section-title {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  font-size: 11px;
+  font-size: 15px;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: var(--text-dim);
+  letter-spacing: -0.01em;
+  color: var(--text);
   margin: var(--space-6) 0 var(--space-3);
 }
 h2.section-title::after {
@@ -277,10 +289,8 @@ tbody tr:last-child td { border-bottom: none; }
    la tabla de la pantalla solo por el texto del header. */
 th {
   color: var(--text-dim);
-  font-weight: 700;
-  font-size: 10.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
+  font-weight: 500;
+  font-size: 12px;
   white-space: normal;
   background: var(--surface);
   border-bottom-color: var(--border);
@@ -403,7 +413,7 @@ tbody tr:hover { background: var(--bg); }
   transition: background-color var(--duration-fast) var(--ease-out), color var(--duration-fast) var(--ease-out);
 }
 .period-btn:hover:not(.active) { background: var(--surface-2); color: var(--text); }
-.period-btn.active { background: var(--accent-strong); color: #fff; }
+.period-btn.active { background: var(--selected-bg); color: var(--accent); box-shadow: inset 0 0 0 1px var(--selected-ring); }
 .period-custom {
   display: flex;
   gap: var(--space-3);
@@ -440,24 +450,22 @@ tbody tr:hover { background: var(--bg); }
     transform var(--duration-base) var(--ease-out),
     box-shadow var(--duration-base) var(--ease-out);
 }
-/* Se levanta un pelo en vez de encenderse el borde. Un borde negro al pasar
-   el mouse grita; un milímetro de elevación se siente. */
-.kpi-card:hover { transform: translateY(-1px); box-shadow: var(--shadow-md); }
+/* Plana también al pasar el mouse (DESIGN.md: sin sombras en lo que está
+   quieto): apenas se tiñe el borde. */
+.kpi-card:hover { border-color: var(--selected-ring); }
 @media (prefers-reduced-motion: reduce) {
   .kpi-card, .kpi-card:hover { transform: none; transition: none; }
 }
 .kpi-card .label {
   color: var(--text-dim);
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
+  font-size: 13px;
+  font-weight: 500;
 }
 .kpi-card .value {
   /* Escala con el ancho disponible: un total histórico de 8 dígitos se salía
      de la tarjeta a tamaño fijo. */
   font-size: clamp(19px, 1.7vw, 25px);
-  font-weight: 700;
+  font-weight: 500;
   letter-spacing: -0.03em;
   margin-top: var(--space-2);
   font-variant-numeric: tabular-nums;
@@ -505,8 +513,7 @@ tbody tr:hover { background: var(--bg); }
   text-transform: none;
   letter-spacing: normal;
 }
-.kpi-card.kpi-hero .kpi-info > summary { border-color: rgba(255, 255, 255, 0.5); color: rgba(255, 255, 255, 0.8); }
-.kpi-card.kpi-hero .kpi-info > summary:hover { border-color: #fff; color: #fff; }
+
 .kpi-icon {
   width: 26px;
   height: 26px;
@@ -518,25 +525,14 @@ tbody tr:hover { background: var(--bg); }
   align-items: center;
   justify-content: center;
 }
-/* Tarjeta protagonista: la primera del tablero va en negro para que el ojo
-   sepa dónde empezar a leer. */
+/* Tarjeta protagonista: la primera del tablero, para que el ojo sepa dónde
+   empezar a leer. Antes iba en negro; ahora, como la métrica elegida del
+   tablero de MetricsField, con fondo de nota y una línea celeste abajo. */
 .kpi-card.kpi-hero {
-  background: var(--accent-strong);
-  border-color: var(--accent-strong);
-  color: #fff;
-  box-shadow: var(--shadow-md);
+  background: var(--note-bg);
+  box-shadow: inset 0 -2px 0 var(--series-strong);
 }
-.kpi-card.kpi-hero:hover { box-shadow: var(--shadow-lift); }
-/* La facturación es EL número de la pantalla: si se ve igual que los otros
-   siete, el tablero no tiene punto de entrada. */
-.kpi-card.kpi-hero .value { font-size: clamp(24px, 2.3vw, 33px); }
-.kpi-card.kpi-hero .label { color: rgba(255, 255, 255, 0.72); }
-.kpi-card.kpi-hero .kpi-icon { background: rgba(255, 255, 255, 0.14); color: #fff; }
-.kpi-card.kpi-hero .kpi-delta-caption { color: rgba(255, 255, 255, 0.6); }
-.kpi-card.kpi-hero .delta-pill.up { background: rgba(255, 255, 255, 0.16); color: #8ee0b0; }
-.kpi-card.kpi-hero .delta-pill.down { background: rgba(255, 255, 255, 0.16); color: #f0a2a2; }
-.kpi-card.kpi-hero:hover { border-color: var(--accent-strong); }
-.kpi-card.kpi-hero .value { font-size: clamp(19px, 1.85vw, 26px); }
+.kpi-card.kpi-hero .value { font-size: clamp(20px, 1.95vw, 27px); font-weight: 600; }
 
 .chart-card {
   background: var(--surface);
@@ -628,7 +624,7 @@ tbody tr:hover { background: var(--bg); }
 }
 .missing-cost { color: var(--negative); font-weight: 600; }
 .migration-banner {
-  background: rgba(168, 50, 50, 0.06);
+  background: var(--negative-bg);
   border: 1px solid var(--negative);
   border-radius: var(--radius-md);
   padding: var(--space-4);
@@ -670,8 +666,8 @@ tbody tr:hover { background: var(--bg); }
   padding: 2px 8px;
   border-radius: 999px;
 }
-.delta-pill.up { background: rgba(31, 122, 77, 0.12); color: var(--positive); }
-.delta-pill.down { background: rgba(168, 50, 50, 0.12); color: var(--negative); }
+.delta-pill.up { background: var(--positive-bg); color: var(--positive); }
+.delta-pill.down { background: var(--negative-bg); color: var(--negative); }
 
 /* Skeleton loading placeholder: subtle shimmer, disabled entirely under
    prefers-reduced-motion below. */
@@ -691,9 +687,9 @@ tbody tr:hover { background: var(--bg); }
 }
 
 .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
-.badge-paid { background: rgba(31, 122, 77, 0.12); color: var(--positive); }
-.badge-cancelled { background: rgba(168, 50, 50, 0.12); color: var(--negative); }
-.badge-other { background: rgba(89, 89, 89, 0.12); color: var(--text-dim); }
+.badge-paid { background: var(--positive-bg); color: var(--positive); }
+.badge-cancelled { background: var(--negative-bg); color: var(--negative); }
+.badge-other { background: var(--surface-2); color: var(--text-dim); }
 
 .orders-table td, .orders-table th { padding: 12px 14px; }
 /* Es un solo número largo, sin espacios: sin esto, la única forma que tiene
@@ -756,8 +752,8 @@ input[type="text"], input[type="number"], input[type="date"], input[type="email"
 .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .btn-primary { background: var(--accent-strong); color: #fff; }
 .btn-primary:hover:not(:disabled) { background: var(--accent-strong-hover); }
-.btn-secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
-.btn-secondary:hover:not(:disabled) { border-color: var(--accent-strong); }
+.btn-secondary { background: var(--surface); color: var(--text); border: 1px solid #d6d9de; }
+.btn-secondary:hover:not(:disabled) { border-color: var(--selected-ring); background: #f7f9fc; }
 .btn-sm { padding: 6px 12px; min-height: 32px; font-size: 13px; }
 
 /* Login screen: a single centered card, one primary action, no nav (NavBar
@@ -789,7 +785,7 @@ input[type="text"], input[type="number"], input[type="date"], input[type="email"
   width: 40px;
   height: 40px;
   border-radius: var(--radius-md);
-  background: var(--accent-strong);
+  background: var(--brand-ink);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -809,7 +805,7 @@ input[type="text"], input[type="number"], input[type="date"], input[type="email"
   color: var(--text);
   border: 1px solid var(--border);
 }
-.google-btn:hover:not(:disabled) { border-color: var(--accent-strong); background: var(--surface-2); }
+.google-btn:hover:not(:disabled) { border-color: var(--selected-ring); background: var(--surface-2); }
 .google-btn-spinner {
   width: 16px;
   height: 16px;
@@ -924,7 +920,7 @@ input[type="text"], input[type="number"], input[type="date"], input[type="email"
   transition: background 0.12s ease, color 0.12s ease;
 }
 .seg-btn:hover { color: var(--text); }
-.seg-btn.active { background: var(--surface); color: var(--text); box-shadow: var(--shadow-sm); }
+.seg-btn.active { background: var(--surface); color: var(--text); box-shadow: 0 0 0 1px var(--border); }
 .seg-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
 /* Posición dentro del top. Sirve de ancla al escanear la lista de arriba
@@ -971,9 +967,8 @@ input[type="text"], input[type="number"], input[type="date"], input[type="email"
    encabeza la lista suele ser una publicación dada de baja, que el vendedor
    ni veía, y por eso cargaba todo y el número no se movía. */
 .missing-cost-panel {
-  background: var(--surface);
-  border: 1px solid var(--negative);
-  border-left-width: 3px;
+  background: var(--negative-bg);
+  border: 1px solid var(--negative-line);
   border-radius: var(--radius-md);
   padding: var(--space-3) var(--space-4);
   margin-bottom: var(--space-4);
@@ -1101,7 +1096,7 @@ table th.num { font-variant-numeric: tabular-nums; }
   width: 3px;
   height: 17px;
   border-radius: 0 2px 2px 0;
-  background: var(--accent-strong);
+  background: var(--series-strong);
 }
 
 /* La caja de explicación deja de parecer un bloque de código y pasa a ser una
@@ -1153,7 +1148,7 @@ main:has(> .lp), main:has(> .lp-doc) { max-width: none; padding: 0; }
 .lp-top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding-top: var(--space-4); padding-bottom: var(--space-4); }
 .lp-brand { display: inline-flex; align-items: center; gap: var(--space-2); text-decoration: none; font-weight: 700; font-size: 16px; }
 .lp a.btn { text-decoration: none; }
-.lp-mark { width: 30px; height: 30px; border-radius: var(--radius-sm); background: var(--accent-strong); display: inline-flex; align-items: center; justify-content: center; flex: none; }
+.lp-mark { width: 30px; height: 30px; border-radius: var(--radius-sm); background: var(--brand-ink); display: inline-flex; align-items: center; justify-content: center; flex: none; }
 .lp-brand small { font-weight: 500; color: var(--text-dim); font-size: 12px; margin-left: 4px; }
 .lp-top-actions { display: flex; align-items: center; gap: var(--space-4); }
 .lp-link { font-weight: 600; font-size: 14px; text-decoration: none; }
@@ -1180,7 +1175,7 @@ main:has(> .lp), main:has(> .lp-doc) { max-width: none; padding: 0; }
 .lp-video { position: relative; aspect-ratio: 16 / 9; border-radius: var(--radius-lg); overflow: hidden; box-shadow: var(--shadow-lift); background: #000; }
 .lp-video iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
 
-.lp-band { background: var(--accent-strong); color: #fff; max-width: none !important; padding-top: clamp(32px, 5vw, 56px) !important; padding-bottom: clamp(32px, 5vw, 56px) !important; }
+.lp-band { background: var(--brand-ink); color: #fff; max-width: none !important; padding-top: clamp(32px, 5vw, 56px) !important; padding-bottom: clamp(32px, 5vw, 56px) !important; }
 .lp-band p { max-width: calc(var(--lp-max) - 2 * var(--lp-gutter)); margin: 0 auto; font-size: clamp(19px, 2.2vw, 26px); line-height: 1.4; font-weight: 500; }
 
 .lp-section { padding-top: clamp(48px, 7vw, 88px); padding-bottom: 0; }
@@ -1198,7 +1193,7 @@ main:has(> .lp), main:has(> .lp-doc) { max-width: none; padding: 0; }
 .lp-verdict { margin-top: var(--space-4) !important; font-weight: 600; font-size: 14px; color: var(--negative); }
 
 .lp-steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-5); counter-reset: none; }
-.lp-step-n { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 50%; background: var(--accent-strong); color: #fff; font-weight: 700; margin-bottom: var(--space-3); }
+.lp-step-n { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 50%; background: var(--brand-ink); color: #fff; font-weight: 700; margin-bottom: var(--space-3); }
 
 .lp-grid-extras { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3) var(--space-5); }
 .lp-extra { display: flex; flex-direction: column; gap: 2px; padding: var(--space-3) 0; border-top: 1px solid var(--border); }
