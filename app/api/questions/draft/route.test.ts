@@ -18,7 +18,7 @@ const req = (body: unknown) => new Request("http://x/api/questions/draft", { met
 describe("POST /api/questions/draft", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    process.env.ANTHROPIC_API_KEY = "test";
+    process.env.AI_API_KEY = "test";
     vi.mocked(resolveCurrentAccount).mockResolvedValue(account);
     vi.mocked(getItemKnowledge).mockResolvedValue({ title: "Item" } as any);
     query.mockImplementation(async (sql: string) => {
@@ -32,10 +32,10 @@ describe("POST /api/questions/draft", () => {
       return { rows: [] };
     });
   });
-  afterEach(() => { delete process.env.ANTHROPIC_API_KEY; });
+  afterEach(() => { delete process.env.AI_API_KEY; });
 
   it("returns 503 when the API key is not configured", async () => {
-    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.AI_API_KEY;
     const res = await POST(req({}));
     expect(res.status).toBe(503);
   });

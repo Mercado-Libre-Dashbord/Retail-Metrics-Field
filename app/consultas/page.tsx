@@ -20,7 +20,7 @@ type DraftResult =
   | { mlQuestionId: string; ok: true; answer: string; confident: boolean; missing: string }
   | { mlQuestionId: string; ok: false; error: string };
 
-/** Vueltas máximas de borradores automáticos por carga de la página (8 consultas cada una). */
+/** Vueltas máximas de borradores automáticos por carga de la página (6 consultas cada una). */
 const MAX_AUTO_ROUNDS = 6;
 
 const ago = (iso: string) => {

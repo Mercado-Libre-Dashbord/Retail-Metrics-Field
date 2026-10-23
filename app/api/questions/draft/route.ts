@@ -9,8 +9,8 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 /** Consultas por pedido: con más, el pedido se pasa del tiempo de la función. */
-const MAX_PER_REQUEST = 8;
-const CONCURRENCY = 4;
+const MAX_PER_REQUEST = 6;
+const CONCURRENCY = 2;
 
 interface PendingRow {
   ml_question_id: string;
@@ -31,7 +31,7 @@ export async function POST(request: NextRequest) {
   const account = await resolveCurrentAccount();
   if (!account) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
   if (!aiAnswersEnabled()) {
-    return NextResponse.json({ error: "Las respuestas con IA no están activadas (falta ANTHROPIC_API_KEY)." }, { status: 503 });
+    return NextResponse.json({ error: "Las respuestas con IA no están activadas (falta AI_API_KEY)." }, { status: 503 });
   }
 
   const body = await request.json().catch(() => ({}));

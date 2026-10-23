@@ -17,7 +17,7 @@ const item: ItemKnowledge = {
   pastAnswers: [{ question: "¿Es impermeable?", answer: "¡Hola! Es resistente al agua, no sumergible. ¡Saludos!" }],
 };
 
-const text = (obj: unknown, stop_reason = "end_turn") => ({ stop_reason, content: [{ type: "text", text: JSON.stringify(obj) }] });
+const text = (obj: unknown, finish_reason = "stop") => ({ choices: [{ finish_reason, message: { content: JSON.stringify(obj) } }] });
 
 describe("describeItem", () => {
   it("includes the listing data, description and past answers", () => {
@@ -37,18 +37,19 @@ describe("describeItem", () => {
 });
 
 describe("buildRequest", () => {
-  it("caches the stable prefix and keeps the buyer question in the user turn", () => {
-    const req = buildRequest({ question: "¿Entra una notebook de 15?", item, sellerInfo: "Despachamos en 24 h hábiles." }, "claude-opus-5-5");
-    expect(req.system[1].cache_control).toEqual({ type: "ephemeral" });
-    expect(req.system[1].text).toContain("Despachamos en 24 h");
-    expect(req.messages[0].content).toContain("<pregunta>\n¿Entra una notebook de 15?\n</pregunta>");
-    expect(req.output_config.format.type).toBe("json_schema");
-    expect(req.fallbacks).toBe("default");
+  it("puts rules and seller info in the system turn and the buyer question in the user turn", () => {
+    const req = buildRequest({ question: "¿Entra una notebook de 15?", item, sellerInfo: "Despachamos en 24 h hábiles." }, "llama-3.3-70b-versatile");
+    expect(req.messages[0].role).toBe("system");
+    expect(req.messages[0].content).toContain("Despachamos en 24 h");
+    expect(req.messages[0].content).toContain("JSON");
+    expect(req.messages[1].content).toContain("<pregunta>\n¿Entra una notebook de 15?\n</pregunta>");
+    expect(req.response_format).toEqual({ type: "json_object" });
+    expect(req.model).toBe("llama-3.3-70b-versatile");
   });
 
   it("tells the model when the seller has not loaded any info", () => {
     const req = buildRequest({ question: "x", item, sellerInfo: "  " });
-    expect(req.system[1].text).toContain("todavía no cargó");
+    expect(req.messages[0].content).toContain("todavía no cargó");
   });
 });
 
@@ -62,9 +63,15 @@ describe("parseDraft", () => {
   });
 
   it("throws on refusals and truncated output", () => {
-    expect(() => parseDraft({ stop_reason: "refusal", content: [] })).toThrow(AiDraftError);
-    expect(() => parseDraft(text({}, "max_tokens"))).toThrow(AiDraftError);
-    expect(() => parseDraft({ stop_reason: "end_turn", content: [{ type: "text", text: "no json" }] })).toThrow(AiDraftError);
+    expect(() => parseDraft({ choices: [{ message: { content: null, refusal: "no" } }] })).toThrow(AiDraftError);
+    expect(() => parseDraft(text({}, "length"))).toThrow(AiDraftError);
+    expect(() => parseDraft({ choices: [{ finish_reason: "stop", message: { content: "no json" } }] })).toThrow(AiDraftError);
+    expect(() => parseDraft({})).toThrow(AiDraftError);
+  });
+
+  it("accepts JSON wrapped in a code fence", () => {
+    const body = { choices: [{ finish_reason: "stop", message: { content: '```json\n{"answer":"¡Hola! Sí. ¡Saludos!","confident":true,"missing":""}\n```' } }] };
+    expect(parseDraft(body).confident).toBe(true);
   });
 });
 
@@ -86,10 +93,25 @@ describe("enforcePolicy", () => {
 });
 
 describe("aiDraftAnswer", () => {
-  it("calls the beta messages API and parses the result", async () => {
-    const create = vi.fn().mockResolvedValue(text({ answer: "¡Hola! No sabemos. ¡Saludos!", confident: false, missing: "Medidas exactas" }));
-    const draft = await aiDraftAnswer({ question: "¿Medidas?", item, sellerInfo: "" }, { beta: { messages: { create } } } as any);
-    expect(create).toHaveBeenCalledOnce();
+  const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  it("posts to the OpenAI-compatible endpoint and parses the result", async () => {
+    process.env.AI_API_KEY = "k";
+    const doFetch = vi.fn().mockResolvedValue(ok(text({ answer: "¡Hola! No sabemos. ¡Saludos!", confident: false, missing: "Medidas exactas" })));
+    const draft = await aiDraftAnswer({ question: "¿Medidas?", item, sellerInfo: "" }, doFetch);
+    expect(doFetch).toHaveBeenCalledOnce();
+    const [url, init] = doFetch.mock.calls[0];
+    expect(url).toBe("https://api.groq.com/openai/v1/chat/completions");
+    expect(init.headers.Authorization).toBe("Bearer k");
     expect(draft).toEqual({ answer: "¡Hola! No sabemos. ¡Saludos!", confident: false, missing: "Medidas exactas" });
+    delete process.env.AI_API_KEY;
+  });
+
+  it("retries once on the free-tier rate limit, then explains it", async () => {
+    const limited = () => new Response("", { status: 429, headers: { "retry-after": "0.01" } });
+    const doFetch = vi.fn().mockResolvedValueOnce(limited()).mockResolvedValueOnce(ok(text({ answer: "¡Hola! Sí. ¡Saludos!", confident: true, missing: "" })));
+    expect((await aiDraftAnswer({ question: "x", item, sellerInfo: "" }, doFetch)).confident).toBe(true);
+    const always = vi.fn().mockImplementation(async () => limited());
+    await expect(aiDraftAnswer({ question: "x", item, sellerInfo: "" }, always)).rejects.toThrow("límite gratuito");
   });
 });
