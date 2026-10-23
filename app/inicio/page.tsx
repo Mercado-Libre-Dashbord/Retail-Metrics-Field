@@ -6,7 +6,7 @@ import { TRIAL_DAYS } from "@/lib/trial-request";
 export const metadata: Metadata = {
   title: `${PRODUCT_NAME} · Cuánto te queda de verdad en cada venta de Mercado Libre`,
   description:
-    "Ganancia real por venta, margen por producto y ROAS y ACOS reales de Mercado Ads. Conectás tu cuenta en un minuto y lo probás gratis 14 días.",
+    `Ganancia real por venta, margen por producto y ROAS y ACOS reales de Mercado Ads. Conectás tu cuenta en un minuto y lo probás gratis ${TRIAL_DAYS} días.`,
 };
 
 const fmt = (n: number) => `$${n.toLocaleString("es-AR")}`;
@@ -49,7 +49,7 @@ const STEPS = [
 const FAQ = [
   ["¿Necesito tarjeta para la prueba?", `No. Son ${TRIAL_DAYS} días gratis, sin tarjeta y sin compromiso.`],
   [
-    "¿Qué pasa cuando terminan los 14 días?",
+    `¿Qué pasa cuando terminan los ${TRIAL_DAYS} días?`,
     "Te contamos los planes. Si no seguís, no se cobra nada y podés pedirnos que borremos tus datos.",
   ],
   [

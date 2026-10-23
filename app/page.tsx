@@ -503,7 +503,7 @@ function RevenueSplitPie({ daily, adjustments }: { daily: DailyBreakdown[]; adju
     { name: "Otros impuestos", value: totals.tax, color: "var(--chart-tax)" },
     { name: "Publicidad", value: totals.ads, color: "var(--chart-ads)" },
     { name: "Full y otros cargos de ML", value: otherMl, color: "var(--ramp-3)" },
-    { name: "Ganancia neta", value: totals.netProfit, color: "var(--positive)" },
+    { name: "Ganancia neta", value: totals.netProfit, color: "var(--positive-fill)" },
   ];
   const revenue = totals.revenue;
   const visible = slices.filter((s) => s.value > 0);
@@ -785,7 +785,7 @@ function StockBadge({ stock }: { stock: number }) {
  * mira, y la única que se lee sin tener que restar dos alturas.
  */
 const STACK_SERIES = [
-  { key: "netProfit", name: "Ganancia neta", color: "var(--positive)" },
+  { key: "netProfit", name: "Ganancia neta", color: "var(--positive-fill)" },
   { key: "cost", name: "Costo de producto", color: "var(--chart-cost)" },
   { key: "commission", name: "Comisión ML", color: "var(--chart-commission)" },
   { key: "shipping", name: "Envío", color: "var(--chart-shipping)" },

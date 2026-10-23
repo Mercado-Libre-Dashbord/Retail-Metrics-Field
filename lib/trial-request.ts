@@ -5,7 +5,7 @@
  * recorta, se limita de largo y se rechaza si no tiene forma de dato real.
  */
 
-export const TRIAL_DAYS = 14;
+export const TRIAL_DAYS = 30;
 
 export const MONTHLY_SALES_OPTIONS = ["Menos de 50", "50 a 200", "200 a 1.000", "Más de 1.000"] as const;
 
