@@ -1704,3 +1704,55 @@ export async function getItemKnowledge(accountId: string, itemId: string): Promi
       .map((q: any) => ({ question: String(q.text), answer: String(q.answer.text) })),
   };
 }
+
+/**
+ * Todo lo que Mercado Libre dice del envío de una orden, sin datos
+ * personales (ni dirección ni nombres): para responder "¿este envío lo pagó
+ * el vendedor o el comprador?" con la respuesta cruda de ML. Solo lectura:
+ * no cambia ningún cálculo.
+ */
+export async function diagnoseOrderShipping(accountId: string, orderId: string) {
+  const token = await getValidAccessToken(accountId);
+  const order = await mlFetch(`/orders/${encodeURIComponent(orderId)}`, token);
+  const shipmentId = order?.shipping?.id ? String(order.shipping.id) : null;
+  const pick = (o: any, keys: string[]) => Object.fromEntries(keys.map((k) => [k, o?.[k] ?? null]));
+  let shipment: unknown = null;
+  let costs: any = null;
+  let costsError: string | null = null;
+  if (shipmentId) {
+    try {
+      const sh = await mlFetch(`/shipments/${shipmentId}`, token);
+      shipment = {
+        ...pick(sh, ["mode", "logistic_type", "status", "substatus"]),
+        shipping_option: pick(sh?.shipping_option, ["cost", "list_cost", "name"]),
+      };
+    } catch (err) {
+      shipment = { error: (err as Error).message };
+    }
+    try {
+      const c = await mlFetch(`/shipments/${shipmentId}/costs`, token, { headers: { "x-format-new": "true" } });
+      costs = {
+        gross_amount: c?.gross_amount ?? null,
+        receiver: pick(c?.receiver, ["cost", "compensation", "save", "discounts"]),
+        senders: Array.isArray(c?.senders) ? c.senders.map((x: any) => pick(x, ["cost", "compensation", "save", "discounts"])) : null,
+        sender: c?.sender ? pick(c.sender, ["cost"]) : null,
+      };
+    } catch (err) {
+      costsError = (err as Error).message;
+    }
+  }
+  return {
+    order: {
+      id: String(order?.id),
+      status: order?.status ?? null,
+      total_amount: order?.total_amount ?? null,
+      paid_amount: order?.paid_amount ?? null,
+      pack_id: order?.pack_id ?? null,
+      shipment_id: shipmentId,
+      payments: (order?.payments ?? []).map((p: any) => pick(p, ["status", "transaction_amount", "shipping_cost", "total_paid_amount", "marketplace_fee"])),
+    },
+    shipment,
+    costs,
+    costsError,
+  };
+}
