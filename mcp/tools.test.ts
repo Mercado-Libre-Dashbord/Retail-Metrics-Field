@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("./ml-client", async () => {
   const actual = await vi.importActual<typeof import("./ml-client")>("./ml-client");
@@ -1366,5 +1366,37 @@ describe("extractUnitsPerPack", () => {
       { attributes: [{ id: "UNITS_PER_PACK", value_name: "6" }] },
     ] })).toBeNull();
     expect(extractUnitsPerPack({ attributes: [{ id: "UNITS_PER_PACK", value_name: "muchas" }] })).toBeNull();
+  });
+});
+
+describe("getOrderDetail en un carrito", () => {
+  beforeEach(() => vi.clearAllMocks());
+  // Volver al mock vacío de siempre sin tocar respuestas encoladas por otros tests.
+  afterEach(() => vi.mocked(mlFetch).mockImplementation(async () => undefined));
+
+  it("charges each cart order only its share of the shared shipment", async () => {
+    vi.mocked(mlFetch).mockImplementation(async (path: string) => {
+      if (path === "/orders/2000014533012220") {
+        return { id: 2000014533012220, date_created: "2026-01-01T14:59:51Z", status: "paid", total_amount: 13491, pack_id: 2000010827064961,
+          shipping: { id: 46187513939 }, order_items: [{ item: { id: "MLA1627848033" }, unit_price: 13491, quantity: 1, sale_fee: 4323 }] };
+      }
+      if (path === "/shipments/46187513939/costs") return { gross_amount: 21196.98, senders: [{ cost: 6560.49 }], receiver: { cost: 0 } };
+      if (path === "/packs/2000010827064961") return { orders: [{ id: 2000014533012220 }, { id: 2000014533012221 }] };
+      if (path === "/orders/2000014533012221") return { id: 2000014533012221, total_amount: 26982 };
+      throw new Error(`inesperado: ${path}`);
+    });
+    const order = await getOrderDetail("acc1", "2000014533012220");
+    // 13.491 de 40.473 facturados en el carrito: un tercio del envío.
+    expect(order.items[0].shippingCost).toBeCloseTo(6560.49 / 3, 2);
+  });
+
+  it("keeps the whole shipment on an order that is alone in its pack", async () => {
+    vi.mocked(mlFetch).mockImplementation(async (path: string) => {
+      if (path === "/orders/1") return { id: 1, total_amount: 1000, pack_id: 9, shipping: { id: 5 }, order_items: [{ item: { id: "MLA1" }, unit_price: 1000, quantity: 1, sale_fee: 0 }] };
+      if (path === "/shipments/5/costs") return { senders: [{ cost: 420 }] };
+      if (path === "/packs/9") return { orders: [{ id: 1 }] };
+      throw new Error(path);
+    });
+    expect((await getOrderDetail("acc1", "1")).items[0].shippingCost).toBe(420);
   });
 });

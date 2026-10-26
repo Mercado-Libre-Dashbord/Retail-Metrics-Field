@@ -412,12 +412,49 @@ export async function getShipmentSellerCost(accountId: string, shipmentId: strin
   }
 }
 
+/**
+ * Qué parte del envío le toca a ESTA orden. En un carrito (pack) el comprador
+ * compra varias publicaciones juntas, Mercado Libre crea una orden por
+ * publicación y todas comparten UN solo envío: `/shipments/{id}/costs`
+ * devuelve el costo del envío entero en cada una. Antes cada orden del
+ * carrito descontaba el envío completo, así que se pagaba dos o más veces y
+ * un producto barato comprado junto con otros quedaba "a pérdida". Se
+ * reparte proporcional a lo facturado por cada orden del pack. Ante cualquier
+ * error, 1 (la orden se queda con todo, como antes) y queda en el log.
+ */
+export async function packShippingShare(accountId: string, order: any): Promise<number> {
+  const packId = order?.pack_id;
+  if (!packId) return 1;
+  const token = await getValidAccessToken(accountId);
+  try {
+    const pack = await mlFetch(`/packs/${packId}`, token);
+    const orderIds: string[] = (pack?.orders ?? []).map((o: any) => String(o?.id)).filter(Boolean);
+    if (orderIds.length <= 1) return 1;
+    const totals = await Promise.all(
+      orderIds.map(async (id) => {
+        if (id === String(order.id)) return Number(order.total_amount ?? 0);
+        const sibling = await mlFetch(`/orders/${id}`, token);
+        return Number(sibling?.total_amount ?? 0);
+      })
+    );
+    const sum = totals.reduce((a, b) => a + b, 0);
+    if (!(sum > 0)) return 1 / orderIds.length;
+    return Number(order.total_amount ?? 0) / sum;
+  } catch (err) {
+    console.warn(`No se pudo leer el pack ${packId} de la orden ${order?.id}; el envío queda entero en esta orden:`, (err as Error).message);
+    return 1;
+  }
+}
+
 export async function getOrderDetail(accountId: string, orderId: string): Promise<MlOrder> {
   const token = await getValidAccessToken(accountId);
   const order = await mlFetch(`/orders/${orderId}`, token);
 
   const shipmentId = order.shipping?.id;
-  const orderShippingCost = shipmentId ? await getShipmentSellerCost(accountId, String(shipmentId)) : 0;
+  // En un carrito todas las órdenes comparten el envío: a esta le toca su parte.
+  const orderShippingCost = shipmentId
+    ? (await getShipmentSellerCost(accountId, String(shipmentId))) * (await packShippingShare(accountId, order))
+    : 0;
 
   // El envío se cobra una vez por ORDEN, no por producto. Antes se copiaba el
   // costo completo en cada línea, así que una orden con 2 productos distintos

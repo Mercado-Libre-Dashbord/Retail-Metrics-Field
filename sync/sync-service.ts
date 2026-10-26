@@ -20,7 +20,13 @@ import { hasColumn } from "@/db/schema-capabilities";
  * recalcula con esta. Las que siguen en 1 nunca pasaron por esa lógica y no
  * hace falta volver a pedirlas (ver pendingOrderIds).
  */
-export const ORDER_SYNC_VERSION = 4;
+export const ORDER_SYNC_VERSION = 5;
+/**
+ * v5: el envío de un carrito se reparte entre sus órdenes (antes cada una
+ * descontaba el envío entero). Solo hay que volver a pedir las órdenes de
+ * v1/v4 que tienen envío descontado; las demás no cambian.
+ */
+const ORDER_SYNC_VERSION_BEFORE_PACKS = 4;
 /** Versión de las órdenes procesadas con esta misma lógica antes del 26/9. */
 const ORDER_SYNC_VERSION_SAME_LOGIC = 1;
 
@@ -180,9 +186,13 @@ export async function pendingOrderIds(
   if (!(await hasColumn(db, "orders", "sync_version"))) return orderIds;
 
   const result = await db.query<{ id: string }>(
-    `SELECT id FROM orders
-      WHERE account_id = $1 AND id = ANY($2::text[]) AND (sync_version >= $3 OR sync_version = $4)`,
-    [accountId, orderIds, ORDER_SYNC_VERSION, ORDER_SYNC_VERSION_SAME_LOGIC]
+    `SELECT id FROM orders o
+      WHERE account_id = $1 AND id = ANY($2::text[])
+        AND (sync_version >= $3
+             OR (sync_version IN ($4, $5)
+                 AND NOT EXISTS (SELECT 1 FROM order_items oi
+                                  WHERE oi.account_id = o.account_id AND oi.order_id = o.id AND oi.shipping_cost > 0)))`,
+    [accountId, orderIds, ORDER_SYNC_VERSION, ORDER_SYNC_VERSION_SAME_LOGIC, ORDER_SYNC_VERSION_BEFORE_PACKS]
   );
   const upToDate = new Set(result.rows.map((r) => String(r.id)));
   return orderIds.filter((id) => !upToDate.has(id));
