@@ -60,6 +60,7 @@ export async function GET(request: NextRequest) {
               ${lowStockCol},
               ${costFxCol}
               (SELECT cost FROM product_costs pc WHERE pc.account_id = p.account_id AND pc.product_id = p.id ORDER BY pc.valid_from DESC LIMIT 1) as "currentCost",
+              (SELECT count(*)::int FROM product_costs pc WHERE pc.account_id = p.account_id AND pc.product_id = p.id) as "costEntries",
               (SELECT COALESCE(SUM(oi.quantity), 0) FROM order_items oi JOIN orders o ON o.account_id = oi.account_id AND o.id = oi.order_id
                 WHERE oi.account_id = p.account_id AND oi.product_id = p.id AND o.date_created::date BETWEEN $1::date AND $2::date
                   AND ${revenueStatusFilter()}) as "unitsSold",
@@ -156,9 +157,14 @@ export async function PATCH(request: NextRequest) {
   if (!account) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
 
   const body = await request.json().catch(() => ({}));
-  const { productId, cost, exchangeRate, costCurrency, lowStockThreshold } = body as {
+  const { productId, cost, exchangeRate, costCurrency, lowStockThreshold, replaceHistory } = body as {
     productId: string;
     cost?: number;
+    /** Corrige el costo de TODAS las ventas (borra el historial antes de
+     * guardar). Sin esto el costo nuevo vale desde hoy y las ventas
+     * anteriores siguen con el costo viejo: si el viejo estaba mal cargado,
+     * el margen nunca se corrige. */
+    replaceHistory?: boolean;
     /** TC vigente al momento de cargar el costo — para poder mostrarlo
      * también en dólares más adelante (ver migración 019). Opcional: sin él
      * el lado en dólares queda vacío hasta que se vuelva a guardar. */
@@ -203,6 +209,9 @@ export async function PATCH(request: NextRequest) {
 
     if (!hasCost) return { itemsUpdated: 0, thresholdError };
 
+    if (replaceHistory === true) {
+      await client.query(`DELETE FROM product_costs WHERE account_id = $1 AND product_id = $2`, [account.id, productId]);
+    }
     // Los impuestos ya no se guardan por producto: son una alícuota de la
     // cuenta (ver /api/account/settings). La columna `tax` queda en 0.
     if (await hasColumn(client, "product_costs", "exchange_rate")) {

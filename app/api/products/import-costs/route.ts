@@ -27,7 +27,10 @@ export async function POST(request: NextRequest) {
   const account = await resolveCurrentAccount();
   if (!account) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
 
-  const body = (await request.json().catch(() => ({}))) as { items?: unknown; validFrom?: unknown };
+  const body = (await request.json().catch(() => ({}))) as { items?: unknown; validFrom?: unknown; replaceHistory?: unknown };
+  // Corregir: el costo de la planilla reemplaza todo lo cargado antes y vale
+  // para todas las ventas (también las anteriores a validFrom).
+  const replaceHistory = body.replaceHistory === true;
   // Fecha desde la que vale el costo: la de la planilla (por ejemplo, la fecha
   // de corte del stock), así el historial de costos queda bien aunque se suba
   // una planilla vieja. Sin fecha, vale desde ahora.
@@ -62,14 +65,21 @@ export async function POST(request: NextRequest) {
     let missing = 0;
     let itemsUpdated = 0;
     for (const item of items) {
-      const current = await client.query<{ cost: number | null }>(
-        `SELECT (SELECT cost FROM product_costs pc WHERE pc.account_id = p.account_id AND pc.product_id = p.id ORDER BY pc.valid_from DESC LIMIT 1) as cost
+      const current = await client.query<{ cost: number | null; entries: number }>(
+        `SELECT (SELECT cost FROM product_costs pc WHERE pc.account_id = p.account_id AND pc.product_id = p.id ORDER BY pc.valid_from DESC LIMIT 1) as cost,
+                (SELECT count(*)::int FROM product_costs pc WHERE pc.account_id = p.account_id AND pc.product_id = p.id) as entries
            FROM products p WHERE p.account_id = $1 AND p.id = $2`,
         [account.id, item.productId]
       );
       if (current.rows.length === 0) { missing++; continue; }
       const currentCost = current.rows[0].cost;
-      if (currentCost !== null && currentCost !== undefined && Math.abs(Number(currentCost) - item.cost) < 0.005) { unchanged++; continue; }
+      const same = currentCost !== null && currentCost !== undefined && Math.abs(Number(currentCost) - item.cost) < 0.005;
+      // Al corregir, "igual" es que ya sea el único costo cargado: si hay uno viejo
+      // distinto en el historial, las ventas anteriores todavía lo usan.
+      if (same && (!replaceHistory || Number(current.rows[0].entries) === 1)) { unchanged++; continue; }
+      if (replaceHistory) {
+        await client.query(`DELETE FROM product_costs WHERE account_id = $1 AND product_id = $2`, [account.id, item.productId]);
+      }
       if (hasFx) {
         await client.query(
           `INSERT INTO product_costs (account_id, product_id, cost, valid_from, exchange_rate, cost_currency) VALUES ($1, $2, $3, $4, NULL, 'ARS')`,

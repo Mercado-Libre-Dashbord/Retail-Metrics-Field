@@ -35,6 +35,8 @@ export function ImportCosts({ products, onDone }: { products: ProductRef[]; onDo
   const [headerRow, setHeaderRow] = useState(0);
   const [cols, setCols] = useState<Cols>({ codeCol: -1, costCol: -1, eanCol: -1, nameCol: -1 });
   const [validFrom, setValidFrom] = useState(today());
+  // Por defecto la planilla corrige: el costo vale para todas las ventas.
+  const [replaceHistory, setReplaceHistory] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
@@ -139,7 +141,7 @@ export function ImportCosts({ products, onDone }: { products: ProductRef[]; onDo
         const res = await fetch("/api/products/import-costs", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ items: payload.slice(i, i + CHUNK), validFrom }),
+          body: JSON.stringify({ items: payload.slice(i, i + CHUNK), validFrom, replaceHistory }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error ?? `Error ${res.status}`);
@@ -209,10 +211,16 @@ export function ImportCosts({ products, onDone }: { products: ProductRef[]; onDo
             {colSelect("Código", "codeCol", true)}
             {colSelect("EAN", "eanCol", true)}
             {colSelect("Costo unitario", "costCol", false)}
-            <label className="field-hint" style={{ margin: 0 }}>
-              Costo vigente desde{" "}
-              <input type="date" value={validFrom} max={today()} onChange={(e) => setValidFrom(e.target.value || today())} style={{ padding: "4px 6px" }} />
+            <label className="field-hint" style={{ margin: 0, display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <input type="checkbox" checked={replaceHistory} onChange={(e) => setReplaceHistory(e.target.checked)} />
+              Corregir todas las ventas (reemplaza los costos cargados antes)
             </label>
+            {!replaceHistory && (
+              <label className="field-hint" style={{ margin: 0 }}>
+                Costo vigente desde{" "}
+                <input type="date" value={validFrom} max={today()} onChange={(e) => setValidFrom(e.target.value || today())} style={{ padding: "4px 6px" }} />
+              </label>
+            )}
           </div>
         )}
 

@@ -11,6 +11,8 @@ interface Product {
   currentPrice: number;
   stock: number;
   currentCost: number | null;
+  /** Cuántos costos tiene cargados en el historial (más de uno: las ventas viejas pueden usar otro). */
+  costEntries?: number;
   /** El mismo currentCost, convertido a dólares con el TC guardado junto al
    * costo (ver migración 019). Null si ese costo se cargó antes de que
    * existiera esto, o si nunca se cargó ningún costo. */
@@ -59,16 +61,42 @@ function NegativeMarginPanel({
   sameTitleCount,
   onShowBreakdown,
   onGoTo,
+  onFixed,
 }: {
   products: Product[];
   sameTitleCount: (p: Product) => number;
   onShowBreakdown: (p: Product) => void;
   onGoTo: (p: Product) => void;
+  onFixed: () => void;
 }) {
+  const [fixing, setFixing] = useState(false);
+  const [fixMsg, setFixMsg] = useState("");
   const losing = products
     .filter((p) => p.negativeMargin)
     .sort((a, b) => (a.avgProfitPerUnit ?? 0) - (b.avgProfitPerUnit ?? 0));
+  // Productos con un costo corregido encima de otro: sus ventas anteriores
+  // siguen calculadas con el costo viejo.
+  const stale = losing.filter((p) => (p.costEntries ?? 0) > 1);
   if (losing.length === 0) return null;
+
+  async function keepLatest() {
+    if (!window.confirm(`En ${stale.length} ${stale.length === 1 ? "producto" : "productos"} se borran los costos anteriores y el costo actual pasa a valer para todas sus ventas. ¿Seguimos?`)) return;
+    setFixing(true);
+    setFixMsg("");
+    try {
+      const res = await fetch("/api/products/keep-latest-cost", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ productIds: stale.map((p) => p.id) }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { setFixMsg(data.error ?? "No se pudo corregir."); return; }
+      setFixMsg(`Listo: ${data.products} ${data.products === 1 ? "producto corregido" : "productos corregidos"}, ${data.itemsUpdated} ventas recalculadas.`);
+      onFixed();
+    } finally {
+      setFixing(false);
+    }
+  }
   return (
     <div className="missing-cost-panel" role="status">
       <p className="missing-cost-head">
@@ -104,6 +132,17 @@ function NegativeMarginPanel({
         })}
       </ul>
       {losing.length > 10 && <p className="missing-cost-foot">Y {losing.length - 10} más.</p>}
+      {stale.length > 0 && (
+        <div className="missing-cost-foot" style={{ display: "flex", alignItems: "center", gap: "var(--space-3)", flexWrap: "wrap" }}>
+          <span>
+            <strong>{stale.length}</strong> de estos tienen un costo corregido, pero sus ventas anteriores siguen con el costo viejo.
+          </span>
+          <button type="button" className="btn btn-primary btn-sm" onClick={keepLatest} disabled={fixing}>
+            {fixing ? "Corrigiendo…" : "Usar el costo actual en todas las ventas"}
+          </button>
+        </div>
+      )}
+      {fixMsg && <p className="missing-cost-foot" role="status">{fixMsg}</p>}
     </div>
   );
 }
@@ -812,6 +851,8 @@ export default function ProductosPage() {
         cost: rawCost,
         exchangeRate: hasValidRate ? rate : null,
         costCurrency: lastEditedCurrency[productId] ?? "ARS",
+        // Editar el costo acá es corregirlo: vale para todas las ventas, no solo desde hoy.
+        replaceHistory: true,
       });
       if (!ok) {
         setErrors((prev) => ({ ...prev, [productId]: data.error ?? "No se pudo guardar el costo." }));
@@ -824,6 +865,7 @@ export default function ProductosPage() {
           cost: rawCost,
           exchangeRate: hasValidRate ? rate : null,
           costCurrency: lastEditedCurrency[productId] ?? "ARS",
+          replaceHistory: true,
         });
         if (!res.ok) {
           setErrors((prev) => ({
@@ -896,6 +938,7 @@ export default function ProductosPage() {
           sameTitleCount={(p) => twinsOf(p).length + 1}
           onShowBreakdown={showBreakdown}
           onGoTo={goToProduct}
+          onFixed={load}
         />
       )}
       <div ref={breakdownRef}>
