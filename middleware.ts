@@ -31,6 +31,8 @@ export default async function middleware(request: NextRequestWithAuth, event: Ne
 export const config = {
   // Sin login de la app (cada una se protege sola):
   // - api/auth, login, set-password: el propio login.
+  // - forgot-password, api/password-reset: pedir un link para cambiar la
+  //   contraseña (quien la olvidó no puede loguearse).
   // - api/ml: OAuth de Mercado Libre y su webhook.
   // - api/loyalty/members: la app de fidelización entra con su credencial
   //   (Bearer), no con sesión; la ruta valida la credencial o la sesión.
@@ -38,6 +40,6 @@ export const config = {
   //   su formulario (el GET/PATCH de solicitudes exige admin en la ruta).
   // - archivos estáticos de public/ (logo).
   matcher: [
-    "/((?!api/auth|api/ml|api/set-password|api/loyalty/members|api/trial-requests|login|set-password|inicio|privacidad|terminos|_next/static|favicon.ico|.*\\.(?:png|svg|jpg|jpeg|webp|ico)$).*)",
+    "/((?!api/auth|api/ml|api/set-password|api/password-reset|api/loyalty/members|api/trial-requests|login|set-password|forgot-password|inicio|privacidad|terminos|_next/static|favicon.ico|.*\\.(?:png|svg|jpg|jpeg|webp|ico)$).*)",
   ],
 };

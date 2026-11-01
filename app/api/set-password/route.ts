@@ -27,8 +27,8 @@ export async function POST(request: NextRequest) {
   const result = await withScope({ credentialInviteHash: tokenHash }, async (client) => {
     const invite = await getInviteByTokenHash(client, tokenHash);
     if (!invite) return { error: "El link de invitación no existe o ya no es válido." as const };
-    if (invite.usedAt) return { error: "Este link ya se usó. Pedile a tu administrador uno nuevo." as const };
-    if (new Date(invite.expiresAt) <= new Date()) return { error: "Este link venció. Pedile a tu administrador uno nuevo." as const };
+    if (invite.usedAt) return { error: "Este link ya se usó. Pedí uno nuevo desde '¿Olvidaste tu contraseña?' o pedíselo a tu administrador." as const };
+    if (new Date(invite.expiresAt) <= new Date()) return { error: "Este link venció. Pedí uno nuevo desde '¿Olvidaste tu contraseña?' o pedíselo a tu administrador." as const };
 
     const passwordHash = await hashPassword(password);
     const saved = await setCredentialPassword(client, invite.email, passwordHash);

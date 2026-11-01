@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { signIn } from "next-auth/react";
 import { LOCKOUT_MINUTES } from "@/lib/credentials-constants";
+import { PasswordInput } from "../PasswordInput";
 
 const FEATURES = [
   "Tu cuenta de Mercado Libre, aislada y segura",
@@ -118,13 +119,13 @@ export default function LoginPage() {
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 4, textAlign: "left" }}>
             <label htmlFor="cred-password" className="field-hint" style={{ margin: 0 }}>Contraseña</label>
-            <input
+            <PasswordInput
               id="cred-password"
-              type="password"
               autoComplete="current-password"
               value={credPassword}
-              onChange={(e) => { setCredPassword(e.target.value); if (credError) setCredError(""); }}
+              onChange={(v) => { setCredPassword(v); if (credError) setCredError(""); }}
             />
+            <a href="/forgot-password" className="login-link">¿Olvidaste tu contraseña?</a>
           </div>
           {credError && <p className="field-error" role="alert" style={{ textAlign: "left" }}>{credError}</p>}
           <button type="submit" className="btn btn-secondary" disabled={credLoading} aria-busy={credLoading || undefined}>

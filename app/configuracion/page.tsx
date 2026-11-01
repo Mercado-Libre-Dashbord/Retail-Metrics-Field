@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { NoAccountState } from "../NoAccountState";
 import { IvaPaid } from "./IvaPaid";
 import { AnswerInfo } from "./AnswerInfo";
+import { ChangePassword } from "./ChangePassword";
 
 type TaxCondition = "responsable_inscripto" | "monotributo" | "exento";
 
@@ -175,6 +176,8 @@ export default function ConfiguracionPage() {
       )}
 
       <AnswerInfo />
+
+      <ChangePassword />
     </div>
   );
 }

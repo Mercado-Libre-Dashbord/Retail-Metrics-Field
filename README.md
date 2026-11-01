@@ -47,6 +47,9 @@ cuenta (ver "Seguridad" más abajo).
      sirve cambiando `AI_BASE_URL` y `AI_MODEL` (por ejemplo, el plan gratuito
      de Gemini: `https://generativelanguage.googleapis.com/v1beta/openai`).
      Sin clave se usan los borradores por palabras clave.
+   - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` (opcional):
+     mails de "¿Olvidaste tu contraseña?". Gratis con Gmail y una contraseña de
+     aplicación (`smtp.gmail.com`, puerto 465). Requiere la migración 026.
 4. `npm run dev`
 5. Entrá a `http://localhost:3000`, iniciá sesión con Google.
 6. Si sos admin: andá a `/admin` y creá una cuenta por cada cliente (nombre +

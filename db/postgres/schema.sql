@@ -514,6 +514,33 @@ ALTER TABLE question_drafts ADD COLUMN IF NOT EXISTS draft_source TEXT NOT NULL 
 ALTER TABLE question_drafts ADD COLUMN IF NOT EXISTS ai_confident BOOLEAN;
 ALTER TABLE question_drafts ADD COLUMN IF NOT EXISTS ai_missing TEXT;
 
+-- ── Recuperar contraseña por email (ver migración 026) ──────────────────
+CREATE OR REPLACE FUNCTION credential_request_reset(p_email TEXT, p_token_hash TEXT, p_minutes INTEGER, p_max_per_hour INTEGER)
+RETURNS BOOLEAN AS $$
+DECLARE
+  v_email TEXT := lower(trim(p_email));
+BEGIN
+  IF v_email = '' OR p_token_hash IS NULL OR length(p_token_hash) < 32 THEN
+    RETURN false;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM credential_users WHERE email = v_email)
+     AND NOT EXISTS (SELECT 1 FROM accounts WHERE lower(owner_email) = v_email) THEN
+    RETURN false;
+  END IF;
+  IF (SELECT count(*) FROM credential_invites
+       WHERE email = v_email AND created_at > now() - interval '1 hour') >= p_max_per_hour THEN
+    RETURN false;
+  END IF;
+  INSERT INTO credential_invites (token_hash, email, expires_at)
+  VALUES (p_token_hash, v_email, now() + make_interval(mins => p_minutes));
+  RETURN true;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+REVOKE EXECUTE ON FUNCTION credential_request_reset(text, text, integer, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION credential_request_reset(text, text, integer, integer) TO app_user;
+
+
 -- ── Grants ───────────────────────────────────────────────────────────────
 GRANT EXECUTE ON FUNCTION app_current_account_id(), app_is_admin(), app_current_user_email(), app_current_loyalty_key_hash(), app_credential_lookup_email(), app_current_credential_invite_hash() TO app_user;
 -- Solo app_user: con EXECUTE para PUBLIC (el default de Postgres) cualquiera

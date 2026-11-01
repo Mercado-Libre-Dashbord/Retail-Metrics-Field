@@ -1481,3 +1481,20 @@ details.disclosure > .disclosure-body { border-top: 1px solid var(--border-soft)
 .per100 li.lead .per100-value { font-size: 18px; }
 .link-btn-quiet { font-size: 12px; font-weight: 500; color: var(--text-dim); }
 .link-btn-quiet:hover { color: var(--negative); }
+
+/* Campo de contraseña con el botón para mostrarla. */
+.password-field { position: relative; display: flex; }
+.password-field input { flex: 1; min-width: 0; padding-right: 48px; }
+.password-toggle {
+  position: absolute; top: 50%; right: 0; transform: translateY(-50%);
+  width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center;
+  background: none; border: 0; padding: 0; cursor: pointer; color: var(--text-dim); border-radius: var(--radius-sm);
+}
+.password-toggle:hover { color: var(--text); }
+.password-toggle:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -4px; }
+.login-link { align-self: flex-end; font-size: 13px; color: var(--accent); text-decoration: none; }
+.login-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+@media (max-width: 640px) {
+  /* 16px: con menos, el iPhone hace zoom al tocar el campo. */
+  .password-field input, .login-card input[type="email"] { font-size: 16px; }
+}

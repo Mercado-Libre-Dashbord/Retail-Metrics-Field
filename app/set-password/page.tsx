@@ -4,9 +4,13 @@ import { Suspense, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { signIn } from "next-auth/react";
 import { MIN_PASSWORD_LENGTH } from "@/lib/credentials-constants";
+import { PasswordInput } from "../PasswordInput";
 
 function SetPasswordForm() {
-  const token = useSearchParams().get("token") ?? "";
+  const params = useSearchParams();
+  const token = params.get("token") ?? "";
+  // Llegó por "Olvidé mi contraseña" (no por una invitación del admin).
+  const isReset = params.get("reset") === "1";
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState("");
@@ -52,38 +56,42 @@ function SetPasswordForm() {
     return (
       <div className="login-card">
         <h1 className="login-title">Link inválido</h1>
-        <p className="login-subtitle">Este link no trae la invitación. Pedile a tu administrador uno nuevo.</p>
+        <p className="login-subtitle">
+          Este link no está completo. <a href="/forgot-password" className="login-link">Pedí uno nuevo</a>.
+        </p>
       </div>
     );
   }
 
   return (
     <div className="login-card">
-      <h1 className="login-title">Elegí tu contraseña</h1>
+      <h1 className="login-title">{isReset ? "Elegí tu contraseña nueva" : "Elegí tu contraseña"}</h1>
       <p className="login-subtitle">Vas a usarla para entrar a partir de ahora, junto con tu email.</p>
 
       <form onSubmit={handleSubmit} noValidate style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)", width: "100%" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 4, textAlign: "left" }}>
           <label htmlFor="new-password" className="field-hint" style={{ margin: 0 }}>Contraseña nueva</label>
-          <input
+          <PasswordInput
             id="new-password"
-            type="password"
             autoComplete="new-password"
             value={password}
-            onChange={(e) => { setPassword(e.target.value); if (error) setError(""); }}
+            onChange={(v) => { setPassword(v); if (error) setError(""); }}
           />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 4, textAlign: "left" }}>
           <label htmlFor="confirm-password" className="field-hint" style={{ margin: 0 }}>Repetila</label>
-          <input
+          <PasswordInput
             id="confirm-password"
-            type="password"
             autoComplete="new-password"
             value={confirm}
-            onChange={(e) => { setConfirm(e.target.value); if (error) setError(""); }}
+            onChange={(v) => { setConfirm(v); if (error) setError(""); }}
           />
         </div>
-        {error && <p className="field-error" role="alert" style={{ textAlign: "left" }}>{error}</p>}
+        {error && (
+          <p className="field-error" role="alert" style={{ textAlign: "left" }}>
+            {error} {isReset && <a href="/forgot-password" className="login-link">Pedir un link nuevo</a>}
+          </p>
+        )}
         {done && !error && (
           <p className="success-text" role="status" style={{ textAlign: "left" }}>Contraseña guardada. Entrando…</p>
         )}
