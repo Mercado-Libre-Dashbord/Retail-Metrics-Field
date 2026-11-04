@@ -558,7 +558,7 @@ tbody tr:hover { background: var(--bg); }
 .chart-split-even > .chart-card > .donut-wrap { flex: 1 1 auto; display: flex; flex-direction: column; justify-content: center; }
 .chart-split-even > .chart-card > .top-products { flex: 1 1 auto; }
 @media (max-width: 900px) {
-  .chart-split, .chart-split-even { grid-template-columns: 1fr; }
+  .chart-split, .chart-split-even { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* Lista de productos más vendidos: foto, nombre, y a la derecha el estado de
