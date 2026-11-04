@@ -13,7 +13,7 @@ código vive en `mcp/tools.ts`.
 
 | Dato | Endpoint | Qué nos da | Notas |
 |---|---|---|---|
-| Publicaciones | `/users/{id}/items/search` + `/items?ids=` | Título, SKU, precio, stock, permalink, categoría, foto | Trae activas, pausadas y cerradas. Se piden de a 20 ids por llamada. |
+| Publicaciones | `/users/{id}/items/search` + `/items/{id}` | Título, SKU, precio, stock, permalink, categoría, foto | Trae activas, pausadas y cerradas. Se pide cada publicación por separado, de a 10 en simultáneo: ML dio de baja `/items?ids=` para esta app (403 "Resource deprecated"). |
 | Nombre de categoría | `/categories/{id}` | El nombre legible | `/items` solo devuelve el id. Cada categoría se resuelve una sola vez. |
 | Órdenes | `/orders/search` | Ids de órdenes desde una fecha | **Paginado.** Sin paginar, una sincronización histórica se cortaba en silencio a las 50 órdenes. |
 | Detalle de orden | `/orders/{id}` | Líneas, precio unitario, cantidad, comisión de ML, estado, total del comprador | |
