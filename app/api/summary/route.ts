@@ -79,6 +79,68 @@ async function refundsFor(
   return { orders: Number(row.orders ?? 0), amount: Number(row.amount ?? 0) };
 }
 
+
+/**
+ * Desglose de la facturación de un rango: a dónde fue cada peso facturado.
+ *
+ * Los componentes salen solo de las ventas con costo cargado; lo facturado
+ * por ventas sin costo va en su propia línea ("sin costo cargado"). Así la
+ * suma de todas las partes da exactamente la facturación:
+ *
+ *   facturación = costo + comisión + envío + (IVA − IVA a favor) + otros
+ *                 impuestos + publicidad + Full + otros cargos de ML
+ *                 + ventas sin costo + ganancia neta
+ */
+async function breakdownFor(client: QueryExecutor, accountId: string, from: string, to: string, withIva: boolean) {
+  const taxSum = (await hasColumn(client, "order_items", "tax_applied")) ? "oi.tax_applied * oi.quantity" : "0";
+  const ivaSum = (await hasColumn(client, "order_items", "iva_applied")) ? "oi.iva_applied" : "0";
+  const withCost = "oi.cost_applied IS NOT NULL AND oi.net_profit IS NOT NULL";
+  const result = await client.query(
+    `SELECT COUNT(DISTINCT o.id) as orders,
+            COALESCE(SUM(oi.unit_price * oi.quantity), 0) as revenue,
+            COALESCE(SUM(CASE WHEN ${withCost} THEN oi.cost_applied * oi.quantity END), 0) as cost,
+            COALESCE(SUM(CASE WHEN ${withCost} THEN oi.ml_commission END), 0) as commission,
+            COALESCE(SUM(CASE WHEN ${withCost} THEN oi.shipping_cost END), 0) as shipping,
+            COALESCE(SUM(CASE WHEN ${withCost} THEN ${ivaSum} END), 0) as iva,
+            COALESCE(SUM(CASE WHEN ${withCost} THEN ${taxSum} END), 0) as tax,
+            COALESCE(SUM(CASE WHEN ${withCost} THEN oi.ads_cost_allocated END), 0) as ads,
+            COALESCE(SUM(CASE WHEN ${withCost} THEN oi.net_profit END), 0) as "salesProfit",
+            COALESCE(SUM(CASE WHEN NOT (${withCost}) THEN oi.unit_price * oi.quantity END), 0) as "missingCost"
+       FROM order_items oi
+       JOIN orders o ON o.account_id = oi.account_id AND o.id = oi.order_id
+      WHERE oi.account_id = $1 AND o.date_created::date BETWEEN $2::date AND $3::date
+        AND ${revenueStatusFilter()}`,
+    [accountId, from, to]
+  );
+  const r = result.rows[0] as Record<string, string | number>;
+  const n = (k: string) => Number(r[k] ?? 0);
+  const adj = await periodAdjustments(client, accountId, from, to, withIva);
+  const refunds = await refundsFor(client, accountId, from, to);
+  const salesProfit = n("salesProfit");
+  // Lo que la venta no explica (redondeos, ventas viejas sin recalcular) se
+  // suma a "sin costo cargado" para que las partes cierren con la facturación.
+  const explained = n("cost") + n("commission") + n("shipping") + n("iva") + n("tax") + n("ads") + salesProfit + n("missingCost");
+  return {
+    orders: n("orders"),
+    revenue: n("revenue"),
+    cost: n("cost"),
+    commission: n("commission"),
+    shipping: n("shipping"),
+    iva: n("iva"),
+    tax: n("tax"),
+    adsInSales: n("ads"),
+    adsNotInSales: adj.adsNotInSales,
+    full: adj.full,
+    otherCharges: adj.otherCharges,
+    ivaCredit: adj.ivaCredit,
+    missingCost: n("missingCost") + (n("revenue") - explained),
+    salesProfit,
+    netProfit: salesProfit + adj.total,
+    refundOrders: refunds.orders,
+    refundAmount: refunds.amount,
+  };
+}
+
 export async function GET(request: NextRequest) {
   const account = await resolveCurrentAccount();
   if (!account) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
@@ -138,6 +200,54 @@ export async function GET(request: NextRequest) {
       return result.rows;
     });
     return NextResponse.json(rows);
+  }
+
+
+  if (groupBy === "breakdown") {
+    const data = await withScope({ accountId: account.id }, async (client) => {
+      const withIva = appliesIva(account.taxCondition);
+      const ivaExpr = (await hasColumn(client, "order_items", "iva_applied")) ? "oi.iva_applied" : "0";
+      const taxExpr = (await hasColumn(client, "order_items", "tax_applied")) ? "oi.tax_applied * oi.quantity" : "0";
+      const withCost = "oi.cost_applied IS NOT NULL AND oi.net_profit IS NOT NULL";
+      // Por día: las mismas partes que el total, más lo que se cayó por
+      // cancelaciones (que no suma a la facturación, por eso va aparte).
+      const days = await client.query(
+        `SELECT to_char(o.date_created, 'YYYY-MM-DD') as day,
+                COALESCE(SUM(CASE WHEN ${revenueStatusFilter()} THEN oi.unit_price * oi.quantity END), 0) as revenue,
+                COALESCE(SUM(CASE WHEN ${revenueStatusFilter()} AND ${withCost} THEN oi.cost_applied * oi.quantity END), 0) as cost,
+                COALESCE(SUM(CASE WHEN ${revenueStatusFilter()} AND ${withCost} THEN oi.ml_commission END), 0) as commission,
+                COALESCE(SUM(CASE WHEN ${revenueStatusFilter()} AND ${withCost} THEN oi.shipping_cost END), 0) as shipping,
+                COALESCE(SUM(CASE WHEN ${revenueStatusFilter()} AND ${withCost} THEN ${ivaExpr} + ${taxExpr} END), 0) as taxes,
+                COALESCE(SUM(CASE WHEN ${revenueStatusFilter()} AND ${withCost} THEN oi.ads_cost_allocated END), 0) as ads,
+                COALESCE(SUM(CASE WHEN ${revenueStatusFilter()} AND ${withCost} THEN oi.net_profit END), 0) as profit,
+                COALESCE(SUM(CASE WHEN ${revenueStatusFilter()} AND NOT (${withCost}) THEN oi.unit_price * oi.quantity END), 0) as "missingCost",
+                COALESCE(SUM(CASE WHEN NOT (${revenueStatusFilter()}) THEN oi.unit_price * oi.quantity END), 0) as refunds
+           FROM order_items oi JOIN orders o ON o.account_id = oi.account_id AND o.id = oi.order_id
+          WHERE oi.account_id = $1 AND o.date_created::date BETWEEN $2::date AND $3::date
+          GROUP BY day ORDER BY day`,
+        [account.id, from, to]
+      );
+      const current = await breakdownFor(client, account.id, from, to, withIva);
+      const prevRange = previousRange(from, to);
+      const previous = prevRange ? await breakdownFor(client, account.id, prevRange.from, prevRange.to, withIva) : null;
+      return {
+        current,
+        previous,
+        days: days.rows.map((d: Record<string, string | number>) => ({
+          day: String(d.day),
+          revenue: Number(d.revenue),
+          cost: Number(d.cost),
+          commission: Number(d.commission),
+          shipping: Number(d.shipping),
+          taxes: Number(d.taxes),
+          ads: Number(d.ads),
+          profit: Number(d.profit),
+          missingCost: Number(d.missingCost),
+          refunds: Number(d.refunds),
+        })),
+      };
+    });
+    return NextResponse.json(data);
   }
 
   if (groupBy === "trend") {

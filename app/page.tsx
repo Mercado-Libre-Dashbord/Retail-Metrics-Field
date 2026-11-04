@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useState, type ReactNode } from "react";
 import {
   XAxis, YAxis, Tooltip, Legend, CartesianGrid, ResponsiveContainer,
-  PieChart, Pie, Cell, AreaChart, Area,
+  PieChart, Pie, Cell, AreaChart, Area, BarChart, Bar, ReferenceLine,
 } from "recharts";
 import { SyncButton } from "./SyncButton";
 import { NoAccountState } from "./NoAccountState";
@@ -317,6 +317,269 @@ function DeltaPill({ current, previous }: { current: number; previous: number | 
  * lo que se resta del período porque no es de ninguna venta. Existe para que
  * el número de la tarjeta se pueda verificar, no solo creer.
  */
+interface BreakdownTotals {
+  orders: number;
+  revenue: number;
+  cost: number;
+  commission: number;
+  shipping: number;
+  iva: number;
+  tax: number;
+  adsInSales: number;
+  adsNotInSales: number;
+  full: number;
+  otherCharges: number;
+  ivaCredit: number;
+  missingCost: number;
+  salesProfit: number;
+  netProfit: number;
+  refundOrders: number;
+  refundAmount: number;
+}
+
+interface BreakdownDay {
+  day: string;
+  revenue: number;
+  cost: number;
+  commission: number;
+  shipping: number;
+  taxes: number;
+  ads: number;
+  profit: number;
+  missingCost: number;
+  refunds: number;
+}
+
+interface BreakdownResponse {
+  current: BreakdownTotals;
+  previous: BreakdownTotals | null;
+  days: BreakdownDay[];
+}
+
+/** Las franjas del gráfico, de abajo hacia arriba. La ganancia va abajo, pegada al eje. */
+const BREAKDOWN_SERIES: { key: keyof BreakdownDay; name: string; color: string }[] = [
+  { key: "profit", name: "Ganancia de la venta", color: "var(--positive-fill)" },
+  { key: "cost", name: "Costo de producto", color: "var(--chart-cost)" },
+  { key: "commission", name: "Comisión ML", color: "var(--chart-commission)" },
+  { key: "shipping", name: "Envío", color: "var(--chart-shipping)" },
+  { key: "taxes", name: "IVA e impuestos", color: "var(--chart-iva)" },
+  { key: "ads", name: "Publicidad", color: "var(--chart-ads)" },
+  { key: "missingCost", name: "Sin costo cargado", color: "var(--ramp-6)" },
+  { key: "refunds", name: "Cancelado / devuelto", color: "var(--negative-line)" },
+];
+
+/**
+ * Con muchos días las barras se vuelven pelusa: más de dos meses se agrupa
+ * por semana y más de un año por mes. Mismas partes, sumadas.
+ */
+function groupBreakdownDays(days: BreakdownDay[]): { label: string; rows: BreakdownDay[]; unit: string } {
+  const keyOf =
+    days.length > 400 ? (d: string) => d.slice(0, 7) :
+    days.length > 62 ? (d: string) => {
+      const dt = new Date(`${d}T00:00:00Z`);
+      const monday = new Date(dt.getTime() - ((dt.getUTCDay() + 6) % 7) * 86400000);
+      return monday.toISOString().slice(0, 10);
+    } : (d: string) => d;
+  const unit = days.length > 400 ? "mes" : days.length > 62 ? "semana" : "día";
+  const map = new Map<string, BreakdownDay>();
+  for (const d of days) {
+    const k = keyOf(d.day);
+    const acc = map.get(k) ?? { day: k, revenue: 0, cost: 0, commission: 0, shipping: 0, taxes: 0, ads: 0, profit: 0, missingCost: 0, refunds: 0 };
+    for (const s of BREAKDOWN_SERIES) (acc[s.key] as number) += d[s.key] as number;
+    acc.revenue += d.revenue;
+    map.set(k, acc);
+  }
+  const rows = [...map.values()].sort((a, b) => a.day.localeCompare(b.day)).map((r) => ({ ...r, refunds: -r.refunds }));
+  return { label: unit === "día" ? "por día" : `por ${unit}`, rows, unit };
+}
+
+function shortDay(d: string) {
+  if (d.length === 7) {
+    const [y, m] = d.split("-");
+    return `${["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"][Number(m) - 1]} ${y.slice(2)}`;
+  }
+  const [, m, day] = d.split("-");
+  return `${Number(day)}/${Number(m)}`;
+}
+
+function BreakdownTooltip({ active, payload, label }: any) {
+  if (!active || !payload || payload.length === 0) return null;
+  const row = payload[0]?.payload as BreakdownDay | undefined;
+  if (!row) return null;
+  return (
+    <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 12px", fontSize: 12, minWidth: 230 }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>{shortDay(String(label))}</div>
+      {[...BREAKDOWN_SERIES].reverse().map((s) => {
+        const v = Math.abs(row[s.key] as number);
+        if (v < 0.5) return null;
+        return (
+          <div key={s.key} style={{ display: "flex", justifyContent: "space-between", gap: 16, padding: "2px 0" }}>
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: 2, background: s.color }} />
+              {s.name}
+            </span>
+            <span style={{ color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>
+              {fmt(v)}{s.key !== "refunds" && row.revenue > 0 ? ` · ${((v / row.revenue) * 100).toFixed(0)}%` : ""}
+            </span>
+          </div>
+        );
+      })}
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 16, marginTop: 6, paddingTop: 6, borderTop: "1px solid var(--border)", fontWeight: 600 }}>
+        <span>Facturado</span><span>{fmt(row.revenue)}</span>
+      </div>
+    </div>
+  );
+}
+
+/** Cambio contra el período anterior. Para un costo, subir es malo; para la plata que entra o queda, es bueno. */
+function ChangeCell({ now, prev, goodWhenUp }: { now: number; prev: number | undefined; goodWhenUp: boolean }) {
+  if (prev === undefined) return <span className="field-hint" style={{ margin: 0 }}>—</span>;
+  if (Math.abs(prev) < 1) return <span className="field-hint" style={{ margin: 0 }}>{Math.abs(now) < 1 ? "—" : "nuevo"}</span>;
+  const change = (now - prev) / Math.abs(prev);
+  if (Math.abs(change) < 0.005) return <span className="field-hint" style={{ margin: 0 }}>=</span>;
+  const up = change > 0;
+  const good = up === goodWhenUp;
+  return (
+    <span style={{ color: good ? "var(--positive)" : "var(--negative)", fontWeight: 600, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>
+      {up ? "↑" : "↓"} {Math.abs(change * 100).toLocaleString("es-AR", { maximumFractionDigits: 0 })}%
+    </span>
+  );
+}
+
+/**
+ * Desglose de la facturación: un gráfico de barras apiladas con a dónde fue
+ * cada peso facturado, y la tabla con cada parte, su peso sobre lo facturado
+ * y cómo cambió contra el período anterior. Va antes de "Cómo se calcula tu
+ * ganancia neta": primero el panorama, después la cuenta paso a paso.
+ */
+function RevenueBreakdownPanel({ data }: { data: BreakdownResponse }) {
+  const c = data.current;
+  const p = data.previous;
+  if (c.revenue <= 0 && c.refundAmount <= 0) return null;
+  const grouped = groupBreakdownDays(data.days);
+  const share = (v: number) => (c.revenue > 0 ? `${((v / c.revenue) * 100).toLocaleString("es-AR", { maximumFractionDigits: 1 })}%` : "—");
+  const ads = (t: BreakdownTotals) => t.adsInSales + t.adsNotInSales;
+  const taxes = (t: BreakdownTotals) => t.iva - t.ivaCredit + t.tax;
+  const costsTotal = (t: BreakdownTotals) => t.revenue - t.netProfit - t.missingCost;
+
+  const rows: { label: string; hint?: string; color: string; now: number; prev?: number; strong?: boolean }[] = [
+    { label: "Costo de producto", color: "var(--chart-cost)", now: c.cost, prev: p?.cost },
+    { label: "Comisión de Mercado Libre", color: "var(--chart-commission)", now: c.commission, prev: p?.commission },
+    { label: "Envío a tu cargo", color: "var(--chart-shipping)", now: c.shipping, prev: p?.shipping },
+    { label: "IVA", hint: c.ivaCredit > 0 ? `Neto de ${fmt(c.ivaCredit)} de IVA a favor por cargos de ML` : undefined, color: "var(--chart-iva)", now: c.iva - c.ivaCredit, prev: p ? p.iva - p.ivaCredit : undefined },
+    { label: "Otros impuestos", hint: "Ingresos Brutos y lo que cargaste como % en Configuración", color: "var(--chart-iva)", now: c.tax, prev: p?.tax },
+    { label: "Publicidad", hint: `Mercado Ads${c.adsNotInSales > 0 ? " + Meta, Google o TikTok cargados a mano" : ""}`, color: "var(--chart-ads)", now: ads(c), prev: p ? ads(p) : undefined },
+    { label: "Mercado Envíos Full", hint: "Almacenamiento y retiros, de tu factura de ML", color: "var(--ramp-3)", now: c.full, prev: p?.full },
+    { label: "Otros cargos de Mercado Libre", hint: "Cargos de la factura que no son de una venta", color: "var(--ramp-5)", now: c.otherCharges, prev: p?.otherCharges },
+    { label: "Ventas sin costo cargado", hint: "Quedan fuera de la ganancia hasta que cargues el costo", color: "var(--ramp-6)", now: c.missingCost, prev: p?.missingCost },
+  ];
+  const visibleRows = rows.filter((r) => Math.abs(r.now) >= 0.5 || Math.abs(r.prev ?? 0) >= 0.5);
+
+  return (
+    <section className="chart-card breakdown-card" aria-labelledby="breakdown-title">
+      <div className="chart-card-head">
+        <h3 className="chart-card-title" id="breakdown-title">Desglose de tu facturación</h3>
+        <span className="field-hint" style={{ margin: 0 }}>A dónde fue cada peso que facturaste, {grouped.label}</span>
+      </div>
+
+      <div className="breakdown-strip">
+        <div>
+          <span className="label">Facturación</span>
+          <strong>{fmt(c.revenue)}</strong>
+          <ChangeCell now={c.revenue} prev={p?.revenue} goodWhenUp />
+        </div>
+        <div>
+          <span className="label">Costos, cargos e impuestos</span>
+          <strong>{fmt(costsTotal(c))}</strong>
+          <span className="field-hint" style={{ margin: 0 }}>{share(costsTotal(c))} de lo facturado</span>
+        </div>
+        <div>
+          <span className="label">Ganancia neta</span>
+          <strong style={{ color: c.netProfit >= 0 ? "var(--positive)" : "var(--negative)" }}>{fmt(c.netProfit)}</strong>
+          <ChangeCell now={c.netProfit} prev={p?.netProfit} goodWhenUp />
+        </div>
+        <div>
+          <span className="label">Cancelado / devuelto</span>
+          <strong>{fmt(c.refundAmount)}</strong>
+          <span className="field-hint" style={{ margin: 0 }}>{c.refundOrders} orden(es) · no suma a la facturación</span>
+        </div>
+      </div>
+
+      <ResponsiveContainer width="100%" height={320}>
+        <BarChart data={grouped.rows} stackOffset="sign" margin={{ top: 8, right: 8, left: 8, bottom: 0 }} barCategoryGap="18%">
+          <CartesianGrid stroke="var(--border)" vertical={false} />
+          <XAxis dataKey="day" tickFormatter={shortDay} tick={{ fontSize: 11, fill: "var(--text-dim)" }} tickLine={false} axisLine={false} minTickGap={12} />
+          <YAxis tick={{ fontSize: 11, fill: "var(--text-dim)" }} tickLine={false} axisLine={false} width={84} tickFormatter={(v) => fmt(Number(v))} />
+          <ReferenceLine y={0} stroke="var(--text-dim)" />
+          <Tooltip content={<BreakdownTooltip />} labelFormatter={shortDay} cursor={{ fill: "var(--border)", opacity: 0.4 }} />
+          <Legend wrapperStyle={{ fontSize: 12, paddingTop: 8 }} iconType="square" formatter={(v) => <span style={{ color: "var(--text)" }}>{v}</span>} />
+          {BREAKDOWN_SERIES.filter((s) => grouped.rows.some((r) => Math.abs(r[s.key] as number) >= 0.5)).map((s) => (
+            <Bar key={s.key} dataKey={s.key} name={s.name} stackId="f" fill={s.color} isAnimationActive={false} />
+          ))}
+        </BarChart>
+      </ResponsiveContainer>
+      <p className="field-hint" style={{ marginTop: "var(--space-2)" }}>
+        La altura de cada barra es lo que facturaste; la franja verde de abajo, lo que dejó la venta. Lo cancelado o devuelto va por debajo de cero.
+        Full, otros cargos de ML y la publicidad que no cae en ninguna venta se cobran por período: están en la tabla, no en las barras.
+      </p>
+
+      <div className="table-wrap" style={{ marginTop: "var(--space-3)" }}>
+        <table className="breakdown-table">
+          <thead>
+            <tr>
+              <th>Concepto</th>
+              <th className="num">Monto</th>
+              <th className="num">% de lo facturado</th>
+              <th className="num">Período anterior</th>
+              <th className="num">Cambio</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Facturación</strong></td>
+              <td className="num"><strong>{fmt(c.revenue)}</strong></td>
+              <td className="num">100%</td>
+              <td className="num">{p ? fmt(p.revenue) : "—"}</td>
+              <td className="num"><ChangeCell now={c.revenue} prev={p?.revenue} goodWhenUp /></td>
+            </tr>
+            {visibleRows.map((r) => (
+              <tr key={r.label}>
+                <td>
+                  <span className="breakdown-dot" style={{ background: r.color }} aria-hidden="true" />
+                  − {r.label}
+                  {r.hint && <div className="field-hint" style={{ margin: "0 0 0 18px" }}>{r.hint}</div>}
+                </td>
+                <td className="num">{fmt(-r.now)}</td>
+                <td className="num">{share(r.now)}</td>
+                <td className="num">{r.prev === undefined ? "—" : fmt(-r.prev)}</td>
+                <td className="num"><ChangeCell now={r.now} prev={r.prev} goodWhenUp={false} /></td>
+              </tr>
+            ))}
+            <tr>
+              <td style={{ fontWeight: 700 }}><span className="breakdown-dot" style={{ background: "var(--positive-fill)" }} aria-hidden="true" />= Ganancia neta</td>
+              <td className="num" style={{ fontWeight: 700, color: c.netProfit >= 0 ? "var(--positive)" : "var(--negative)" }}>{fmt(c.netProfit)}</td>
+              <td className="num" style={{ fontWeight: 700 }}>{share(c.netProfit)}</td>
+              <td className="num">{p ? fmt(p.netProfit) : "—"}</td>
+              <td className="num"><ChangeCell now={c.netProfit} prev={p?.netProfit} goodWhenUp /></td>
+            </tr>
+            <tr>
+              <td>
+                <span className="breakdown-dot" style={{ background: "var(--negative-line)" }} aria-hidden="true" />
+                Cancelado / devuelto
+                <div className="field-hint" style={{ margin: "0 0 0 18px" }}>{c.refundOrders} orden(es). Aparte: no suma a la facturación ni a la ganancia</div>
+              </td>
+              <td className="num">{fmt(c.refundAmount)}</td>
+              <td className="num">{c.revenue > 0 ? share(c.refundAmount) : "—"}</td>
+              <td className="num">{p ? fmt(p.refundAmount) : "—"}</td>
+              <td className="num"><ChangeCell now={c.refundAmount} prev={p?.refundAmount} goodWhenUp={false} /></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 function NetProfitBreakdown({ salesProfit, adj, netProfit }: { salesProfit: number; adj: Adjustments; netProfit: number }) {
   const rows: { label: string; hint: string; value: number; sign: "−" | "+" }[] = [
     {
@@ -1061,6 +1324,7 @@ export default function HomePage() {
   const [daily, setDaily] = useState<DailyBreakdown[] | null>(null);
   const [products, setProducts] = useState<ProductRow[] | null>(null);
   const [billing, setBilling] = useState<Billing | null>(null);
+  const [breakdown, setBreakdown] = useState<BreakdownResponse | null>(null);
   const [period, setPeriod] = useState<Period>("hoy");
   const [customFrom, setCustomFrom] = useState(toDateStr(new Date()));
   const [customTo, setCustomTo] = useState(toDateStr(new Date()));
@@ -1117,6 +1381,7 @@ export default function HomePage() {
     safeFetch<OrderSummaryRow[]>(`/api/orders?groupBy=order&from=${from}&to=${to}`, setOrders, []);
     safeFetch<ProductRow[]>(`/api/products?from=${from}&to=${to}`, setProducts, []);
     safeFetch<Billing | null>(`/api/billing?from=${from}&to=${to}`, setBilling, null);
+    safeFetch<BreakdownResponse | null>(`/api/summary?groupBy=breakdown&from=${from}&to=${to}`, setBreakdown, null);
   }
 
   useEffect(loadAll, [from, to]);
@@ -1246,6 +1511,8 @@ export default function HomePage() {
           products={summary.productsMissingCost ?? []}
         />
       )}
+
+      {breakdown && <RevenueBreakdownPanel data={breakdown} />}
 
       {summary?.adjustments && summary.salesProfit !== undefined && (
         <NetProfitBreakdown salesProfit={summary.salesProfit} adj={summary.adjustments} netProfit={summary.netProfit} />

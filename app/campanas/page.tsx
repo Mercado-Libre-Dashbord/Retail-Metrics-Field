@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import {
-  ResponsiveContainer, AreaChart, Area, ComposedChart, Bar, Line,
+  ResponsiveContainer, AreaChart, Area, ComposedChart, Bar, Line, BarChart, Cell, ReferenceLine,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
 } from "recharts";
 import { NoAccountState } from "../NoAccountState";
@@ -445,6 +445,119 @@ function AdvicePanel({ report }: { report: AdsReportResponse | null }) {
 }
 
 
+function shortTitle(t: string, n = 26) {
+  return t.length > n ? `${t.slice(0, n - 1)}…` : t;
+}
+
+/**
+ * Lo que hay que mirar para decidir, en dos gráficos:
+ * - Cuánta ganancia dejó (o se comió) la publicidad de cada producto, de la
+ *   que más deja a la que más pierde.
+ * - El ACOS real contra el margen que aguanta: si la barra del ACOS pasa a la
+ *   del margen, cada venta por publicidad pierde plata.
+ * Arriba, la plata invertida separada en la que deja ganancia y la que no.
+ */
+function AdsDecisionCharts({ report }: { report: AdsReportResponse | null }) {
+  if (!report || report.error || !report.available || !report.totals) return null;
+  const rows = report.products.filter((p) => p.spend > 0 && p.adsProfit !== null);
+  if (rows.length === 0) return null;
+  const byProfit = [...rows].sort((a, b) => (b.adsProfit ?? 0) - (a.adsProfit ?? 0)).slice(0, 12)
+    .map((p) => ({ name: shortTitle(p.title), full: p.title, value: Math.round(p.adsProfit ?? 0) }));
+  const acosRows = [...rows].filter((p) => p.acos !== null && p.breakevenAcos !== null)
+    .sort((a, b) => (b.acos! - b.breakevenAcos!) - (a.acos! - a.breakevenAcos!)).slice(0, 12)
+    .map((p) => ({ name: shortTitle(p.title), full: p.title, acos: +(p.acos! * 100).toFixed(1), breakeven: +(Math.max(p.breakevenAcos!, 0) * 100).toFixed(1) }));
+  const spendWinning = rows.filter((p) => (p.adsProfit ?? 0) >= 0).reduce((a, p) => a + p.spend, 0);
+  const spendLosing = rows.filter((p) => (p.adsProfit ?? 0) < 0).reduce((a, p) => a + p.spend, 0);
+  const profitTotal = rows.reduce((a, p) => a + (p.adsProfit ?? 0), 0);
+  const spendTotal = spendWinning + spendLosing;
+  const h = (n: number) => Math.max(220, n * 34 + 40);
+
+  return (
+    <>
+      <h2 className="section-title">Para decidir: qué anuncio deja plata y cuál no</h2>
+      <div className="breakdown-strip ads-strip">
+        <div>
+          <span className="label">Inversión que deja ganancia</span>
+          <strong style={{ color: "var(--positive)" }}>{fmt(spendWinning)}</strong>
+          <span className="field-hint" style={{ margin: 0 }}>{spendTotal > 0 ? `${Math.round((spendWinning / spendTotal) * 100)}%` : "—"} de lo invertido en Mercado Ads</span>
+        </div>
+        <div>
+          <span className="label">Inversión que pierde plata</span>
+          <strong style={{ color: spendLosing > 0 ? "var(--negative)" : undefined }}>{fmt(spendLosing)}</strong>
+          <span className="field-hint" style={{ margin: 0 }}>{rows.filter((p) => (p.adsProfit ?? 0) < 0).length} anuncio(s) con ACOS por encima de su margen</span>
+        </div>
+        <div>
+          <span className="label">Ganancia que dejó la publicidad</span>
+          <strong style={{ color: profitTotal >= 0 ? "var(--positive)" : "var(--negative)" }}>{fmt(profitTotal)}</strong>
+          <span className="field-hint" style={{ margin: 0 }}>ventas por Ads × margen − inversión</span>
+        </div>
+        <div>
+          <span className="label">ROAS · ACOS del período</span>
+          <strong>{times(report.totals.roas)} · {pct(report.totals.acos)}</strong>
+          <span className="field-hint" style={{ margin: 0 }}>{fmt(report.totals.adRevenue)} vendidos por publicidad</span>
+        </div>
+      </div>
+      <div className="chart-split-even">
+        <div className="chart-card">
+          <div className="chart-card-head">
+            <h3 className="chart-card-title">Ganancia de la publicidad, por producto</h3>
+            <span className="field-hint" style={{ margin: 0 }}>Verde deja plata; naranja la pierde</span>
+          </div>
+          <ResponsiveContainer width="100%" height={h(byProfit.length)}>
+            <BarChart data={byProfit} layout="vertical" margin={{ top: 4, right: 16, left: 8, bottom: 0 }}>
+              <CartesianGrid stroke="var(--border)" horizontal={false} />
+              <XAxis type="number" tick={{ fontSize: 11, fill: "var(--text-dim)" }} tickLine={false} axisLine={false} tickFormatter={(v) => fmt(Number(v))} />
+              <YAxis type="category" dataKey="name" width={170} tick={{ fontSize: 11, fill: "var(--text)" }} tickLine={false} axisLine={false} />
+              <ReferenceLine x={0} stroke="var(--text-dim)" />
+              <Tooltip
+                cursor={{ fill: "var(--border)", opacity: 0.4 }}
+                contentStyle={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }}
+                formatter={(v: number) => [fmt(v), "Ganancia de la publicidad"]}
+                labelFormatter={(_l, pl) => (pl?.[0]?.payload as { full?: string })?.full ?? ""}
+              />
+              <Bar dataKey="value" isAnimationActive={false} radius={[0, 4, 4, 0]}>
+                {byProfit.map((r) => <Cell key={r.full} fill={r.value >= 0 ? "var(--positive-fill)" : "var(--chart-ads)"} />)}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="chart-card">
+          <div className="chart-card-head">
+            <h3 className="chart-card-title">ACOS real vs. margen que aguanta</h3>
+            <span className="field-hint" style={{ margin: 0 }}>Si el ACOS supera al margen, cada venta por Ads pierde</span>
+          </div>
+          <ResponsiveContainer width="100%" height={h(acosRows.length)}>
+            <BarChart data={acosRows} layout="vertical" margin={{ top: 4, right: 16, left: 8, bottom: 0 }} barGap={2}>
+              <CartesianGrid stroke="var(--border)" horizontal={false} />
+              <XAxis type="number" unit="%" tick={{ fontSize: 11, fill: "var(--text-dim)" }} tickLine={false} axisLine={false} />
+              <YAxis type="category" dataKey="name" width={170} tick={{ fontSize: 11, fill: "var(--text)" }} tickLine={false} axisLine={false} />
+              <Tooltip
+                cursor={{ fill: "var(--border)", opacity: 0.4 }}
+                contentStyle={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }}
+                formatter={(v: number, n: string) => [`${v.toLocaleString("es-AR")}%`, n]}
+                labelFormatter={(_l, pl) => (pl?.[0]?.payload as { full?: string })?.full ?? ""}
+              />
+              <Legend
+                wrapperStyle={{ fontSize: 12, paddingTop: 8 }}
+                formatter={(v) => <span style={{ color: "var(--text)" }}>{v}</span>}
+                payload={[
+                  { value: "ACOS dentro del margen", type: "square", id: "ok", color: "var(--chart-commission)" },
+                  { value: "ACOS por encima del margen", type: "square", id: "bad", color: "var(--chart-ads)" },
+                  { value: "Margen que aguanta", type: "square", id: "be", color: "var(--ramp-3)" },
+                ]}
+              />
+              <Bar dataKey="acos" name="ACOS real" isAnimationActive={false} radius={[0, 4, 4, 0]}>
+                {acosRows.map((r) => <Cell key={r.full} fill={r.acos > r.breakeven ? "var(--chart-ads)" : "var(--chart-commission)"} />)}
+              </Bar>
+              <Bar dataKey="breakeven" name="Margen que aguanta" fill="var(--ramp-5)" stroke="var(--ramp-3)" isAnimationActive={false} radius={[0, 4, 4, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    </>
+  );
+}
+
 export default function CampanasPage() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [daily, setDaily] = useState<DailyAdsRow[] | null>(null);
@@ -562,6 +675,8 @@ export default function CampanasPage() {
 
       <Finding report={adsReport} />
       <AdvicePanel report={adsReport} />
+      <AdsDecisionCharts report={adsReport} />
+      <AdsReportSection report={adsReport} />
 
       <h2 className="section-title">Anuncios</h2>
       <div className="kpi-grid">
@@ -687,8 +802,6 @@ export default function CampanasPage() {
           </table>
         </div>
       ) : null}
-
-      <AdsReportSection report={adsReport} />
 
       <h2 className="section-title">Cargar publicidad externa</h2>
       <form className="ad-form" onSubmit={submitAdSpend} noValidate>
