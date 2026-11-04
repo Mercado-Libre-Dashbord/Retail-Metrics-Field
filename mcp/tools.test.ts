@@ -44,10 +44,7 @@ describe("listProducts", () => {
   it("fetches details for each item id found in the search", async () => {
     vi.mocked(mlFetch)
       .mockResolvedValueOnce({ results: ["MLA1", "MLA2"] })
-      .mockResolvedValueOnce([
-        { body: { id: "MLA1", title: "Producto 1", seller_custom_field: "SKU1", price: 1000, available_quantity: 5, permalink: "url1" } },
-        { body: { id: "MLA2", title: "Producto 2", seller_custom_field: null, price: 2000, available_quantity: 3, permalink: "url2" } },
-      ]);
+      .mockResolvedValueOnce({ id: "MLA1", title: "Producto 1", seller_custom_field: "SKU1", price: 1000, available_quantity: 5, permalink: "url1" }).mockResolvedValueOnce({ id: "MLA2", title: "Producto 2", seller_custom_field: null, price: 2000, available_quantity: 3, permalink: "url2" });
     const products = await listProducts("acc1", "123");
     expect(products).toHaveLength(2);
     expect(products[0]).toEqual({
@@ -59,10 +56,7 @@ describe("listProducts", () => {
   it("reconoce un producto en Full por shipping.logistic_type, e ítems con variantes por variations[0].inventory_id", async () => {
     vi.mocked(mlFetch)
       .mockResolvedValueOnce({ results: ["MLA1", "MLA2"] })
-      .mockResolvedValueOnce([
-        { body: { id: "MLA1", title: "A", price: 1, available_quantity: 1, permalink: "", shipping: { logistic_type: "fulfillment" }, inventory_id: "INV1" } },
-        { body: { id: "MLA2", title: "B", price: 1, available_quantity: 1, permalink: "", shipping: { logistic_type: "drop_off" }, variations: [{ inventory_id: "INV2" }] } },
-      ]);
+      .mockResolvedValueOnce({ id: "MLA1", title: "A", price: 1, available_quantity: 1, permalink: "", shipping: { logistic_type: "fulfillment" }, inventory_id: "INV1" }).mockResolvedValueOnce({ id: "MLA2", title: "B", price: 1, available_quantity: 1, permalink: "", shipping: { logistic_type: "drop_off" }, variations: [{ inventory_id: "INV2" }] });
 
     const products = await listProducts("acc1", "123");
 
@@ -76,7 +70,7 @@ describe("listProducts", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.mocked(mlFetch)
       .mockResolvedValueOnce({ results: ["MLA1"] })
-      .mockResolvedValueOnce([{ body: { id: "MLA1", title: "A", price: 1, available_quantity: 1, permalink: "" } }]);
+      .mockResolvedValueOnce({ id: "MLA1", title: "A", price: 1, available_quantity: 1, permalink: "" });
 
     await listProducts("acc1", "123");
 
@@ -87,10 +81,7 @@ describe("listProducts", () => {
   it("prefers the https thumbnail so the browser does not block it", async () => {
     vi.mocked(mlFetch)
       .mockResolvedValueOnce({ results: ["MLA1", "MLA2"] })
-      .mockResolvedValueOnce([
-        { body: { id: "MLA1", title: "A", price: 1, available_quantity: 1, permalink: "", secure_thumbnail: "https://x/a.jpg", thumbnail: "http://x/a.jpg" } },
-        { body: { id: "MLA2", title: "B", price: 1, available_quantity: 1, permalink: "", thumbnail: "http://x/b.jpg" } },
-      ]);
+      .mockResolvedValueOnce({ id: "MLA1", title: "A", price: 1, available_quantity: 1, permalink: "", secure_thumbnail: "https://x/a.jpg", thumbnail: "http://x/a.jpg" }).mockResolvedValueOnce({ id: "MLA2", title: "B", price: 1, available_quantity: 1, permalink: "", thumbnail: "http://x/b.jpg" });
 
     const products = await listProducts("acc1", "123");
 
@@ -101,11 +92,7 @@ describe("listProducts", () => {
   it("resolves each category name once, not once per product", async () => {
     vi.mocked(mlFetch)
       .mockResolvedValueOnce({ results: ["MLA1", "MLA2", "MLA3"] })
-      .mockResolvedValueOnce([
-        { body: { id: "MLA1", title: "A", price: 1, available_quantity: 1, permalink: "", category_id: "MLA111" } },
-        { body: { id: "MLA2", title: "B", price: 1, available_quantity: 1, permalink: "", category_id: "MLA111" } },
-        { body: { id: "MLA3", title: "C", price: 1, available_quantity: 1, permalink: "", category_id: "MLA222" } },
-      ])
+      .mockResolvedValueOnce({ id: "MLA1", title: "A", price: 1, available_quantity: 1, permalink: "", category_id: "MLA111" }).mockResolvedValueOnce({ id: "MLA2", title: "B", price: 1, available_quantity: 1, permalink: "", category_id: "MLA111" }).mockResolvedValueOnce({ id: "MLA3", title: "C", price: 1, available_quantity: 1, permalink: "", category_id: "MLA222" })
       .mockResolvedValueOnce({ name: "Camping" })
       .mockResolvedValueOnce({ name: "Cocina" });
 
@@ -119,9 +106,7 @@ describe("listProducts", () => {
   it("keeps the product when its category name cannot be resolved", async () => {
     vi.mocked(mlFetch)
       .mockResolvedValueOnce({ results: ["MLA1"] })
-      .mockResolvedValueOnce([
-        { body: { id: "MLA1", title: "A", price: 1, available_quantity: 1, permalink: "", category_id: "MLA111" } },
-      ])
+      .mockResolvedValueOnce({ id: "MLA1", title: "A", price: 1, available_quantity: 1, permalink: "", category_id: "MLA111" })
       .mockRejectedValueOnce(new MlApiError(404, "not found"));
 
     const products = await listProducts("acc1", "123");
@@ -131,21 +116,43 @@ describe("listProducts", () => {
     expect(products[0].categoryName).toBeNull();
   });
 
-  it("batches the /items lookup in groups of 20 ids", async () => {
+  it("pide cada publicación con /items/{id}: ML dio de baja /items?ids= para esta app", async () => {
     const ids = Array.from({ length: 25 }, (_, i) => `MLA${i}`);
-    const firstBatch = ids.slice(0, 20).map((id) => ({ body: { id, title: id, price: 1, available_quantity: 1, permalink: "" } }));
-    const secondBatch = ids.slice(20).map((id) => ({ body: { id, title: id, price: 1, available_quantity: 1, permalink: "" } }));
-    vi.mocked(mlFetch)
-      .mockResolvedValueOnce({ results: ids })
-      .mockResolvedValueOnce(firstBatch)
-      .mockResolvedValueOnce(secondBatch);
+    vi.mocked(mlFetch).mockImplementation(async (path: string) => {
+      if (path.includes("items/search")) return { results: ids };
+      const id = path.match(/^\/items\/([^?]+)/)?.[1];
+      return { id, title: id, price: 1, available_quantity: 1, permalink: "" };
+    });
 
     const products = await listProducts("acc1", "123");
 
     expect(products).toHaveLength(25);
-    expect(vi.mocked(mlFetch)).toHaveBeenCalledTimes(3);
-    expect(vi.mocked(mlFetch).mock.calls[1][0]).toContain(ids.slice(0, 20).join(","));
-    expect(vi.mocked(mlFetch).mock.calls[2][0]).toContain(ids.slice(20).join(","));
+    const urls = vi.mocked(mlFetch).mock.calls.map((c) => String(c[0]));
+    expect(urls.some((u) => u.includes("/items?ids="))).toBe(false);
+    expect(urls.filter((u) => u.startsWith("/items/MLA"))).toHaveLength(25);
+  });
+
+  it("si una publicación falla, sigue con las demás", async () => {
+    vi.mocked(mlFetch).mockImplementation(async (path: string) => {
+      if (path.includes("items/search")) return { results: ["MLA1", "MLA2"] };
+      if (path.startsWith("/items/MLA1")) throw new MlApiError(403, "forbidden");
+      return { id: "MLA2", title: "B", price: 1, available_quantity: 1, permalink: "" };
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const products = await listProducts("acc1", "123");
+
+    expect(products.map((p) => p.id)).toEqual(["MLA2"]);
+  });
+
+  it("si no vuelve ninguna publicación, muestra el error de ML en vez de decir que no hay productos", async () => {
+    vi.mocked(mlFetch).mockImplementation(async (path: string) => {
+      if (path.includes("items/search")) return { results: ["MLA1"] };
+      throw new MlApiError(401, "invalid token");
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await expect(listProducts("acc1", "123")).rejects.toThrow("invalid token");
   });
 
   it("no pierde ningún producto con un catálogo grande, aunque haya más tandas que la concurrencia máxima", async () => {
@@ -157,32 +164,27 @@ describe("listProducts", () => {
     const ids = Array.from({ length: 300 }, (_, i) => `MLA${i}`);
     vi.mocked(mlFetch).mockImplementation(async (path: string) => {
       if (path.includes("items/search")) return { results: ids };
-      const match = path.match(/ids=([^&]+)/);
-      const batchIds = match ? match[1].split(",") : [];
-      return batchIds.map((id) => ({ body: { id, title: id, price: 1, available_quantity: 1, permalink: "" } }));
+      const id = path.match(/^\/items\/([^?]+)/)?.[1];
+      return { id, title: id, price: 1, available_quantity: 1, permalink: "" };
     });
 
     const products = await listProducts("acc1", "123");
 
     expect(products.map((p) => p.id).sort()).toEqual([...ids].sort());
-    // 1 llamada de búsqueda + 15 tandas de detalle de 20 ids cada una.
-    expect(vi.mocked(mlFetch)).toHaveBeenCalledTimes(16);
+    // 1 llamada de búsqueda + 1 por publicación.
+    expect(vi.mocked(mlFetch)).toHaveBeenCalledTimes(301);
   });
 
   it("pages through items/search with scroll_id when there are more results than one page", async () => {
     const firstPageIds = Array.from({ length: 50 }, (_, i) => `MLA${i}`);
     const secondPageIds = ["MLA50", "MLA51"];
     const allIds = [...firstPageIds, ...secondPageIds];
-    const detailsFor = (ids: string[]) =>
-      ids.map((id) => ({ body: { id, title: id, price: 1, available_quantity: 1, permalink: "" } }));
 
     vi.mocked(mlFetch)
       .mockResolvedValueOnce({ results: firstPageIds, scroll_id: "scroll-1" })
       .mockResolvedValueOnce({ results: secondPageIds, scroll_id: "scroll-1" })
-      .mockResolvedValueOnce({ results: [] })
-      .mockResolvedValueOnce(detailsFor(allIds.slice(0, 20)))
-      .mockResolvedValueOnce(detailsFor(allIds.slice(20, 40)))
-      .mockResolvedValueOnce(detailsFor(allIds.slice(40)));
+      .mockResolvedValueOnce({ results: [] });
+    for (const id of allIds) vi.mocked(mlFetch).mockResolvedValueOnce({ id, title: id, price: 1, available_quantity: 1, permalink: "" });
 
     const products = await listProducts("acc1", "123");
 
@@ -196,7 +198,7 @@ describe("listProducts", () => {
   it("stops as soon as a page comes back without a scroll_id, even mid-catalog", async () => {
     vi.mocked(mlFetch)
       .mockResolvedValueOnce({ results: ["MLA1"] }) // sin scroll_id: no hay más para pedir
-      .mockResolvedValueOnce([{ body: { id: "MLA1", title: "A", price: 1, available_quantity: 1, permalink: "" } }]);
+      .mockResolvedValueOnce({ id: "MLA1", title: "A", price: 1, available_quantity: 1, permalink: "" });
 
     const products = await listProducts("acc1", "123");
 
@@ -217,11 +219,7 @@ describe("listProducts", () => {
       const isLast = i + PAGE_SIZE >= TOTAL_ITEMS;
       vi.mocked(mlFetch).mockResolvedValueOnce({ results: page, scroll_id: isLast ? undefined : "scroll-x" });
     }
-    for (let i = 0; i < TOTAL_ITEMS; i += 20) {
-      vi.mocked(mlFetch).mockResolvedValueOnce(
-        allIds.slice(i, i + 20).map((id) => ({ body: { id, title: id, price: 1, available_quantity: 1, permalink: "" } }))
-      );
-    }
+    for (const id of allIds) vi.mocked(mlFetch).mockResolvedValueOnce({ id, title: id, price: 1, available_quantity: 1, permalink: "" });
 
     const products = await listProducts("acc1", "123");
 
@@ -1016,16 +1014,11 @@ describe("getProductsByIds", () => {
   it("trae publicaciones que ya no aparecen en el listado del vendedor", async () => {
     // Es el caso que rompía el panel: un producto vendido y dado de baja no
     // vuelve en /users/{id}/items/search, pero /items sí lo devuelve.
-    vi.mocked(mlFetch).mockResolvedValueOnce([
-      {
-        code: 200,
-        body: {
-          id: "MLA2293610632", title: "Luz De Emergencia", seller_custom_field: "SKU9",
-          price: 12000, available_quantity: 0, permalink: "https://ml/p",
-          category_id: "MLA1", secure_thumbnail: "https://https-thumb",
-        },
-      },
-    ]);
+    vi.mocked(mlFetch).mockResolvedValueOnce({
+      id: "MLA2293610632", title: "Luz De Emergencia", seller_custom_field: "SKU9",
+      price: 12000, available_quantity: 0, permalink: "https://ml/p",
+      category_id: "MLA1", secure_thumbnail: "https://https-thumb",
+    });
     vi.mocked(mlFetch).mockResolvedValueOnce({ id: "MLA1", name: "Iluminación" });
 
     const products = await getProductsByIds("acc1", ["MLA2293610632"]);
@@ -1040,10 +1033,10 @@ describe("getProductsByIds", () => {
   });
 
   it("saltea los ids que ML no reconoce en vez de perder toda la tanda", async () => {
-    vi.mocked(mlFetch).mockResolvedValueOnce([
-      { code: 404, body: {} },
-      { code: 200, body: { id: "MLA2", title: "Existe", price: 10, available_quantity: 1, permalink: "u" } },
-    ]);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(mlFetch)
+      .mockRejectedValueOnce(new MlApiError(404, "not found"))
+      .mockResolvedValueOnce({ id: "MLA2", title: "Existe", price: 10, available_quantity: 1, permalink: "u" });
 
     const products = await getProductsByIds("acc1", ["MLA1", "MLA2"]);
 
@@ -1055,15 +1048,15 @@ describe("getProductsByIds", () => {
     expect(vi.mocked(mlFetch)).not.toHaveBeenCalled();
   });
 
-  it("pide de a 20, que es el máximo que acepta /items", async () => {
+  it("pide cada id por separado con /items/{id}", async () => {
     const ids = Array.from({ length: 45 }, (_, i) => `MLA${i}`);
-    vi.mocked(mlFetch).mockResolvedValue([]);
+    vi.mocked(mlFetch).mockImplementation(async (path: string) => ({ id: path.match(/^\/items\/([^?]+)/)?.[1], title: "x", price: 1, available_quantity: 1, permalink: "" }));
 
-    await getProductsByIds("acc1", ids);
+    const products = await getProductsByIds("acc1", ids);
 
-    const itemCalls = vi.mocked(mlFetch).mock.calls.filter((c) => String(c[0]).startsWith("/items?ids="));
-    expect(itemCalls).toHaveLength(3);
-    expect(String(itemCalls[0][0]).split(",")).toHaveLength(20);
+    expect(products).toHaveLength(45);
+    const urls = vi.mocked(mlFetch).mock.calls.map((c) => String(c[0]));
+    expect(urls.some((u) => u.includes("ids="))).toBe(false);
   });
 });
 

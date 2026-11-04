@@ -161,6 +161,62 @@ export async function scanProductIds(
 }
 
 /**
+ * Detalle de cada publicación, pedido de a una con `/items/{id}`.
+ *
+ * Antes se pedían de a 20 con `/items?ids=`, pero Mercado Libre dio de baja
+ * ese endpoint para esta app ("Resource deprecated - client no longer allowed
+ * to consume this resource", 403) y la sincronización entera se caía.
+ *
+ * Van de a `ITEMS_CONCURRENCY` en simultáneo, no todas juntas: con miles de
+ * ids, pedirlas todas a la vez dispara el rate limit de ML.
+ *
+ * Un id que ML no devuelve (borrado, de otra cuenta) se saltea en vez de
+ * perder todo el resto. Si no vuelve ninguna y hubo un error, se tira ese
+ * error: así un token vencido o un corte de la API no pasa como "no hay
+ * publicaciones".
+ */
+const ITEMS_CONCURRENCY = 10;
+
+async function fetchItemBodies(ids: string[], token: string): Promise<any[]> {
+  const bodies: any[] = [];
+  let firstError: unknown = null;
+  for (let i = 0; i < ids.length; i += ITEMS_CONCURRENCY) {
+    const chunk = ids.slice(i, i + ITEMS_CONCURRENCY);
+    const results = await Promise.allSettled(
+      chunk.map((id) => mlFetch(`/items/${encodeURIComponent(id)}?include_attributes=all`, token))
+    );
+    results.forEach((r, j) => {
+      if (r.status === "fulfilled") {
+        if (r.value?.id) bodies.push(r.value);
+        return;
+      }
+      firstError ??= r.reason;
+      console.warn(`No se pudo traer la publicación ${chunk[j]}:`, (r.reason as Error)?.message);
+    });
+  }
+  if (bodies.length === 0 && firstError) throw firstError;
+  return bodies;
+}
+
+function toMlProduct(body: any): MlProduct {
+  return {
+    id: body.id,
+    title: body.title,
+    sku: body.seller_custom_field ?? null,
+    price: body.price ?? 0,
+    stock: body.available_quantity ?? 0,
+    permalink: body.permalink,
+    categoryId: body.category_id ?? null,
+    categoryName: null,
+    // secure_thumbnail primero: el `thumbnail` a secas viene por http y
+    // el navegador lo bloquea como contenido mixto en una página https.
+    thumbnail: body.secure_thumbnail ?? body.thumbnail ?? null,
+    ...extractLogistics(body),
+    ...extractCodes(body),
+  };
+}
+
+/**
  * Dados ids de publicaciones, trae el detalle completo (precio, stock,
  * categoría, logística, foto). Separado de `scanProductIds` para poder
  * pedirlo página por página en vez de todo el catálogo de una.
@@ -168,49 +224,9 @@ export async function scanProductIds(
 export async function getProductDetails(accountId: string, ids: string[]): Promise<MlProduct[]> {
   if (ids.length === 0) return [];
   const token = await getValidAccessToken(accountId);
-
-  // /items?ids= solo acepta 20 ids por llamada — con más de una publicación
-  // pausada/cerrada en el historial esto se pasa fácil. Con un catálogo
-  // grande (miles de ids) pedir TODAS las tandas juntas con un solo
-  // Promise.all dispara cientos o miles de pedidos simultáneos a la API de
-  // ML — eso gatilla su rate limit en vez de acelerar nada. Se piden de a
-  // `ITEMS_BATCH_CONCURRENCY` tandas en simultáneo, no todas juntas.
-  const ML_ITEMS_BATCH_SIZE = 20;
-  const batches: string[][] = [];
-  for (let i = 0; i < ids.length; i += ML_ITEMS_BATCH_SIZE) {
-    batches.push(ids.slice(i, i + ML_ITEMS_BATCH_SIZE));
-  }
-  const ITEMS_BATCH_CONCURRENCY = 10;
-  const batchResults: any[] = [];
-  for (let i = 0; i < batches.length; i += ITEMS_BATCH_CONCURRENCY) {
-    const chunk = batches.slice(i, i + ITEMS_BATCH_CONCURRENCY);
-    batchResults.push(...(await Promise.all(chunk.map((batch) => mlFetch(`/items?ids=${batch.join(",")}&include_attributes=all`, token)))));
-  }
-
-  const products: MlProduct[] = [];
-  const bodies: any[] = [];
-  for (const details of batchResults) {
-    for (const entry of details) {
-      bodies.push(entry.body);
-      products.push({
-        id: entry.body.id,
-        title: entry.body.title,
-        sku: entry.body.seller_custom_field ?? null,
-        price: entry.body.price,
-        stock: entry.body.available_quantity,
-        permalink: entry.body.permalink,
-        categoryId: entry.body.category_id ?? null,
-        categoryName: null,
-        // secure_thumbnail primero: el `thumbnail` a secas viene por http y
-        // el navegador lo bloquea como contenido mixto en una página https.
-        thumbnail: entry.body.secure_thumbnail ?? entry.body.thumbnail ?? null,
-        ...extractLogistics(entry.body),
-        ...extractCodes(entry.body),
-      });
-    }
-  }
+  const bodies = await fetchItemBodies(ids, token);
+  const products = bodies.map(toMlProduct);
   warnIfNoLogisticType(bodies);
-
   await attachCategoryNames(products, token);
   return products;
 }
@@ -237,40 +253,14 @@ export async function listProducts(accountId: string, sellerId: string): Promise
 export async function getProductsByIds(accountId: string, ids: string[]): Promise<MlProduct[]> {
   if (ids.length === 0) return [];
   const token = await getValidAccessToken(accountId);
-
-  const ML_ITEMS_BATCH_SIZE = 20;
-  const products: MlProduct[] = [];
-  for (let i = 0; i < ids.length; i += ML_ITEMS_BATCH_SIZE) {
-    const batch = ids.slice(i, i + ML_ITEMS_BATCH_SIZE);
-    let details: any[];
-    try {
-      details = await mlFetch(`/items?ids=${batch.join(",")}&include_attributes=all`, token);
-    } catch (err) {
-      console.warn(`No se pudieron traer las publicaciones ${batch.join(",")}:`, (err as Error).message);
-      continue;
-    }
-    for (const entry of details ?? []) {
-      // /items?ids= devuelve un code por id: los que fallaron vienen con 404
-      // y sin body. Se saltean en silencio, no son un error de la tanda.
-      if (entry?.code && entry.code !== 200) continue;
-      const body = entry?.body;
-      if (!body?.id) continue;
-      products.push({
-        id: body.id,
-        title: body.title,
-        sku: body.seller_custom_field ?? null,
-        price: body.price ?? 0,
-        stock: body.available_quantity ?? 0,
-        permalink: body.permalink,
-        categoryId: body.category_id ?? null,
-        categoryName: null,
-        thumbnail: body.secure_thumbnail ?? body.thumbnail ?? null,
-        ...extractLogistics(body),
-        ...extractCodes(body),
-      });
-    }
+  let bodies: any[];
+  try {
+    bodies = await fetchItemBodies(ids, token);
+  } catch (err) {
+    console.warn(`No se pudieron traer las publicaciones ${ids.join(",")}:`, (err as Error).message);
+    return [];
   }
-
+  const products = bodies.map(toMlProduct);
   await attachCategoryNames(products, token);
   return products;
 }
