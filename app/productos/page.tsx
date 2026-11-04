@@ -967,6 +967,9 @@ export default function ProductosPage() {
               onChange={(e) => setNameFilter(e.target.value)}
               style={{ padding: "6px 8px", minWidth: 220 }}
             />
+            <span className="field-hint" style={{ margin: 0 }}>
+              Para ordenar por precio, costo, margen, etc., hacé clic en el encabezado de esa columna.
+            </span>
             <label htmlFor="sold-within" className="field-hint" style={{ margin: 0 }}>
               Vendidos en
             </label>
@@ -1114,6 +1117,7 @@ export default function ProductosPage() {
                   label="Costo (ARS)" sortKey="currentCost" activeKey={sortKey} direction={sortDirection} onSort={toggleSort}
                   ascLabel="De menor a mayor" descLabel="De mayor a menor" numeric
                 />
+                <th className="num">Costo (US$)</th>
                 <SortableHeader
                   label="Margen" sortKey="marginPct" activeKey={sortKey} direction={sortDirection} onSort={toggleSort}
                   ascLabel="De menor a mayor" descLabel="De mayor a menor" numeric
@@ -1169,7 +1173,7 @@ export default function ProductosPage() {
                         style={{ width: 74, padding: "5px" }}
                       />
                     ) : (
-                      p.currentPrice === null || p.currentPrice === undefined ? "—" : fmt(p.currentPrice)
+                      p.currentPrice?.toFixed(2)
                     )}
                   </td>
                   <td className={`num ${p.lowStock ? "missing-cost" : ""}`}>
@@ -1199,20 +1203,21 @@ export default function ProductosPage() {
                       p.effectiveStock
                     )}
                   </td>
-                  <td className="num">{p.fullStockValue === null ? "—" : fmt(p.fullStockValue)}</td>
+                  <td className="num">{p.fullStockValue === null ? "—" : p.fullStockValue.toFixed(2)}</td>
                   <td className={`num ${p.currentCost === null ? "missing-cost" : ""}`}>
-                    {p.currentCost === null ? <span className="pill pill-neg">Sin costo</span> : fmt(p.currentCost)}
+                    {p.currentCost === null ? "Sin costo cargado" : p.currentCost.toFixed(2)}
                   </td>
-                  <td className={`num ${p.marginPct !== null && p.marginPct < 0 ? "num-neg" : ""}`}>{p.marginPct === null ? "—" : `${(p.marginPct * 100).toLocaleString("es-AR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`}</td>
+                  <td className="num">{p.currentCostUsd === null ? "—" : fmtUsd(p.currentCostUsd)}</td>
+                  <td className="num">{p.marginPct === null ? "-" : `${(p.marginPct * 100).toFixed(1)}%`}</td>
                   <td className="num">{p.unitsSold}</td>
                   <td>{p.lastSaleDate ? new Date(p.lastSaleDate).toLocaleDateString("es-AR") : "Nunca"}</td>
                   <td className={`num ${p.negativeMargin ? "missing-cost" : ""}`}>
                     {p.unitsSold > 0 ? (
                       <button type="button" className="link-num" onClick={() => showBreakdown(p)} title="Ver de dónde sale este beneficio">
-                        {fmt(p.totalProfit)}
+                        {p.totalProfit.toFixed(2)}
                       </button>
                     ) : (
-                      fmt(p.totalProfit)
+                      p.totalProfit.toFixed(2)
                     )}
                     {p.negativeMargin && (
                       <>
@@ -1225,7 +1230,7 @@ export default function ProductosPage() {
                   </td>
                   <td>
                     <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-1)" }}>
-                      <div style={{ display: "flex", gap: "var(--space-1)", alignItems: "center", flexWrap: "nowrap", whiteSpace: "nowrap" }}>
+                      <div style={{ display: "flex", gap: "var(--space-1)", alignItems: "center", flexWrap: "wrap" }}>
                         <label htmlFor={`cost-ars-${p.id}`} className="field-hint" style={{ margin: 0 }}>
                           $
                         </label>
@@ -1258,16 +1263,6 @@ export default function ProductosPage() {
                         <button className="btn btn-secondary btn-sm" onClick={() => saveCost(p.id)} disabled={savingId === p.id}>
                           {savingId === p.id ? "…" : "Guardar"}
                         </button>
-                        {p.currentCost !== null && confirmingDeleteCostId !== p.id && (
-                          <button
-                            type="button"
-                            className="link-btn link-btn-quiet"
-                            onClick={() => setConfirmingDeleteCostId(p.id)}
-                            title="Borra el costo cargado para poder cargarlo de nuevo desde cero"
-                          >
-                            Eliminar
-                          </button>
-                        )}
                       </div>
                       {confirmingDeleteCostId === p.id ? (
                         <div style={{ display: "flex", gap: "var(--space-1)", alignItems: "center", flexWrap: "wrap" }}>
@@ -1290,7 +1285,18 @@ export default function ProductosPage() {
                             Cancelar
                           </button>
                         </div>
-                      ) : null}
+                      ) : (
+                        p.currentCost !== null && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => setConfirmingDeleteCostId(p.id)}
+                            title="Borra el costo cargado para poder cargarlo de nuevo desde cero"
+                          >
+                            Eliminar costo
+                          </button>
+                        )
+                      )}
                       {twinsOf(p).length > 0 && (
                         <label className="field-hint twins-toggle">
                           <input
@@ -1324,8 +1330,8 @@ export default function ProductosPage() {
                         {mlErrors[p.id] && <p className="field-error">{mlErrors[p.id]}</p>}
                       </div>
                     ) : (
-                      <button className="btn btn-secondary btn-sm" onClick={() => startMlEdit(p)} title="Cambiar el precio o el stock en Mercado Libre">
-                        Editar en ML
+                      <button className="btn btn-secondary btn-sm" onClick={() => startMlEdit(p)}>
+                        Editar precio/stock
                       </button>
                     )}
                   </td>
