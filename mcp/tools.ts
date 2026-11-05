@@ -1456,21 +1456,39 @@ export async function getBillingCharges(
   accountId: string,
   periodKey: string,
   /** Pasado este momento no se piden más páginas: se devuelve lo traído. */
-  deadline = Number.POSITIVE_INFINITY
+  deadline = Number.POSITIVE_INFINITY,
+  opts: {
+    /** Desde qué detail_id seguir (lo ya guardado de este período no se vuelve a pedir). */
+    fromId?: string;
+    /** Se marca en true si Mercado Libre cortó por límite de pedidos (429). */
+    state?: { rateLimited: boolean };
+  } = {}
 ): Promise<MlBillingCharge[]> {
   const token = await getValidAccessToken(accountId);
   const PAGE_SIZE = 1000;
   const MAX_PAGES = 30;
   const charges: MlBillingCharge[] = [];
-  let fromId = "0";
+  let fromId = opts.fromId ?? "0";
   let skipped = 0;
 
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const query = new URLSearchParams({ document_type: "BILL", limit: String(PAGE_SIZE), from_id: fromId });
-    const res: any = await listOrEmpty(
-      () => mlFetch(`/billing/integration/periods/key/${periodKey}/group/ML/details?${query}`, token),
-      { results: [] }
-    );
+    let res: any;
+    try {
+      res = await listOrEmpty(
+        () => mlFetch(`/billing/integration/periods/key/${periodKey}/group/ML/details?${query}`, token),
+        { results: [] }
+      );
+    } catch (err) {
+      // Este recurso de ML acepta 5 pedidos por minuto. Con muchos cargos no
+      // entra en una pasada: se devuelve lo traído hasta acá y el próximo
+      // sync sigue desde el último cargo guardado, en vez de perderlo todo.
+      if (err instanceof MlApiError && err.status === 429) {
+        if (opts.state) opts.state.rateLimited = true;
+        break;
+      }
+      throw err;
+    }
     const rows: any[] = res.results ?? res.details ?? [];
     if (rows.length === 0) break;
 

@@ -964,6 +964,27 @@ describe("getBillingCharges", () => {
     items_info: [{ item_id: "MLA1", item_title: "Lámpara" }],
   });
 
+  it("si ML corta por límite de pedidos (429), devuelve lo traído y lo avisa en vez de perderlo todo", async () => {
+    const full = Array.from({ length: 1000 }, (_, i) => row(1000 + i, 10));
+    vi.mocked(mlFetch)
+      .mockResolvedValueOnce({ results: full })
+      .mockRejectedValueOnce(new MlApiError(429, "Rate limit exceeded: 5 requests per minute"));
+    const state = { rateLimited: false };
+
+    const charges = await getBillingCharges("acc1", "2026-10-01", Number.POSITIVE_INFINITY, { state });
+
+    expect(charges).toHaveLength(1000);
+    expect(state.rateLimited).toBe(true);
+  });
+
+  it("sigue desde el último cargo guardado cuando se le pasa fromId", async () => {
+    vi.mocked(mlFetch).mockResolvedValueOnce({ results: [] });
+
+    await getBillingCharges("acc1", "2026-10-01", Number.POSITIVE_INFINITY, { fromId: "71344189901" });
+
+    expect(String(vi.mocked(mlFetch).mock.calls[0][0])).toContain("from_id=71344189901");
+  });
+
   it("lee el cargo desde charge_info y la orden desde sales_info", async () => {
     vi.mocked(mlFetch).mockResolvedValueOnce({ results: [row(111, 2500.5), row(112, 3900, "CXD", "Costo de envío", null)] });
 
