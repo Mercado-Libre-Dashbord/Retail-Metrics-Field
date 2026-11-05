@@ -676,10 +676,21 @@ export async function syncBillingCharges(db: QueryExecutor, accountId: string): 
     // llamada de 60s y en una transacción; si se pasa, no se guarda nada y
     // el sync no termina nunca. Lo que no entra se completa en el próximo.
     const deadline = Date.now() + BILLING_TIME_BUDGET_MS;
+    const state = { rateLimited: false };
     for (const period of periods.slice(0, 3)) {
-      if (Date.now() > deadline) break;
+      if (Date.now() > deadline || state.rateLimited) break;
+      // Los cargos de ML no cambian una vez emitidos: se sigue desde el último
+      // detail_id guardado de este período. Así un período grande se completa
+      // de a pedazos entre syncs (ML acepta 5 pedidos por minuto acá) y uno
+      // ya completo cuesta un solo pedido.
+      const last = await db.query(
+        `SELECT MAX(detail_id::numeric)::text AS last FROM billing_charges
+          WHERE account_id = $1 AND period_key = $2 AND detail_id ~ '^[0-9]+$'`,
+        [accountId, period.key]
+      );
+      const fromId = (last.rows[0] as { last: string | null } | undefined)?.last ?? undefined;
       const unique = new Map<string, Awaited<ReturnType<typeof getBillingCharges>>[number]>();
-      for (const c of await getBillingCharges(accountId, period.key, deadline)) {
+      for (const c of await getBillingCharges(accountId, period.key, deadline, { fromId, state })) {
         if (c.detailType && c.detailType.toUpperCase() !== "CHARGE") {
           const entry = unexpectedTypes.get(c.detailType) ?? {
             subTypes: new Set(), concepts: new Set(), withOrderId: 0, withoutOrderId: 0,
@@ -725,6 +736,9 @@ export async function syncBillingCharges(db: QueryExecutor, accountId: string): 
         sinOrderId: e.withoutOrderId,
       }));
       console.warn("Facturación ML: detail_type distinto de 'CHARGE' encontrado:", JSON.stringify(summary));
+    }
+    if (state.rateLimited) {
+      console.warn(`Facturación ML: límite de pedidos de Mercado Libre; se guardaron ${saved} cargo(s) y el resto se completa en el próximo sync.`);
     }
     return saved;
   } catch (err) {
