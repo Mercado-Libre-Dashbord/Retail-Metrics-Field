@@ -1801,3 +1801,57 @@ export async function diagnoseOrderShipping(accountId: string, orderId: string) 
     costsError,
   };
 }
+
+// ── Competencia en publicaciones de catálogo ─────────────────────────────
+
+export interface PriceToWin {
+  /** false si ML no da el dato para esta publicación (no es de catálogo, sin permiso, etc.). */
+  available: boolean;
+  /** Por qué no está disponible, en castellano. */
+  reason?: string;
+  /** winning / competing / sharing_first_place / listed, tal como lo manda ML. */
+  status?: string | null;
+  /** Precio con el que la publicación pasaría a ganar. */
+  priceToWin?: number | null;
+  /** Precio de la publicación que hoy gana el catálogo. */
+  winnerPrice?: number | null;
+  winnerItemId?: string | null;
+  catalogProductId?: string | null;
+  /** Motivos que da ML (p. ej. "shipping_not_free"). */
+  reasons?: string[];
+}
+
+/**
+ * "Precio para ganar" de Mercado Libre: solo existe para publicaciones de
+ * catálogo (las que compiten por el mismo producto). Para el resto, o si la
+ * app no tiene acceso a este recurso, devuelve available: false con el motivo
+ * en vez de tirar un error.
+ */
+export async function getPriceToWin(accountId: string, itemId: string): Promise<PriceToWin> {
+  const token = await getValidAccessToken(accountId);
+  try {
+    const res: any = await mlFetch(`/items/${encodeURIComponent(itemId)}/price_to_win?siteId=MLA&version=v2`, token);
+    return {
+      available: true,
+      status: res?.status ?? null,
+      priceToWin: typeof res?.price_to_win === "number" ? res.price_to_win : null,
+      winnerPrice: typeof res?.winner?.price === "number" ? res.winner.price : null,
+      winnerItemId: res?.winner?.item_id ?? null,
+      catalogProductId: res?.catalog_product_id ?? null,
+      reasons: Array.isArray(res?.reason) ? res.reason.map(String) : [],
+    };
+  } catch (err) {
+    if (err instanceof MlApiError) {
+      const reason =
+        err.status === 404 || err.status === 400
+          ? "No es una publicación de catálogo: Mercado Libre no compara su precio."
+          : err.status === 403 || err.status === 401
+            ? "Mercado Libre no le da este dato a la app."
+            : err.status === 429
+              ? "Mercado Libre limitó los pedidos; probá de nuevo en un minuto."
+              : `Mercado Libre no respondió (${err.status}).`;
+      return { available: false, reason };
+    }
+    throw err;
+  }
+}
