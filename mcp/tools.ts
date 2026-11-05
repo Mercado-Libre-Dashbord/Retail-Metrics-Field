@@ -1801,3 +1801,115 @@ export async function diagnoseOrderShipping(accountId: string, orderId: string) 
     costsError,
   };
 }
+
+// ── Competencia en publicaciones de catálogo ─────────────────────────────
+
+export interface PriceToWin {
+  /** false si ML no da el dato para esta publicación (no es de catálogo, sin permiso, etc.). */
+  available: boolean;
+  /** Por qué no está disponible, en castellano. */
+  reason?: string;
+  /** winning / competing / sharing_first_place / listed, tal como lo manda ML. */
+  status?: string | null;
+  /** Precio con el que la publicación pasaría a ganar. */
+  priceToWin?: number | null;
+  /** Precio de la publicación que hoy gana el catálogo. */
+  winnerPrice?: number | null;
+  winnerItemId?: string | null;
+  catalogProductId?: string | null;
+  /** Motivos que da ML (p. ej. "shipping_not_free"). */
+  reasons?: string[];
+  /** Lo que suma para ganar: { id, status: boosted | opportunity | not_apply }. */
+  boosts?: { id: string; status: string }[];
+  /** Precio actual de la publicación según ML. */
+  currentPrice?: number | null;
+  /** Parte de las visitas del catálogo que se lleva (maximum / medium / minimum). */
+  visitShare?: string | null;
+}
+
+/**
+ * "Precio para ganar" de Mercado Libre: solo existe para publicaciones de
+ * catálogo (las que compiten por el mismo producto). Para el resto, o si la
+ * app no tiene acceso a este recurso, devuelve available: false con el motivo
+ * en vez de tirar un error.
+ */
+export async function getPriceToWin(accountId: string, itemId: string): Promise<PriceToWin> {
+  const token = await getValidAccessToken(accountId);
+  try {
+    const res: any = await mlFetch(`/items/${encodeURIComponent(itemId)}/price_to_win?siteId=MLA&version=v2`, token);
+    return {
+      available: true,
+      status: res?.status ?? null,
+      priceToWin: typeof res?.price_to_win === "number" ? res.price_to_win : null,
+      winnerPrice: typeof res?.winner?.price === "number" ? res.winner.price : null,
+      winnerItemId: res?.winner?.item_id ?? null,
+      catalogProductId: res?.catalog_product_id ?? null,
+      reasons: Array.isArray(res?.reason) ? res.reason.map(String) : [],
+      boosts: Array.isArray(res?.boosts)
+        ? res.boosts.filter((b: any) => b?.id).map((b: any) => ({ id: String(b.id), status: String(b.status ?? "") }))
+        : [],
+      currentPrice: typeof res?.current_price === "number" ? res.current_price : null,
+      visitShare: res?.visit_share ?? null,
+    };
+  } catch (err) {
+    if (err instanceof MlApiError) {
+      const reason =
+        err.status === 404 || err.status === 400
+          ? "No es una publicación de catálogo: Mercado Libre no compara su precio."
+          : err.status === 403 || err.status === 401
+            ? "Mercado Libre no le da este dato a la app."
+            : err.status === 429
+              ? "Mercado Libre limitó los pedidos; probá de nuevo en un minuto."
+              : `Mercado Libre no respondió (${err.status}).`;
+      return { available: false, reason };
+    }
+    throw err;
+  }
+}
+
+export interface CatalogCompetitor {
+  itemId: string;
+  sellerId: string | null;
+  price: number;
+  freeShipping: boolean | null;
+  listingType: string | null;
+}
+
+/**
+ * Todas las publicaciones que compiten en un producto de catálogo, con su
+ * precio. Vacío si ML no lo devuelve (catálogo inexistente o sin acceso).
+ */
+export async function getCatalogCompetitors(accountId: string, catalogProductId: string): Promise<CatalogCompetitor[]> {
+  const token = await getValidAccessToken(accountId);
+  try {
+    const res: any = await mlFetch(`/products/${encodeURIComponent(catalogProductId)}/items`, token);
+    const rows: any[] = Array.isArray(res?.results) ? res.results : Array.isArray(res) ? res : [];
+    return rows
+      .filter((r) => r?.item_id && typeof r?.price === "number")
+      .map((r) => ({
+        itemId: String(r.item_id),
+        sellerId: r.seller_id != null ? String(r.seller_id) : null,
+        price: Number(r.price),
+        freeShipping: typeof r?.shipping?.free_shipping === "boolean" ? r.shipping.free_shipping : null,
+        listingType: r.listing_type_id ?? null,
+      }));
+  } catch (err) {
+    if (err instanceof MlApiError && [400, 401, 403, 404].includes(err.status)) return [];
+    throw err;
+  }
+}
+
+/** Apodo público de cada vendedor (los que fallen quedan afuera). */
+export async function getSellerNicknames(accountId: string, sellerIds: string[]): Promise<Map<string, string>> {
+  const token = await getValidAccessToken(accountId);
+  const out = new Map<string, string>();
+  const ids = [...new Set(sellerIds)].filter(Boolean);
+  for (let i = 0; i < ids.length; i += 5) {
+    const chunk = ids.slice(i, i + 5);
+    const res = await Promise.allSettled(chunk.map((id) => mlFetch(`/users/${encodeURIComponent(id)}`, token)));
+    res.forEach((r, j) => {
+      if (r.status === "fulfilled" && r.value?.nickname) out.set(chunk[j], String(r.value.nickname));
+    });
+  }
+  return out;
+}

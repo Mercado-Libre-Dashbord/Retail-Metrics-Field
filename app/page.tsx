@@ -459,8 +459,6 @@ function RevenueBreakdownPanel({ data }: { data: BreakdownResponse }) {
   const grouped = groupBreakdownDays(data.days);
   const share = (v: number) => (c.revenue > 0 ? `${((v / c.revenue) * 100).toLocaleString("es-AR", { maximumFractionDigits: 1 })}%` : "—");
   const ads = (t: BreakdownTotals) => t.adsInSales + t.adsNotInSales;
-  const taxes = (t: BreakdownTotals) => t.iva - t.ivaCredit + t.tax;
-  const costsTotal = (t: BreakdownTotals) => t.revenue - t.netProfit - t.missingCost;
 
   const rows: { label: string; hint?: string; color: string; now: number; prev?: number; strong?: boolean }[] = [
     { label: "Costo de producto", color: "var(--chart-cost)", now: c.cost, prev: p?.cost },
@@ -482,99 +480,73 @@ function RevenueBreakdownPanel({ data }: { data: BreakdownResponse }) {
         <span className="field-hint" style={{ margin: 0 }}>A dónde fue cada peso que facturaste, {grouped.label}</span>
       </div>
 
-      <div className="breakdown-strip">
-        <div>
-          <span className="label">Facturación</span>
-          <strong>{fmt(c.revenue)}</strong>
-          <ChangeCell now={c.revenue} prev={p?.revenue} goodWhenUp />
+      <div className="breakdown-grid">
+        <div className="breakdown-chart">
+          <ResponsiveContainer width="100%" height={300}>
+            <BarChart data={grouped.rows} stackOffset="sign" margin={{ top: 4, right: 4, left: 0, bottom: 0 }} barCategoryGap="18%">
+              <CartesianGrid stroke="var(--border)" vertical={false} />
+              <XAxis dataKey="day" tickFormatter={shortDay} tick={{ fontSize: 11, fill: "var(--text-dim)" }} tickLine={false} axisLine={false} minTickGap={12} />
+              <YAxis tick={{ fontSize: 11, fill: "var(--text-dim)" }} tickLine={false} axisLine={false} width={78} tickFormatter={(v) => fmt(Number(v))} />
+              <ReferenceLine y={0} stroke="var(--text-dim)" />
+              <Tooltip content={<BreakdownTooltip />} labelFormatter={shortDay} cursor={{ fill: "var(--border)", opacity: 0.4 }} />
+              <Legend wrapperStyle={{ fontSize: 11, paddingTop: 4 }} iconType="square" iconSize={9} formatter={(v) => <span style={{ color: "var(--text)" }}>{v}</span>} />
+              {BREAKDOWN_SERIES.filter((s) => grouped.rows.some((r) => Math.abs(r[s.key] as number) >= 0.5)).map((s) => (
+                <Bar key={s.key} dataKey={s.key} name={s.name} stackId="f" fill={s.color} isAnimationActive={false} />
+              ))}
+            </BarChart>
+          </ResponsiveContainer>
+          <p className="field-hint" style={{ margin: "var(--space-1) 0 0" }}>
+            Cada barra es lo facturado; la franja verde, lo que dejó la venta; lo cancelado va bajo cero. Full, otros cargos y la
+            publicidad sin venta se cobran por período: están en la tabla.
+          </p>
         </div>
-        <div>
-          <span className="label">Costos, cargos e impuestos</span>
-          <strong>{fmt(costsTotal(c))}</strong>
-          <span className="field-hint" style={{ margin: 0 }}>{share(costsTotal(c))} de lo facturado</span>
-        </div>
-        <div>
-          <span className="label">Ganancia neta</span>
-          <strong style={{ color: c.netProfit >= 0 ? "var(--positive)" : "var(--negative)" }}>{fmt(c.netProfit)}</strong>
-          <ChangeCell now={c.netProfit} prev={p?.netProfit} goodWhenUp />
-        </div>
-        <div>
-          <span className="label">Cancelado / devuelto</span>
-          <strong>{fmt(c.refundAmount)}</strong>
-          <span className="field-hint" style={{ margin: 0 }}>{c.refundOrders} orden(es) · no suma a la facturación</span>
-        </div>
-      </div>
 
-      <ResponsiveContainer width="100%" height={320}>
-        <BarChart data={grouped.rows} stackOffset="sign" margin={{ top: 8, right: 8, left: 8, bottom: 0 }} barCategoryGap="18%">
-          <CartesianGrid stroke="var(--border)" vertical={false} />
-          <XAxis dataKey="day" tickFormatter={shortDay} tick={{ fontSize: 11, fill: "var(--text-dim)" }} tickLine={false} axisLine={false} minTickGap={12} />
-          <YAxis tick={{ fontSize: 11, fill: "var(--text-dim)" }} tickLine={false} axisLine={false} width={84} tickFormatter={(v) => fmt(Number(v))} />
-          <ReferenceLine y={0} stroke="var(--text-dim)" />
-          <Tooltip content={<BreakdownTooltip />} labelFormatter={shortDay} cursor={{ fill: "var(--border)", opacity: 0.4 }} />
-          <Legend wrapperStyle={{ fontSize: 12, paddingTop: 8 }} iconType="square" formatter={(v) => <span style={{ color: "var(--text)" }}>{v}</span>} />
-          {BREAKDOWN_SERIES.filter((s) => grouped.rows.some((r) => Math.abs(r[s.key] as number) >= 0.5)).map((s) => (
-            <Bar key={s.key} dataKey={s.key} name={s.name} stackId="f" fill={s.color} isAnimationActive={false} />
-          ))}
-        </BarChart>
-      </ResponsiveContainer>
-      <p className="field-hint" style={{ marginTop: "var(--space-2)" }}>
-        La altura de cada barra es lo que facturaste; la franja verde de abajo, lo que dejó la venta. Lo cancelado o devuelto va por debajo de cero.
-        Full, otros cargos de ML y la publicidad que no cae en ninguna venta se cobran por período: están en la tabla, no en las barras.
-      </p>
-
-      <div className="table-wrap" style={{ marginTop: "var(--space-3)" }}>
-        <table className="breakdown-table">
-          <thead>
-            <tr>
-              <th>Concepto</th>
-              <th className="num">Monto</th>
-              <th className="num">% de lo facturado</th>
-              <th className="num">Período anterior</th>
-              <th className="num">Cambio</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><strong>Facturación</strong></td>
-              <td className="num"><strong>{fmt(c.revenue)}</strong></td>
-              <td className="num">100%</td>
-              <td className="num">{p ? fmt(p.revenue) : "—"}</td>
-              <td className="num"><ChangeCell now={c.revenue} prev={p?.revenue} goodWhenUp /></td>
-            </tr>
-            {visibleRows.map((r) => (
-              <tr key={r.label}>
-                <td>
-                  <span className="breakdown-dot" style={{ background: r.color }} aria-hidden="true" />
-                  − {r.label}
-                  {r.hint && <div className="field-hint" style={{ margin: "0 0 0 18px" }}>{r.hint}</div>}
-                </td>
-                <td className="num">{fmt(-r.now)}</td>
-                <td className="num">{share(r.now)}</td>
-                <td className="num">{r.prev === undefined ? "—" : fmt(-r.prev)}</td>
-                <td className="num"><ChangeCell now={r.now} prev={r.prev} goodWhenUp={false} /></td>
+        <div className="table-wrap breakdown-table-wrap">
+          <table className="breakdown-table">
+            <thead>
+              <tr>
+                <th>Concepto</th>
+                <th className="num">Monto</th>
+                <th className="num">%</th>
+                <th className="num" title="Contra el período anterior, del mismo largo">Cambio</th>
               </tr>
-            ))}
-            <tr>
-              <td style={{ fontWeight: 700 }}><span className="breakdown-dot" style={{ background: "var(--positive-fill)" }} aria-hidden="true" />= Ganancia neta</td>
-              <td className="num" style={{ fontWeight: 700, color: c.netProfit >= 0 ? "var(--positive)" : "var(--negative)" }}>{fmt(c.netProfit)}</td>
-              <td className="num" style={{ fontWeight: 700 }}>{share(c.netProfit)}</td>
-              <td className="num">{p ? fmt(p.netProfit) : "—"}</td>
-              <td className="num"><ChangeCell now={c.netProfit} prev={p?.netProfit} goodWhenUp /></td>
-            </tr>
-            <tr>
-              <td>
-                <span className="breakdown-dot" style={{ background: "var(--negative-line)" }} aria-hidden="true" />
-                Cancelado / devuelto
-                <div className="field-hint" style={{ margin: "0 0 0 18px" }}>{c.refundOrders} orden(es). Aparte: no suma a la facturación ni a la ganancia</div>
-              </td>
-              <td className="num">{fmt(c.refundAmount)}</td>
-              <td className="num">{c.revenue > 0 ? share(c.refundAmount) : "—"}</td>
-              <td className="num">{p ? fmt(p.refundAmount) : "—"}</td>
-              <td className="num"><ChangeCell now={c.refundAmount} prev={p?.refundAmount} goodWhenUp={false} /></td>
-            </tr>
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Facturación</strong></td>
+                <td className="num"><strong>{fmt(c.revenue)}</strong></td>
+                <td className="num">100%</td>
+                <td className="num" title={p ? `Período anterior: ${fmt(p.revenue)}` : undefined}><ChangeCell now={c.revenue} prev={p?.revenue} goodWhenUp /></td>
+              </tr>
+              {visibleRows.map((r) => (
+                <tr key={r.label} title={r.hint}>
+                  <td>
+                    <span className="breakdown-dot" style={{ background: r.color }} aria-hidden="true" />
+                    − {r.label}
+                  </td>
+                  <td className="num">{fmt(-r.now)}</td>
+                  <td className="num">{share(r.now)}</td>
+                  <td className="num" title={r.prev === undefined ? undefined : `Período anterior: ${fmt(-r.prev)}`}><ChangeCell now={r.now} prev={r.prev} goodWhenUp={false} /></td>
+                </tr>
+              ))}
+              <tr className="breakdown-total">
+                <td><span className="breakdown-dot" style={{ background: "var(--positive-fill)" }} aria-hidden="true" />= Ganancia neta</td>
+                <td className="num" style={{ color: c.netProfit >= 0 ? "var(--positive)" : "var(--negative)" }}>{fmt(c.netProfit)}</td>
+                <td className="num">{share(c.netProfit)}</td>
+                <td className="num" title={p ? `Período anterior: ${fmt(p.netProfit)}` : undefined}><ChangeCell now={c.netProfit} prev={p?.netProfit} goodWhenUp /></td>
+              </tr>
+              <tr title="Aparte: no suma a la facturación ni a la ganancia">
+                <td>
+                  <span className="breakdown-dot" style={{ background: "var(--negative-line)" }} aria-hidden="true" />
+                  Cancelado / devuelto <span className="field-hint" style={{ margin: 0 }}>· {c.refundOrders} órd.</span>
+                </td>
+                <td className="num">{fmt(c.refundAmount)}</td>
+                <td className="num">{c.revenue > 0 ? share(c.refundAmount) : "—"}</td>
+                <td className="num" title={p ? `Período anterior: ${fmt(p.refundAmount)}` : undefined}><ChangeCell now={c.refundAmount} prev={p?.refundAmount} goodWhenUp={false} /></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </section>
   );
@@ -1415,8 +1387,15 @@ export default function HomePage() {
   }
 
   return (
-    <div>
-      <h1>Resumen de cuenta</h1>
+    <div className="resumen-page">
+      <div className="page-head">
+        <h1>Resumen de cuenta</h1>
+        <div className="page-head-actions">
+          <a className="field-hint" href={`/api/export/orders?from=${from}&to=${to}`}>Detalle del período (CSV)</a>
+          <a className="field-hint" href="/api/export/financial-statement">Estado financiero (Excel)</a>
+          <SyncButton compact />
+        </div>
+      </div>
       {mlConnected === false && (
         <p className="missing-cost">
           Todavía no conectaste Mercado Libre. <a href="/api/ml/login">Conectar ahora</a>
@@ -1430,8 +1409,6 @@ export default function HomePage() {
           <pre>{summary.pendingMigrations.join("\n")}</pre>
         </div>
       )}
-      <SyncButton />
-
       <PeriodBar
         period={period}
         onPeriodChange={setPeriod}
@@ -1441,23 +1418,10 @@ export default function HomePage() {
         onCustomToChange={setCustomTo}
       />
 
-      <p
-        className="field-hint"
-        style={{ margin: "var(--space-2) 0 0", textAlign: "right", display: "flex", gap: "var(--space-3)", justifyContent: "flex-end", flexWrap: "wrap" }}
-      >
-        <a href={`/api/export/orders?from=${from}&to=${to}`}>
-          Descargar detalle del período (CSV)
-        </a>
-        <a href="/api/export/financial-statement">
-          Descargar estado financiero (Excel)
-        </a>
-      </p>
-
-      <h2 className="section-title">Tienda</h2>
       {summary === null ? (
         <KpiSkeleton />
       ) : (
-      <div className="kpi-grid">
+      <div className="kpi-grid kpi-grid-8 kpi-compact">
         <div className="kpi-card kpi-hero">
           <div className="kpi-card-head"><KpiIcon name="gross" /><span className="label">Facturación</span><KpiInfo>Suma de precio × cantidad de todo lo vendido, antes de descontar nada. Las órdenes canceladas no cuentan.</KpiInfo></div>
           <div className="value"><KpiValue>{summary ? fmt(summary.grossSales) : "-"}</KpiValue></div>
@@ -1503,6 +1467,8 @@ export default function HomePage() {
       </div>
       )}
 
+      {breakdown && <RevenueBreakdownPanel data={breakdown} />}
+
       <InsightsPanel from={from} to={to} />
 
       {summary && summary.itemsMissingCost > 0 && (
@@ -1511,8 +1477,6 @@ export default function HomePage() {
           products={summary.productsMissingCost ?? []}
         />
       )}
-
-      {breakdown && <RevenueBreakdownPanel data={breakdown} />}
 
       {summary?.adjustments && summary.salesProfit !== undefined && (
         <NetProfitBreakdown salesProfit={summary.salesProfit} adj={summary.adjustments} netProfit={summary.netProfit} />

@@ -30,6 +30,7 @@ import {
   ADS_LOOKBACK_DAYS,
   getFullStock,
   probeProductAdsGranularity,
+  getPriceToWin,
 } from "./tools";
 import { mlFetch, MlApiError } from "./ml-client";
 
@@ -1412,5 +1413,36 @@ describe("getOrderDetail en un carrito", () => {
       throw new Error(path);
     });
     expect((await getOrderDetail("acc1", "1")).items[0].shippingCost).toBe(420);
+  });
+});
+
+describe("getPriceToWin", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("lee el precio para ganar y el del ganador de una publicación de catálogo", async () => {
+    vi.mocked(mlFetch).mockResolvedValueOnce({
+      item_id: "MLA1", status: "competing", price_to_win: 18990, catalog_product_id: "MLA555",
+      winner: { item_id: "MLA9", price: 19100 }, reason: ["shipping_not_free"],
+    });
+
+    const r = await getPriceToWin("acc1", "MLA1");
+
+    expect(String(vi.mocked(mlFetch).mock.calls[0][0])).toBe("/items/MLA1/price_to_win?siteId=MLA&version=v2");
+    expect(r).toEqual({
+      available: true, status: "competing", priceToWin: 18990, winnerPrice: 19100, winnerItemId: "MLA9",
+      catalogProductId: "MLA555", reasons: ["shipping_not_free"], boosts: [], currentPrice: null, visitShare: null,
+    });
+  });
+
+  it("si la publicación no es de catálogo, lo dice en vez de tirar error", async () => {
+    vi.mocked(mlFetch).mockRejectedValueOnce(new MlApiError(404, "not found"));
+    const r = await getPriceToWin("acc1", "MLA1");
+    expect(r.available).toBe(false);
+    expect(r.reason).toContain("catálogo");
+  });
+
+  it("si ML no le da el dato a la app, lo dice", async () => {
+    vi.mocked(mlFetch).mockRejectedValueOnce(new MlApiError(403, "forbidden"));
+    expect((await getPriceToWin("acc1", "MLA1")).reason).toContain("no le da este dato");
   });
 });

@@ -153,6 +153,11 @@ export const EXPECTED_COLUMNS: { table: string; column: string; ddl: string }[] 
     ddl: "-- Correr db/postgres/migrations/024-respuestas-con-ia.sql (respuestas a consultas con IA).",
   },
   {
+    table: "competition_snapshots",
+    column: "price_to_win",
+    ddl: "-- Correr db/postgres/migrations/027-competencia.sql (seguimiento de la competencia en catálogo).",
+  },
+  {
     table: "products",
     column: "units_per_pack",
     ddl: "ALTER TABLE products ADD COLUMN IF NOT EXISTS units_per_pack INTEGER;",
