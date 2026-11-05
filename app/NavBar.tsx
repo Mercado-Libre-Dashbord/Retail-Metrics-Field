@@ -13,6 +13,7 @@ const NAV_ITEMS = [
   { href: "/", label: "Resumen", icon: "grid" },
   { href: "/productos", label: "Productos", icon: "box" },
   { href: "/precios", label: "Precios", icon: "tag" },
+  { href: "/competencia", label: "Competencia", icon: "radar" },
   { href: "/full", label: "Full", icon: "warehouse" },
   { href: "/consultas", label: "Consultas", icon: "question" },
   { href: "/campanas", label: "Campañas", icon: "megaphone" },
@@ -33,6 +34,13 @@ function NavIcon({ name }: { name: string }) {
     ),
     box: <path d="M3 7.5L12 3l9 4.5-9 4.5-9-4.5zM3 7.5v9L12 21m0-9v9m9-13.5v9L12 21" />,
     trend: <path d="M3 17l6-6 4 4 8-8M15 7h6v6" />,
+    radar: (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <circle cx="12" cy="12" r="5" />
+        <path d="M12 12l6-6" />
+      </>
+    ),
     tag: (
       <>
         <path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8z" />

@@ -1819,6 +1819,12 @@ export interface PriceToWin {
   catalogProductId?: string | null;
   /** Motivos que da ML (p. ej. "shipping_not_free"). */
   reasons?: string[];
+  /** Lo que suma para ganar: { id, status: boosted | opportunity | not_apply }. */
+  boosts?: { id: string; status: string }[];
+  /** Precio actual de la publicación según ML. */
+  currentPrice?: number | null;
+  /** Parte de las visitas del catálogo que se lleva (maximum / medium / minimum). */
+  visitShare?: string | null;
 }
 
 /**
@@ -1839,6 +1845,11 @@ export async function getPriceToWin(accountId: string, itemId: string): Promise<
       winnerItemId: res?.winner?.item_id ?? null,
       catalogProductId: res?.catalog_product_id ?? null,
       reasons: Array.isArray(res?.reason) ? res.reason.map(String) : [],
+      boosts: Array.isArray(res?.boosts)
+        ? res.boosts.filter((b: any) => b?.id).map((b: any) => ({ id: String(b.id), status: String(b.status ?? "") }))
+        : [],
+      currentPrice: typeof res?.current_price === "number" ? res.current_price : null,
+      visitShare: res?.visit_share ?? null,
     };
   } catch (err) {
     if (err instanceof MlApiError) {
@@ -1854,4 +1865,51 @@ export async function getPriceToWin(accountId: string, itemId: string): Promise<
     }
     throw err;
   }
+}
+
+export interface CatalogCompetitor {
+  itemId: string;
+  sellerId: string | null;
+  price: number;
+  freeShipping: boolean | null;
+  listingType: string | null;
+}
+
+/**
+ * Todas las publicaciones que compiten en un producto de catálogo, con su
+ * precio. Vacío si ML no lo devuelve (catálogo inexistente o sin acceso).
+ */
+export async function getCatalogCompetitors(accountId: string, catalogProductId: string): Promise<CatalogCompetitor[]> {
+  const token = await getValidAccessToken(accountId);
+  try {
+    const res: any = await mlFetch(`/products/${encodeURIComponent(catalogProductId)}/items`, token);
+    const rows: any[] = Array.isArray(res?.results) ? res.results : Array.isArray(res) ? res : [];
+    return rows
+      .filter((r) => r?.item_id && typeof r?.price === "number")
+      .map((r) => ({
+        itemId: String(r.item_id),
+        sellerId: r.seller_id != null ? String(r.seller_id) : null,
+        price: Number(r.price),
+        freeShipping: typeof r?.shipping?.free_shipping === "boolean" ? r.shipping.free_shipping : null,
+        listingType: r.listing_type_id ?? null,
+      }));
+  } catch (err) {
+    if (err instanceof MlApiError && [400, 401, 403, 404].includes(err.status)) return [];
+    throw err;
+  }
+}
+
+/** Apodo público de cada vendedor (los que fallen quedan afuera). */
+export async function getSellerNicknames(accountId: string, sellerIds: string[]): Promise<Map<string, string>> {
+  const token = await getValidAccessToken(accountId);
+  const out = new Map<string, string>();
+  const ids = [...new Set(sellerIds)].filter(Boolean);
+  for (let i = 0; i < ids.length; i += 5) {
+    const chunk = ids.slice(i, i + 5);
+    const res = await Promise.allSettled(chunk.map((id) => mlFetch(`/users/${encodeURIComponent(id)}`, token)));
+    res.forEach((r, j) => {
+      if (r.status === "fulfilled" && r.value?.nickname) out.set(chunk[j], String(r.value.nickname));
+    });
+  }
+  return out;
 }

@@ -1430,7 +1430,7 @@ describe("getPriceToWin", () => {
     expect(String(vi.mocked(mlFetch).mock.calls[0][0])).toBe("/items/MLA1/price_to_win?siteId=MLA&version=v2");
     expect(r).toEqual({
       available: true, status: "competing", priceToWin: 18990, winnerPrice: 19100, winnerItemId: "MLA9",
-      catalogProductId: "MLA555", reasons: ["shipping_not_free"],
+      catalogProductId: "MLA555", reasons: ["shipping_not_free"], boosts: [], currentPrice: null, visitShare: null,
     });
   });
 
