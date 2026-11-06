@@ -1913,3 +1913,95 @@ export async function getSellerNicknames(accountId: string, sellerIds: string[])
   }
   return out;
 }
+
+// ── Referencia de precios y automatización de precios de ML ─────────────
+
+export interface PriceReference {
+  available: boolean;
+  /** Estado que da ML (p. ej. no_benchmark_ok, no_benchmark_lowest, with_benchmark_high). */
+  status?: string | null;
+  /** Precio que ML sugiere para la publicación. */
+  suggestedPrice?: number | null;
+  /** Precio más bajo entre publicaciones similares. */
+  lowestPrice?: number | null;
+  /** Referencias dentro y fuera de Mercado Libre. */
+  internalPrice?: number | null;
+  externalPrice?: number | null;
+  /** Diferencia % entre el precio actual y la referencia (positivo = estás más caro). */
+  percentDifference?: number | null;
+  /** Si ML considera que la sugerencia aplica a esta publicación. */
+  applicable?: boolean | null;
+}
+
+/** Un monto que ML a veces manda como número y a veces como { amount }. */
+function amountOf(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (v && typeof v === "object" && typeof (v as { amount?: unknown }).amount === "number") return (v as { amount: number }).amount;
+  return null;
+}
+
+/**
+ * Referencia de precios de Mercado Libre para una publicación: el precio que
+ * sugiere y el más bajo entre publicaciones similares (dentro y fuera de ML).
+ * Existe también para publicaciones que no son de catálogo. Se prueba el
+ * recurso nuevo (/marketplace/benchmarks) y, si no contesta, el anterior
+ * (/suggestions). Un 404 quiere decir que ML no tiene referencia para ella.
+ */
+export async function getPriceReference(accountId: string, itemId: string): Promise<PriceReference> {
+  const token = await getValidAccessToken(accountId);
+  const id = encodeURIComponent(itemId);
+  let res: any = null;
+  for (const path of [`/suggestions/items/${id}/details`, `/marketplace/benchmarks/items/${id}/details`]) {
+    try {
+      res = await mlFetch(path, token);
+      break;
+    } catch (err) {
+      if (err instanceof MlApiError && [400, 401, 403, 404].includes(err.status)) continue;
+      if (err instanceof MlApiError && err.status === 429) return { available: false };
+      throw err;
+    }
+  }
+  if (!res) return { available: false };
+  const pd = res.percent_difference ?? res.ratio;
+  return {
+    available: true,
+    status: res.status ?? null,
+    suggestedPrice: amountOf(res.suggested_price),
+    lowestPrice: amountOf(res.lowest_price),
+    internalPrice: amountOf(res.internal_price),
+    externalPrice: amountOf(res.external_price),
+    percentDifference: typeof pd === "number" ? pd : null,
+    applicable: typeof res.applicable_suggestion === "boolean" ? res.applicable_suggestion : null,
+  };
+}
+
+export interface PriceAutomation {
+  active: boolean;
+  status: string | null;
+  minPrice: number | null;
+  maxPrice: number | null;
+  ruleId: string | null;
+}
+
+/**
+ * Si la publicación tiene activa la automatización de precios de Mercado
+ * Libre. Con la automatización activa, ML rechaza los cambios de precio que
+ * llegan por la API: hay que avisarle al vendedor en vez de mandar el cambio.
+ */
+export async function getPriceAutomation(accountId: string, itemId: string): Promise<PriceAutomation> {
+  const token = await getValidAccessToken(accountId);
+  try {
+    const res: any = await mlFetch(`/pricing-automation/items/${encodeURIComponent(itemId)}/automation`, token);
+    const status = res?.status ? String(res.status) : null;
+    return {
+      active: status === "ACTIVE",
+      status,
+      minPrice: amountOf(res?.min_price),
+      maxPrice: amountOf(res?.max_price),
+      ruleId: res?.item_rule?.rule_id ?? res?.rule_id ?? null,
+    };
+  } catch (err) {
+    if (err instanceof MlApiError) return { active: false, status: null, minPrice: null, maxPrice: null, ruleId: null };
+    throw err;
+  }
+}

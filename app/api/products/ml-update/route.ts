@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withScope } from "@/db/client";
 import { resolveCurrentAccount } from "@/lib/current-account";
-import { updateProductPriceStock } from "@/mcp/tools";
+import { getPriceAutomation, updateProductPriceStock } from "@/mcp/tools";
 import { MlApiError } from "@/mcp/ml-client";
 
 export const runtime = "nodejs";
@@ -28,6 +28,21 @@ export async function POST(request: NextRequest) {
   }
   if (stock !== undefined && (typeof stock !== "number" || stock < 0)) {
     return NextResponse.json({ error: "stock tiene que ser un número mayor o igual a 0" }, { status: 400 });
+  }
+
+  // Con la automatización de precios de ML activa, ML rechaza el cambio (desde
+  // marzo de 2026): se avisa antes, con el rango que tiene configurado.
+  if (price !== undefined) {
+    const auto = await getPriceAutomation(account.id, productId).catch(() => null);
+    if (auto?.active) {
+      const range = auto.minPrice !== null || auto.maxPrice !== null
+        ? ` (entre ${auto.minPrice ?? "—"} y ${auto.maxPrice ?? "—"})`
+        : "";
+      return NextResponse.json(
+        { error: `Esta publicación tiene activa la automatización de precios de Mercado Libre${range}. Mercado Libre no deja cambiar el precio desde otra app: pausala en Mercado Libre o cambiá ahí el mínimo y el máximo.`, automation: auto },
+        { status: 409 }
+      );
+    }
   }
 
   try {

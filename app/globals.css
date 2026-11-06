@@ -1579,3 +1579,49 @@ main:has(.resumen-page) { max-width: 1680px; }
 .comp-detail > td { background: var(--surface-2); }
 .comp-sub { min-width: 0; background: transparent; }
 .comp-sub th, .comp-sub td { padding: 6px 10px; font-size: 12.5px; }
+
+/* Precios y competencia: una recomendación por producto */
+.precios-page .page-head-actions { gap: var(--space-3); }
+.inline-field { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-dim); }
+.inline-field input[type="number"] { width: 64px; padding: 4px 6px; }
+.rec-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-2); margin: var(--space-3) 0; }
+@media (max-width: 900px) { .rec-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.rec-sum { text-align: left; display: flex; flex-direction: column; gap: 2px; background: var(--surface); border: 1px solid var(--border); border-left-width: 4px; border-radius: var(--radius-md); padding: var(--space-3); cursor: pointer; font-family: inherit; color: var(--text); }
+.rec-sum .label { font-size: 12px; color: var(--text-dim); }
+.rec-sum strong { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; }
+.rec-sum .sub { font-size: 12px; color: var(--text-dim); }
+.rec-sum.urgent { border-left-color: var(--negative); }
+.rec-sum.urgent strong { color: var(--negative); }
+.rec-sum.opportunity { border-left-color: var(--positive); }
+.rec-sum.review { border-left-color: var(--ramp-3); }
+.rec-sum.active { box-shadow: inset 0 0 0 1px var(--selected-ring); background: var(--selected-bg); }
+.rec-layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: var(--space-4); align-items: start; }
+@media (max-width: 1200px) { .rec-layout { grid-template-columns: minmax(0, 1fr); } }
+.rec-toolbar { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; margin-bottom: var(--space-2); }
+.rec-toolbar .pricing-tabs { margin: 0; }
+.rec-toolbar .pricing-search { margin-left: auto; min-width: 200px; }
+.rec-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.rec-card { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--border); border-radius: var(--radius-md); padding: var(--space-3) var(--space-4); }
+.rec-card.rec-urgent { border-left-color: var(--negative); }
+.rec-card.rec-opportunity { border-left-color: var(--positive); }
+.rec-card.rec-review { border-left-color: var(--ramp-3); }
+.rec-main { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: var(--space-3); align-items: start; }
+@media (max-width: 760px) { .rec-main { grid-template-columns: 44px minmax(0, 1fr); } .rec-actions { grid-column: 1 / -1; } }
+.rec-main img, .rec-thumb { width: 44px; height: 44px; border-radius: 8px; object-fit: cover; background: var(--surface-2); display: block; }
+.rec-title { font-size: 13px; font-weight: 600; }
+.rec-title a { color: var(--text); text-decoration: none; }
+.rec-headline { margin: 4px 0 2px; font-size: 16px; font-weight: 700; letter-spacing: -0.01em; color: var(--text); }
+.rec-why { margin: 0; font-size: 13px; color: var(--text-dim); line-height: 1.45; }
+.rec-numbers { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; margin-top: 6px; font-size: 12.5px; color: var(--text-dim); }
+.rec-numbers strong { color: var(--text); font-weight: 600; }
+.rec-actions { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; min-width: 190px; }
+.rec-actions .btn { white-space: nowrap; }
+.rec-other { display: flex; gap: 4px; }
+.rec-other input { width: 96px; padding: 4px 8px; font-size: 13px; }
+.rec-detail { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3) var(--space-5); margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border-soft); font-size: 13px; }
+.rec-detail h4 { margin: 0 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-dim); }
+.rec-detail ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; }
+.rec-detail-wide { grid-column: 1 / -1; }
+@media (max-width: 760px) { .rec-detail { grid-template-columns: minmax(0, 1fr); } }
+.rec-layout .comp-feed { max-height: none; position: sticky; top: var(--space-4); }
+.rec-layout .comp-feed .comp-changes { display: flex; }
