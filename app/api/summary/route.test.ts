@@ -8,7 +8,7 @@ vi.mock("@/mcp/tools", () => ({ getStoreVisits: vi.fn().mockResolvedValue(null) 
 // Los ajustes del período (publicidad sin repartir, Full, otros cargos) tienen
 // su propio test contra Postgres real (sync/period-charges.pg.test.ts); acá se
 // prueba que el Resumen los sume.
-const ZERO_ADJ = { adSpend: 0, adsInSales: 0, adsNotInSales: 0, full: 0, otherCharges: 0, ivaCredit: 0, total: 0 };
+const ZERO_ADJ = { adSpend: 0, adsInSales: 0, adsNotInSales: 0, full: 0, otherCharges: 0, invoiceDiff: 0, ordersTotal: 0, ordersInvoiced: 0, invoiceEstimated: 0, invoiceBilled: 0, refundedOrders: 0, refundedRevenue: 0, refundedProfit: 0, refundedCosts: 0, cancelledCosts: 0, ivaCredit: 0, total: 0 };
 vi.mock("@/sync/period-charges", () => ({
   periodAdjustments: vi.fn(),
   monthlyAdjustments: vi.fn(),
@@ -235,7 +235,7 @@ describe("GET /api/summary", () => {
     resetColumnCache();
     vi.mocked(getCurrentUser).mockResolvedValue({ email: "admin@example.com", isAdmin: true });
     const adminBody = await (await GET(request)).json();
-    expect(adminBody.pendingMigrations).toHaveLength(25);
+    expect(adminBody.pendingMigrations).toHaveLength(26);
     const sql = adminBody.pendingMigrations.join(" ");
     expect(sql).toContain("ADD COLUMN IF NOT EXISTS tax");
     expect(sql).toContain("iva_applied");

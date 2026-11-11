@@ -158,6 +158,11 @@ export const EXPECTED_COLUMNS: { table: string; column: string; ddl: string }[] 
     ddl: "-- Correr db/postgres/migrations/027-competencia.sql (seguimiento de la competencia en catálogo).",
   },
   {
+    table: "competition_snapshots",
+    column: "reference",
+    ddl: "-- Correr db/postgres/migrations/028-referencia-de-precios.sql (referencia de precios de Mercado Libre).",
+  },
+  {
     table: "products",
     column: "units_per_pack",
     ddl: "ALTER TABLE products ADD COLUMN IF NOT EXISTS units_per_pack INTEGER;",

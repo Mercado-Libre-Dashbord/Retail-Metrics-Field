@@ -520,7 +520,7 @@ export async function GET() {
       const row = get(m.month);
       row.netProfit += m.total;
       row.iva -= m.ivaCredit;
-      row.mlCharges = m.full + m.otherCharges;
+      row.mlCharges = m.full + m.otherCharges + m.invoiceDiff + m.refundedCosts + m.cancelledCosts;
     }
     const monthRows = [...byMonth.values()].sort((a, b) => a.month.localeCompare(b.month));
 

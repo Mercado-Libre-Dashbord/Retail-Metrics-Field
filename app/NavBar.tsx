@@ -13,7 +13,6 @@ const NAV_ITEMS = [
   { href: "/", label: "Resumen", icon: "grid" },
   { href: "/productos", label: "Productos", icon: "box" },
   { href: "/precios", label: "Precios", icon: "tag" },
-  { href: "/competencia", label: "Competencia", icon: "radar" },
   { href: "/full", label: "Full", icon: "warehouse" },
   { href: "/consultas", label: "Consultas", icon: "question" },
   { href: "/campanas", label: "Campañas", icon: "megaphone" },

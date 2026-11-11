@@ -2,12 +2,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@/db/client", () => ({ withScope: vi.fn((ctx: unknown, fn: (client: unknown) => unknown) => fn({ query: vi.fn() })) }));
 vi.mock("@/lib/current-account", () => ({ resolveCurrentAccount: vi.fn() }));
-vi.mock("@/mcp/tools", () => ({ updateProductPriceStock: vi.fn() }));
+vi.mock("@/mcp/tools", () => ({ updateProductPriceStock: vi.fn(), getPriceAutomation: vi.fn() }));
 
 import { POST } from "./route";
 import { withScope } from "@/db/client";
 import { resolveCurrentAccount } from "@/lib/current-account";
-import { updateProductPriceStock } from "@/mcp/tools";
+import { getPriceAutomation, updateProductPriceStock } from "@/mcp/tools";
 import { MlApiError } from "@/mcp/ml-client";
 
 const account = { id: "acc1", name: "Cuenta", ownerEmail: "a@example.com", mlSellerId: "S1", otherTaxRate: 0, taxCondition: "responsable_inscripto" as const, taxConditionConfirmed: true, createdAt: "2026-01-01" };
@@ -16,6 +16,18 @@ describe("POST /api/products/ml-update", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(resolveCurrentAccount).mockResolvedValue(account);
+    vi.mocked(getPriceAutomation).mockResolvedValue({ active: false, status: null, minPrice: null, maxPrice: null, ruleId: null });
+  });
+
+  it("si la publicación tiene la automatización de precios de ML activa, avisa y no manda el cambio", async () => {
+    vi.mocked(getPriceAutomation).mockResolvedValue({ active: true, status: "ACTIVE", minPrice: 20000, maxPrice: 25000, ruleId: "INT" });
+    const request = { json: async () => ({ productId: "MLA1", price: 21500 }) } as any;
+
+    const res = await POST(request);
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toContain("automatización de precios");
+    expect(updateProductPriceStock).not.toHaveBeenCalled();
   });
 
   it("returns 401 when there is no active account", async () => {

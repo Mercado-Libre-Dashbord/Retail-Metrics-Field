@@ -1,6 +1,6 @@
 import type { QueryExecutor } from "@/db/client";
 import { hasColumn } from "@/db/schema-capabilities";
-import { getCatalogCompetitors, getPriceToWin, getSellerNicknames } from "@/mcp/tools";
+import { getCatalogCompetitors, getPriceReference, getPriceToWin, getSellerNicknames, type PriceReference } from "@/mcp/tools";
 
 /**
  * Actualiza la foto de la competencia de las publicaciones de catálogo.
@@ -10,14 +10,17 @@ import { getCatalogCompetitors, getPriceToWin, getSellerNicknames } from "@/mcp/
  * guarda una fila nueva cuando su precio cambió: así competitor_prices es el
  * historial de cambios de precio de los demás.
  *
- * Las que no son de catálogo se marcan 'not_catalog' y no se vuelven a
- * consultar por NOT_CATALOG_RECHECK_HOURS (una publicación puede pasar a
- * catálogo, por eso no es para siempre).
+ * Además, para todas (sean o no de catálogo), la referencia de precios de ML:
+ * el precio sugerido y el más bajo entre publicaciones similares.
+ *
+ * Las que no son de catálogo se marcan 'not_catalog' y se vuelven a mirar
+ * cada NOT_CATALOG_RECHECK_HOURS (la referencia cambia más despacio y una
+ * publicación puede pasar a catálogo).
  *
  * Corre con presupuesto de tiempo: lo que no entra queda para la próxima
  * llamada, que arranca por las publicaciones con la foto más vieja.
  */
-export const NOT_CATALOG_RECHECK_HOURS = 72;
+export const NOT_CATALOG_RECHECK_HOURS = 24;
 /** Una foto más nueva que esto no se vuelve a pedir (ML limita los pedidos). */
 export const FRESH_MINUTES = 10;
 const CONCURRENCY = 4;
@@ -54,11 +57,17 @@ export async function refreshCompetition(
     [accountId, opts.productIds ?? null, opts.force === true, FRESH_MINUTES, NOT_CATALOG_RECHECK_HOURS]
   );
 
+  const hasReference = await hasColumn(client, "competition_snapshots", "reference");
   const queue = candidates.rows;
   let refreshed = 0;
   while (queue.length > 0 && Date.now() < deadline) {
     const chunk = queue.splice(0, CONCURRENCY);
-    const results = await Promise.all(chunk.map((p) => getPriceToWin(accountId, p.id).catch(() => null)));
+    const [results, references] = await Promise.all([
+      Promise.all(chunk.map((p) => getPriceToWin(accountId, p.id).catch(() => null))),
+      hasReference
+        ? Promise.all(chunk.map((p) => getPriceReference(accountId, p.id).catch((): PriceReference => ({ available: false }))))
+        : Promise.resolve(chunk.map((): PriceReference => ({ available: false }))),
+    ]);
     // Mercado Libre limitó los pedidos: se corta acá y lo que falta sigue en
     // la próxima actualización, sin guardar una foto vacía.
     if (results.some((r) => r && !r.available && r.reason?.includes("limitó"))) {
@@ -70,14 +79,16 @@ export async function refreshCompetition(
       const r = results[i];
       if (!r) continue;
       const status = r.available ? (r.status ?? "listed") : r.reason?.includes("catálogo") ? "not_catalog" : "unavailable";
+      const ref = references[i];
       await client.query(
         `INSERT INTO competition_snapshots
-           (account_id, product_id, catalog_product_id, status, my_price, price_to_win, winner_item_id, winner_price, visit_share, reasons, boosts)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)`,
+           (account_id, product_id, catalog_product_id, status, my_price, price_to_win, winner_item_id, winner_price, visit_share, reasons, boosts${hasReference ? ", reference" : ""})
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb${hasReference ? ", $12::jsonb" : ""})`,
         [
           accountId, p.id, r.catalogProductId ?? null, status, r.currentPrice ?? Number(p.price),
           r.priceToWin ?? null, r.winnerItemId ?? null, r.winnerPrice ?? null, r.visitShare ?? null,
           r.reasons ?? [], JSON.stringify(r.boosts ?? []),
+          ...(hasReference ? [ref.available ? JSON.stringify(ref) : null] : []),
         ]
       );
       refreshed += 1;

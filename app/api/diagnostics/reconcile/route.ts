@@ -6,7 +6,8 @@ import { revenueStatusFilter } from "@/lib/order-status";
 import { getValidAccessToken } from "@/mcp/auth";
 import { mlFetch } from "@/mcp/ml-client";
 import { classifyCharge } from "@/sync/billing";
-import { CHARGE_DATE_SQL } from "@/sync/period-charges";
+import { CHARGE_DATE_SQL, SIGNED_AMOUNT_SQL, periodAdjustments } from "@/sync/period-charges";
+import { appliesIva } from "@/db/accounts";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -126,8 +127,30 @@ export async function GET(request: NextRequest) {
       samples.push({ error: (err as Error).message });
     }
 
+    // Para validar el ajuste por factura: los cargos del período por concepto
+    // y tipo (con las bonificaciones en negativo) y el ajuste que resulta.
+    const byBucketAndType = (
+      await client.query<{ concept: string | null; detail_type: string | null; detail_sub_type: string | null; linked: boolean; n: string; raw: string; signed: string }>(
+        `SELECT concept, detail_type, detail_sub_type, (order_id IS NOT NULL AND order_id <> '') as linked,
+                COUNT(*) as n, SUM(amount) as raw, SUM(${SIGNED_AMOUNT_SQL}) as signed
+           FROM billing_charges
+          WHERE account_id = $1 AND ${CHARGE_DATE_SQL} BETWEEN $2::date AND $3::date
+          GROUP BY 1, 2, 3, 4`,
+        [account.id, from, to]
+      )
+    ).rows.reduce<Record<string, { count: number; rawAmount: number; signedAmount: number }>>((acc, r) => {
+      const key = `${classifyCharge(r.concept, r.detail_type, r.detail_sub_type)} | ${r.detail_type ?? "—"} | ${r.linked ? "con venta" : "sin venta"}`;
+      const a = (acc[key] ??= { count: 0, rawAmount: 0, signedAmount: 0 });
+      a.count += Number(r.n); a.rawAmount += Number(r.raw); a.signedAmount += Number(r.signed);
+      return acc;
+    }, {});
+    const adjustments = await periodAdjustments(client, account.id, from, to, appliesIva(account.taxCondition));
+
     return {
       period: { from, to },
+      account: { otherTaxRate: account.otherTaxRate, taxCondition: account.taxCondition },
+      adjustments,
+      byBucketAndType,
       orders: orders.length,
       ordersWithBillingCharges: withBilling.length,
       chargesWithOrderNotInDb,
