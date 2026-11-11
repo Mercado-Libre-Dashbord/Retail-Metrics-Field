@@ -88,17 +88,26 @@ describe("ajustes del período (Postgres real)", () => {
     // percepciones, Product Ads y el "cargo varios" atado a O1, no.
     expect(sept.full).toBe(2420);
     expect(sept.otherCharges).toBe(6094850);
-    // Crédito de IVA: Mercado Ads sin repartir (200) + Full + otros. Meta no.
-    expect(sept.ivaCredit).toBeCloseTo(IVA(200 + 2420 + 6094850), 6);
-    expect(sept.total).toBeCloseTo(-700 - 2420 - 6094850 + IVA(200 + 2420 + 6094850), 6);
+    // Factura vs. estimado: la venta O1 se guardó con comisión y envío en 0 y
+    // la factura le ató 1500 + 900 + 700 (el "cargo varios" también es de la
+    // venta): esos 3100 se restan. Percepciones y Product Ads no entran.
+    expect(sept.ordersTotal).toBe(1);
+    expect(sept.ordersInvoiced).toBe(1);
+    expect(sept.invoiceBilled).toBe(3100);
+    expect(sept.invoiceEstimated).toBe(0);
+    expect(sept.invoiceDiff).toBe(3100);
+    // Crédito de IVA: Mercado Ads sin repartir (200) + Full + otros + la diferencia con la factura. Meta no.
+    expect(sept.ivaCredit).toBeCloseTo(IVA(200 + 2420 + 6094850 + 3100), 6);
+    expect(sept.total).toBeCloseTo(-700 - 2420 - 6094850 - 3100 + IVA(200 + 2420 + 6094850 + 3100), 6);
 
     // Sin IVA discriminado no hay crédito.
     expect(result.monotributo.ivaCredit).toBe(0);
-    expect(result.monotributo.total).toBe(-700 - 2420 - 6094850);
+    expect(result.monotributo.total).toBe(-700 - 2420 - 6094850 - 3100);
 
     // Octubre: IVA real cargado, todo repartido, y la comisión cargada a mano no se resta.
     const oct = result.months.find((m) => m.month === "2026-10")!;
-    expect(oct).toMatchObject({ adSpend: 100, adsInSales: 100, adsNotInSales: 0, full: 0, otherCharges: 0, ivaCredit: 0, total: 0 });
+    // O3 todavía no tiene factura: sigue con lo estimado, sin ajuste.
+    expect(oct).toMatchObject({ adSpend: 100, adsInSales: 100, adsNotInSales: 0, full: 0, otherCharges: 0, ordersTotal: 1, ordersInvoiced: 0, invoiceDiff: 0, ivaCredit: 0, total: 0 });
 
     const treatment = Object.fromEntries(result.details.map((d) => [d.concept, d.treatment]));
     expect(treatment).toMatchObject({
@@ -110,5 +119,62 @@ describe("ajustes del período (Postgres real)", () => {
       "Cargo varios": "per_sale",
       "Cargado a mano": "subtracted",
     });
+  });
+  it("concilia cada venta facturada con la factura: resta lo que ML cobró de más y devuelve lo estimado de más", async () => {
+    const { withScope } = await import("@/db/client");
+    const { createAccount } = await import("@/db/accounts");
+    const { periodAdjustments } = await import("./period-charges");
+    const account = await withScope({ isAdmin: true }, (c) => createAccount(c, "Cuenta factura", `fa.${nanoid(6)}@example.com`.toLowerCase()));
+
+    const adj = await withScope({ accountId: account.id }, async (c) => {
+      const orders: [string, string][] = [["A", "paid"], ["B", "paid"], ["C", "paid"], ["D", "cancelled"], ["E", "paid"]];
+      for (const [id, status] of orders) {
+        await c.query(`INSERT INTO orders (account_id, id, date_created, status) VALUES ($1, $2, '2026-09-10T15:00:00Z', $3)`, [account.id, id, status]);
+      }
+      // orden, comisión estimada, envío estimado, ganancia (null = sin costo cargado)
+      const items: [string, number, number, number | null][] = [
+        ["A", 1000, 500, 3000],   // ML cobró más: 1100 + 800 + 400 de cuotas
+        ["B", 2000, 600, 4000],   // ML cobró menos: 1800 + 600, y bonificó 300
+        ["C", 900, 300, 2000],    // sin factura todavía
+        ["D", 700, 200, 0],       // cancelada: no cuenta
+        ["E", 500, 100, null],    // sin costo cargado: fuera de la ganancia
+      ];
+      for (const [order, commission, shipping, net] of items) {
+        await c.query(
+          `INSERT INTO order_items (account_id, order_id, product_id, unit_price, quantity, ml_commission, shipping_cost, ads_cost_allocated, cost_applied, tax_applied, net_profit)
+           VALUES ($1, $2, 'P1', 10000, 1, $3, $4, 0, $5, 0, $6)`,
+          [account.id, order, commission, shipping, net === null ? null : 1, net]
+        );
+      }
+      const charges: [string, string, string, number, string][] = [
+        ["a1", "CHARGE", "Cargo por venta", 1100, "A"],
+        ["a2", "CHARGE", "Costo de envío", 800, "A"],
+        ["a3", "CHARGE", "Costo por ofrecer cuotas", 400, "A"],
+        ["a4", "CHARGE", "Percepción IIBB", 250, "A"],   // impuesto: no entra
+        ["a5", "CHARGE", "Product Ads", 90, "A"],        // publicidad: no entra
+        ["b1", "CHARGE", "Cargo por venta", 1800, "B"],
+        ["b2", "CHARGE", "Costo de envío", 600, "B"],
+        ["b3", "BONUS", "Bonificación por envío", 300, "B"], // bonificación: descuenta
+        ["d1", "CHARGE", "Cargo por venta", 700, "D"],
+        ["e1", "CHARGE", "Cargo por venta", 900, "E"],
+      ];
+      for (const [id, type, concept, amount, order] of charges) {
+        await c.query(
+          `INSERT INTO billing_charges (account_id, detail_id, period_key, detail_type, detail_sub_type, concept, order_id, amount, charged_at)
+           VALUES ($1, $2, '2026-09-01', $3, NULL, $4, $5, $6, '2026-09-15T12:00:00Z')`,
+          [account.id, id, type, concept, order, amount]
+        );
+      }
+      return periodAdjustments(c, account.id, "2026-09-01", "2026-09-30", false);
+    });
+
+    // Cuentan A, B y C (con costo y válidas); con factura, A y B.
+    expect(adj.ordersTotal).toBe(3);
+    expect(adj.ordersInvoiced).toBe(2);
+    // Estimado en A y B: 1500 + 2600. Facturado: 2300 + (1800 + 600 − 300).
+    expect(adj.invoiceEstimated).toBe(4100);
+    expect(adj.invoiceBilled).toBe(4400);
+    expect(adj.invoiceDiff).toBe(300);
+    expect(adj.total).toBe(-300);
   });
 });

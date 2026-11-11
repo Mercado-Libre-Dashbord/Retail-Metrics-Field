@@ -46,7 +46,7 @@ describe("GET /api/billing", () => {
 
     expect(body.available).toBe(true);
     expect(body.buckets[0]).toMatchObject({ bucket: "comision", label: "Comisiones de venta", amount: 1500, subtracted: 0 });
-    expect(body.buckets[0].treatments).toEqual([{ treatment: "per_sale", label: "Ya restado venta por venta", amount: 1500 }]);
+    expect(body.buckets[0].treatments).toEqual([{ treatment: "per_sale", label: "Restado venta por venta, con el monto de la factura", amount: 1500 }]);
     expect(body.buckets.map((b: any) => b.bucket)).toEqual(["comision", "impuesto", "envio"]);
     expect(body.total).toBe(2000);
     expect(body.subtracted).toBe(0);

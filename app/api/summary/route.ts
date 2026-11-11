@@ -132,6 +132,7 @@ async function breakdownFor(client: QueryExecutor, accountId: string, from: stri
     adsNotInSales: adj.adsNotInSales,
     full: adj.full,
     otherCharges: adj.otherCharges,
+    invoiceDiff: adj.invoiceDiff,
     ivaCredit: adj.ivaCredit,
     missingCost: n("missingCost") + (n("revenue") - explained),
     salesProfit,

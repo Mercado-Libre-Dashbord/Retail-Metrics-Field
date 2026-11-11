@@ -53,6 +53,12 @@ interface Adjustments {
   adsNotInSales: number;
   full: number;
   otherCharges: number;
+  /** Factura de ML menos lo estimado, en las ventas ya facturadas (positivo = se resta). */
+  invoiceDiff?: number;
+  ordersTotal?: number;
+  ordersInvoiced?: number;
+  invoiceEstimated?: number;
+  invoiceBilled?: number;
   ivaCredit: number;
   total: number;
 }
@@ -329,6 +335,7 @@ interface BreakdownTotals {
   adsNotInSales: number;
   full: number;
   otherCharges: number;
+  invoiceDiff?: number;
   ivaCredit: number;
   missingCost: number;
   salesProfit: number;
@@ -469,6 +476,7 @@ function RevenueBreakdownPanel({ data }: { data: BreakdownResponse }) {
     { label: "Publicidad", hint: `Mercado Ads${c.adsNotInSales > 0 ? " + Meta, Google o TikTok cargados a mano" : ""}`, color: "var(--chart-ads)", now: ads(c), prev: p ? ads(p) : undefined },
     { label: "Mercado Envíos Full", hint: "Almacenamiento y retiros, de tu factura de ML", color: "var(--ramp-3)", now: c.full, prev: p?.full },
     { label: "Otros cargos de Mercado Libre", hint: "Cargos de la factura que no son de una venta", color: "var(--ramp-5)", now: c.otherCharges, prev: p?.otherCharges },
+    { label: "Ajuste por la factura de ML", hint: "En las ventas ya facturadas: lo que Mercado Libre cobró de verdad (comisión, envío, cuotas y otros cargos de la venta) menos lo que se había estimado", color: "var(--ramp-2)", now: c.invoiceDiff ?? 0, prev: p?.invoiceDiff },
     { label: "Ventas sin costo cargado", hint: "Quedan fuera de la ganancia hasta que cargues el costo", color: "var(--ramp-6)", now: c.missingCost, prev: p?.missingCost },
   ];
   const visibleRows = rows.filter((r) => Math.abs(r.now) >= 0.5 || Math.abs(r.prev ?? 0) >= 0.5);
@@ -568,6 +576,15 @@ function NetProfitBreakdown({ salesProfit, adj, netProfit }: { salesProfit: numb
       sign: "−",
     },
     {
+      label: (adj.invoiceDiff ?? 0) >= 0 ? "Lo que la factura de Mercado Libre cobró de más" : "Lo que la factura de Mercado Libre cobró de menos",
+      hint:
+        `En ${adj.ordersInvoiced ?? 0} de ${adj.ordersTotal ?? 0} ventas ya llegó la factura: Mercado Libre cobró ${fmt(adj.invoiceBilled ?? 0)} ` +
+        `(comisión, envío, cuotas y otros cargos atados a cada venta) y se habían estimado ${fmt(adj.invoiceEstimated ?? 0)}. ` +
+        `Las ventas sin factura todavía siguen con lo estimado.`,
+      value: Math.abs(adj.invoiceDiff ?? 0),
+      sign: (adj.invoiceDiff ?? 0) >= 0 ? "−" : "+",
+    },
+    {
       label: "IVA a favor por esos cargos",
       hint: "El IVA que trae lo que te factura Mercado Libre es crédito fiscal: baja el IVA a pagar.",
       value: adj.ivaCredit,
@@ -608,7 +625,8 @@ function NetProfitBreakdown({ salesProfit, adj, netProfit }: { salesProfit: numb
       </div>
       <p className="field-hint" style={{ marginBottom: 0 }}>
         Publicidad total del período: {fmt(adj.adSpend)} ({fmt(adj.adsInSales)} ya dentro de las ventas + {fmt(adj.adsNotInSales)} restado acá).
-        La comisión y el envío de tu factura de Mercado Libre no se vuelven a restar: ya están en cada venta.
+        La comisión y el envío no se restan dos veces: cada venta arranca con lo estimado y, cuando llega la factura de Mercado Libre,
+        se ajusta a lo que cobró de verdad.
       </p>
     </div>
   );
@@ -616,7 +634,7 @@ function NetProfitBreakdown({ salesProfit, adj, netProfit }: { salesProfit: numb
 
 const TREATMENT_SHORT: Record<ChargeTreatment, string> = {
   subtracted: "Se resta",
-  per_sale: "Ya en cada venta",
+  per_sale: "En cada venta (monto de la factura)",
   in_ads: "Ya en Publicidad",
   tax: "No se resta (impuestos)",
 };
@@ -719,7 +737,7 @@ function RevenueSplitPie({ daily, adjustments }: { daily: DailyBreakdown[]; adju
   // cargos de ML) se suma a su porción y se resta de la ganancia, así la torta
   // muestra la misma ganancia neta que la tarjeta de arriba.
   const adj = adjustments;
-  const otherMl = adj ? adj.full + adj.otherCharges : 0;
+  const otherMl = adj ? adj.full + adj.otherCharges + Math.max(0, adj.invoiceDiff ?? 0) : 0;
   if (adj) {
     totals.ads += adj.adsNotInSales;
     totals.iva -= adj.ivaCredit;

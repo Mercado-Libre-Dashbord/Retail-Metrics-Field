@@ -40,7 +40,8 @@ async function breakdown(db: QueryExecutor, accountId: string, from: string, to:
   const adj = await periodAdjustments(db, accountId, from, to, withIva);
   return {
     revenue: Number(row.revenue),
-    commission: Number(row.commission),
+    // Con la diferencia que marca la factura de ML en las ventas ya facturadas.
+    commission: Number(row.commission) + adj.invoiceDiff,
     shipping: Number(row.shipping),
     cost: Number(row.cost),
     ads: Number(row.ads) + adj.adsNotInSales,
