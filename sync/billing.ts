@@ -92,7 +92,11 @@ export function classifyCharge(...fields: (string | null | undefined)[]): Charge
   if (/product ads|publicidad|advertis|campaign|ads/.test(haystack)) return "publicidad";
   // "Cargo por vender" es como Mercado Libre Argentina nombra la comisión en
   // la factura; "vender" no contiene "venta", así que caía en "otros".
-  if (/comisi[oó]n|comision|sale fee|selling fee|sales charge|cargo por venta|venta|vender|cargo fijo|costo fijo/.test(haystack)) return "comision";
+  // Una devolución tiene su propio cargo: no es comisión aunque diga "venta".
+  if (/devoluci[oó]n/.test(haystack)) return "otro";
+  // "Costo por unidad vendida" y "Costo por ofrecer cuotas" son parte de lo que
+  // ML cobra por vender: la orden los informa juntos en su comisión (sale_fee).
+  if (/comisi[oó]n|comision|sale fee|selling fee|sales charge|cargo por venta|venta|vender|cargo fijo|costo fijo|unidad vendida|ofrecer cuotas/.test(haystack)) return "comision";
   return "otro";
 }
 

@@ -101,3 +101,22 @@ describe("manual charges", () => {
     expect(classifyCharge("Percepción IVA", MANUAL_DETAIL_TYPE, "manual:inexistente")).toBe("impuesto");
   });
 });
+
+describe("conceptos reales de la factura de ML Argentina", () => {
+  it("el costo por unidad vendida y las cuotas son cargos por vender", () => {
+    expect(classifyCharge("Costo por unidad vendida", "CHARGE", "CVFF")).toBe("comision");
+    expect(classifyCharge("Costo por ofrecer cuotas", "CHARGE", "CVFN")).toBe("comision");
+    expect(classifyCharge("Anulación del costo por unidad vendida", "BONUS", "BVFF")).toBe("comision");
+  });
+  it("el cargo por devolución no es comisión ni envío", () => {
+    expect(classifyCharge("Cargo por devolución", "CHARGE", "CDSD")).toBe("otro");
+    expect(classifyCharge("Anulación del cargo por devolución", "BONUS", "BDSD")).toBe("otro");
+  });
+  it("clasifica envíos, Full, publicidad y percepciones", () => {
+    expect(classifyCharge("Cargo por envíos de Mercado Libre", "CHARGE", "CFF")).toBe("envio");
+    expect(classifyCharge("Cargo por servicio de colecta Full", "CHARGE", "CFCB")).toBe("full");
+    expect(classifyCharge("Cargo por campaña de Publicidad de Seguidores", "CHARGE", "CDLIT")).toBe("publicidad");
+    expect(classifyCharge("Percepción especial de IVA RG5319/2023", "CHARGE", "CIRE")).toBe("impuesto");
+    expect(classifyCharge("Cargo por mantenimiento de Mi página", "CHARGE", "CESM")).toBe("otro");
+  });
+});

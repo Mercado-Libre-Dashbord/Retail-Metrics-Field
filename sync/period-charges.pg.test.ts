@@ -127,7 +127,7 @@ describe("ajustes del período (Postgres real)", () => {
     const account = await withScope({ isAdmin: true }, (c) => createAccount(c, "Cuenta factura", `fa.${nanoid(6)}@example.com`.toLowerCase()));
 
     const adj = await withScope({ accountId: account.id }, async (c) => {
-      const orders: [string, string][] = [["A", "paid"], ["B", "paid"], ["C", "paid"], ["D", "cancelled"], ["E", "paid"]];
+      const orders: [string, string][] = [["A", "paid"], ["B", "paid"], ["C", "paid"], ["D", "cancelled"], ["E", "paid"], ["F", "paid"]];
       for (const [id, status] of orders) {
         await c.query(`INSERT INTO orders (account_id, id, date_created, status) VALUES ($1, $2, '2026-09-10T15:00:00Z', $3)`, [account.id, id, status]);
       }
@@ -138,6 +138,7 @@ describe("ajustes del período (Postgres real)", () => {
         ["C", 900, 300, 2000],    // sin factura todavía
         ["D", 700, 200, 0],       // cancelada: no cuenta
         ["E", 500, 100, null],    // sin costo cargado: fuera de la ganancia
+        ["F", 1000, 0, 2500],     // devuelta: ML anuló el cargo por vender, la orden sigue "paid"
       ];
       for (const [order, commission, shipping, net] of items) {
         await c.query(
@@ -157,6 +158,9 @@ describe("ajustes del período (Postgres real)", () => {
         ["b3", "BONUS", "Bonificación por envío", 300, "B"], // bonificación: descuenta
         ["d1", "CHARGE", "Cargo por venta", 700, "D"],
         ["e1", "CHARGE", "Cargo por venta", 900, "E"],
+        ["f1", "CHARGE", "Cargo por vender", 1000, "F"],
+        ["f2", "BONUS", "Anulación del cargo por vender", 1000, "F"],
+        ["f3", "CHARGE", "Cargo por devolución", 350, "F"],
       ];
       for (const [id, type, concept, amount, order] of charges) {
         await c.query(
@@ -168,13 +172,20 @@ describe("ajustes del período (Postgres real)", () => {
       return periodAdjustments(c, account.id, "2026-09-01", "2026-09-30", false);
     });
 
-    // Cuentan A, B y C (con costo y válidas); con factura, A y B.
+    // Cuentan A, B y C (con costo, válidas y no devueltas); con factura, A y B.
     expect(adj.ordersTotal).toBe(3);
     expect(adj.ordersInvoiced).toBe(2);
     // Estimado en A y B: 1500 + 2600. Facturado: 2300 + (1800 + 600 − 300).
     expect(adj.invoiceEstimated).toBe(4100);
     expect(adj.invoiceBilled).toBe(4400);
     expect(adj.invoiceDiff).toBe(300);
-    expect(adj.total).toBe(-300);
+    // F se devolvió: se saca su ganancia (2500) y se resta el cargo por devolución que quedó (350).
+    expect(adj.refundedOrders).toBe(1);
+    expect(adj.refundedRevenue).toBe(10000);
+    expect(adj.refundedProfit).toBe(2500);
+    expect(adj.refundedCosts).toBe(350);
+    // D está cancelada, pero ML le dejó cobrado un cargo de 700 sin anular.
+    expect(adj.cancelledCosts).toBe(700);
+    expect(adj.total).toBe(-300 - 2500 - 350 - 700);
   });
 });
