@@ -59,6 +59,10 @@ interface Adjustments {
   ordersInvoiced?: number;
   invoiceEstimated?: number;
   invoiceBilled?: number;
+  feeEstimated?: number;
+  feeBilled?: number;
+  shipEstimated?: number;
+  shipBilled?: number;
   /** Ventas con el cargo por vender anulado (devueltas) y cargos que quedaron en canceladas. */
   refundedOrders?: number;
   refundedRevenue?: number;
@@ -483,7 +487,7 @@ function RevenueBreakdownPanel({ data }: { data: BreakdownResponse }) {
     { label: "Publicidad", hint: `Mercado Ads${c.adsNotInSales > 0 ? " + Meta, Google o TikTok cargados a mano" : ""}`, color: "var(--chart-ads)", now: ads(c), prev: p ? ads(p) : undefined },
     { label: "Mercado Envíos Full", hint: "Almacenamiento y retiros, de tu factura de ML", color: "var(--ramp-3)", now: c.full, prev: p?.full },
     { label: "Otros cargos de Mercado Libre", hint: "Cargos de la factura que no son de una venta", color: "var(--ramp-5)", now: c.otherCharges, prev: p?.otherCharges },
-    { label: "Ajuste por la factura de ML", hint: "En las ventas ya facturadas: lo que Mercado Libre cobró de verdad por vender y por el envío, menos lo que informaba la orden", color: "var(--ramp-2)", now: c.invoiceDiff ?? 0, prev: p?.invoiceDiff },
+    { label: "Ajuste de comisión y envío por la factura", hint: "Solo comisión y envío de cada venta ya facturada: lo que Mercado Libre cobró de verdad menos lo que informaba la orden. No incluye publicidad ni Full", color: "var(--ramp-2)", now: c.invoiceDiff ?? 0, prev: p?.invoiceDiff },
     { label: "Ventas devueltas", hint: "La ganancia de las ventas que Mercado Libre anuló (aunque la orden figure pagada) y los cargos que quedaron en devueltas y canceladas", color: "var(--negative-line)", now: c.returnedSales ?? 0, prev: p?.returnedSales },
     { label: "Ventas sin costo cargado", hint: "Quedan fuera de la ganancia hasta que cargues el costo", color: "var(--ramp-6)", now: c.missingCost, prev: p?.missingCost },
   ];
@@ -568,7 +572,7 @@ function RevenueBreakdownPanel({ data }: { data: BreakdownResponse }) {
   );
 }
 
-function NetProfitBreakdown({ salesProfit, adj, netProfit }: { salesProfit: number; adj: Adjustments; netProfit: number }) {
+function NetProfitBreakdown({ salesProfit, adj, netProfit, from, to }: { salesProfit: number; adj: Adjustments; netProfit: number; from?: string; to?: string }) {
   const rows: { label: string; hint: string; value: number; sign: "−" | "+" }[] = [
     {
       label: "Publicidad que no está en ninguna venta",
@@ -586,9 +590,10 @@ function NetProfitBreakdown({ salesProfit, adj, netProfit }: { salesProfit: numb
     {
       label: (adj.invoiceDiff ?? 0) >= 0 ? "Lo que la factura de Mercado Libre cobró de más" : "Lo que la factura de Mercado Libre cobró de menos",
       hint:
-        `En ${adj.ordersInvoiced ?? 0} de ${adj.ordersTotal ?? 0} ventas ya llegó la factura: por vender y por el envío Mercado Libre cobró ${fmt(adj.invoiceBilled ?? 0)} ` +
-        `(con las anulaciones descontadas) y la orden informaba ${fmt(adj.invoiceEstimated ?? 0)}. ` +
-        `Las ventas sin factura todavía siguen con lo que informa la orden.`,
+        `Solo cargos atados a una venta (no incluye publicidad ni Full). En ${adj.ordersInvoiced ?? 0} de ${adj.ordersTotal ?? 0} ventas ya llegó la factura. ` +
+        `Cargos por vender (comisión, costo por unidad, cuotas, devoluciones): ML facturó ${fmt(adj.feeBilled ?? 0)} y la orden informaba ${fmt(adj.feeEstimated ?? 0)}. ` +
+        `Envío: ML facturó ${fmt(adj.shipBilled ?? 0)} y la orden informaba ${fmt(adj.shipEstimated ?? 0)}. ` +
+        `Las anulaciones ya están descontadas. Las ventas sin factura siguen con lo que informa la orden.`,
       value: Math.abs(adj.invoiceDiff ?? 0),
       sign: (adj.invoiceDiff ?? 0) >= 0 ? "−" : "+",
     },
@@ -647,8 +652,9 @@ function NetProfitBreakdown({ salesProfit, adj, netProfit }: { salesProfit: numb
       </div>
       <p className="field-hint" style={{ marginBottom: 0 }}>
         Publicidad total del período: {fmt(adj.adSpend)} ({fmt(adj.adsInSales)} ya dentro de las ventas + {fmt(adj.adsNotInSales)} restado acá).
-        La comisión y el envío no se restan dos veces: cada venta arranca con lo estimado y, cuando llega la factura de Mercado Libre,
-        se ajusta a lo que cobró de verdad.
+        La comisión y el envío no se restan dos veces: cada venta arranca con lo que informa la orden y, cuando llega la factura de Mercado Libre,
+        se ajusta a lo que cobró de verdad.{" "}
+        {from && to && <a href={`/api/export/invoice-reconciliation?from=${from}&to=${to}`}>Descargar la conciliación venta por venta (CSV)</a>}
       </p>
     </div>
   );
@@ -1519,7 +1525,7 @@ export default function HomePage() {
       )}
 
       {summary?.adjustments && summary.salesProfit !== undefined && (
-        <NetProfitBreakdown salesProfit={summary.salesProfit} adj={summary.adjustments} netProfit={summary.netProfit} />
+        <NetProfitBreakdown salesProfit={summary.salesProfit} adj={summary.adjustments} netProfit={summary.netProfit} from={from} to={to} />
       )}
 
       <h2 className="section-title">Rendimiento</h2>
