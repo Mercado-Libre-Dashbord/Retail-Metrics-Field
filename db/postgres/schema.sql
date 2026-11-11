@@ -136,6 +136,8 @@ ALTER TABLE products ADD COLUMN IF NOT EXISTS category_name TEXT;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS thumbnail TEXT;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS logistic_type TEXT;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS inventory_id TEXT;
+-- Un inventory_id por variante (migración 028).
+ALTER TABLE products ADD COLUMN IF NOT EXISTS inventory_ids TEXT[] NOT NULL DEFAULT '{}';
 ALTER TABLE products ADD COLUMN IF NOT EXISTS full_stock_qty INTEGER;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS full_stock_unavailable_qty INTEGER;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS low_stock_threshold INTEGER;

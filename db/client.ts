@@ -1,4 +1,5 @@
 import { Pool, type PoolClient } from "pg";
+import { BUSINESS_TIME_ZONE } from "@/lib/dates";
 
 let pool: Pool | null = null;
 
@@ -46,6 +47,9 @@ export async function withScope<T>(ctx: ScopeContext, fn: (client: PoolClient) =
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
+    // Los días y meses de todos los reportes (`::date`, `to_char`) se cortan
+    // en hora del negocio, no en UTC: ver lib/dates.ts.
+    await client.query("SELECT set_config('TimeZone', $1, true)", [BUSINESS_TIME_ZONE]);
     await client.query("SELECT set_config('app.current_account_id', $1, true)", [ctx.accountId ?? ""]);
     await client.query("SELECT set_config('app.is_admin', $1, true)", [ctx.isAdmin ? "true" : "false"]);
     await client.query("SELECT set_config('app.current_user_email', $1, true)", [ctx.userEmail ?? ""]);

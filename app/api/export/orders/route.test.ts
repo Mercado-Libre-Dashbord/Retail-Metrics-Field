@@ -31,7 +31,7 @@ describe("GET /api/export/orders", () => {
       return {
         rows: [
           {
-            orderId: "O1", dateCreated: "2026-08-05T00:00:00Z", status: "paid",
+            orderId: "O1", dateCreated: "2026-08-05T15:00:00Z", status: "paid",
             productId: "MLA1", productTitle: "Producto, con coma",
             quantity: 2, unitPrice: 1000, mlCommission: 130, shippingCost: 90,
             adsCostAllocated: 50, costApplied: 300, taxApplied: 10, ivaApplied: 42,
@@ -62,7 +62,7 @@ describe("GET /api/export/orders", () => {
       return {
         rows: [
           {
-            orderId: "O2", dateCreated: "2026-08-06T00:00:00Z", status: "cancelled",
+            orderId: "O2", dateCreated: "2026-08-06T15:00:00Z", status: "cancelled",
             productId: "MLA2", productTitle: "Otro", quantity: 1, unitPrice: 500,
             mlCommission: 0, shippingCost: 0, adsCostAllocated: 0, costApplied: null,
             taxApplied: null, ivaApplied: null, netProfit: null,
@@ -84,7 +84,7 @@ describe("GET /api/export/orders", () => {
       return {
         rows: [
           {
-            orderId: "O1", dateCreated: "2026-08-05T00:00:00Z", status: "paid",
+            orderId: "O1", dateCreated: "2026-08-05T15:00:00Z", status: "paid",
             productId: "MLA1", productTitle: '=HYPERLINK("http://x","clic")',
             quantity: 1, unitPrice: 1000, mlCommission: 130, shippingCost: 0,
             adsCostAllocated: 0, costApplied: 2000, taxApplied: null, ivaApplied: null,

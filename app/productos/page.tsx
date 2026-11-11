@@ -428,8 +428,9 @@ const SOLD_WITHIN_DAYS: Record<"week" | "month" | "semester", number> = {
 /** [1º, último día] del mes calendario anterior al actual — ej. si hoy es
  * cualquier día de septiembre, devuelve agosto entero. */
 function lastFullMonthRange(now = new Date()): { from: string; to: string } {
-  const year = now.getUTCFullYear();
-  const month = now.getUTCMonth();
+  // Año y mes en hora local: en UTC, las últimas horas del mes ya eran el siguiente.
+  const year = now.getFullYear();
+  const month = now.getMonth();
   const start = new Date(Date.UTC(year, month - 1, 1));
   const end = new Date(Date.UTC(year, month, 0)); // día 0 del mes actual = último día del anterior
   return { from: start.toISOString().slice(0, 10), to: end.toISOString().slice(0, 10) };

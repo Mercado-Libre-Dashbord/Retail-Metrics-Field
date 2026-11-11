@@ -92,6 +92,48 @@ describe("GET /api/full", () => {
     expect(body.totals).toMatchObject({ capital: 1500, productos: 1, unidades: 15, conStockBajo: 1 });
   });
 
+  it("dos publicaciones que comparten depósito cuentan sus unidades una sola vez en los totales", async () => {
+    const row = { thumbnail: null, fullStockQty: 10, fullStockUnavailableQty: 0, fullSince: null, lowStockThreshold: null };
+    const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes("information_schema.columns")) return { rows: ALL_COLUMNS };
+      if (sql.includes("FROM products p")) {
+        return {
+          rows: [
+            // Clásica y premium del mismo producto: mismo stock físico. Una sin costo cargado.
+            { ...row, id: "MLA1", title: "Clásica", currentCost: null, inventoryKey: "INV1" },
+            { ...row, id: "MLA2", title: "Premium", currentCost: 100, inventoryKey: "INV1" },
+            { ...row, id: "MLA3", title: "Otro", currentCost: 50, inventoryKey: "INV2" },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
+
+    const body = await (await GET(req())).json();
+
+    // En la tabla siguen las tres publicaciones, cada una con su stock.
+    expect(body.products).toHaveLength(3);
+    expect(body.products[0]).not.toHaveProperty("inventoryKey");
+    // Totales: 10 (INV1, una sola vez) + 10 (INV2) = 20, no 30.
+    expect(body.totals).toMatchObject({ productos: 3, unidades: 20, capital: 10 * 100 + 10 * 50 });
+  });
+
+  it("los costos de Full usan la misma fecha contable que el Resumen", async () => {
+    const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes("information_schema.columns")) return { rows: ALL_COLUMNS };
+      return { rows: [] };
+    });
+    vi.mocked(withScope).mockImplementation((ctx: any, fn: any) => fn({ query }));
+
+    await GET(req("http://x/api/full?from=2026-08-01&to=2026-08-31"));
+
+    const sql = query.mock.calls.map((c) => String(c[0])).find((s) => s.includes("FROM billing_charges"))!;
+    // Un cargo sin fecha cae en el mes de su factura; antes entraba en CUALQUIER período.
+    expect(sql).toContain("COALESCE(charged_at::date, to_date(period_key, 'YYYY-MM-DD'))");
+    expect(sql).not.toContain("charged_at IS NULL OR");
+  });
+
   it("no calcula rotación ni previsión si no hubo ventas recientes", async () => {
     const query = vi.fn().mockImplementation(async (sql: string) => {
       if (sql.includes("information_schema.columns")) return { rows: ALL_COLUMNS };

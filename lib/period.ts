@@ -11,8 +11,14 @@ export const PERIOD_OPTIONS: { value: Period; label: string }[] = [
   { value: "custom", label: "Rango personalizado" },
 ];
 
+/**
+ * Día calendario en la hora local de quien mira el panel. Con toISOString()
+ * (UTC), después de las 21:00 de Argentina "hoy" ya era mañana y "esta
+ * semana" arrancaba el martes.
+ */
 export function toDateStr(d: Date) {
-  return d.toISOString().slice(0, 10);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 function firstDayOfMonth(d: Date, month: number) {

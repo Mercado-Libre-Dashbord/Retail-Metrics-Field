@@ -28,7 +28,7 @@ import {
   getProductsByIds,
   clampToAdsWindow,
   ADS_LOOKBACK_DAYS,
-  getFullStock,
+  getFullStock, extractLogistics,
   probeProductAdsGranularity,
   getPriceToWin,
 } from "./tools";
@@ -50,7 +50,7 @@ describe("listProducts", () => {
     expect(products).toHaveLength(2);
     expect(products[0]).toEqual({
       id: "MLA1", title: "Producto 1", sku: "SKU1", price: 1000, stock: 5, permalink: "url1",
-      categoryId: null, categoryName: null, thumbnail: null, logisticType: null, inventoryId: null, skus: ["SKU1"], gtins: [], unitsPerPack: null,
+      categoryId: null, categoryName: null, thumbnail: null, logisticType: null, inventoryId: null, inventoryIds: [], skus: ["SKU1"], gtins: [], unitsPerPack: null,
     });
   });
 
@@ -1212,6 +1212,20 @@ describe("getAdsSpend con catálogos grandes", () => {
   });
 });
 
+describe("extractLogistics", () => {
+  it("junta el inventory_id de TODAS las variantes, no solo de la primera", () => {
+    const r = extractLogistics({
+      shipping: { logistic_type: "fulfillment" },
+      variations: [{ inventory_id: "A1" }, { inventory_id: "B2" }, { inventory_id: "A1" }, {}],
+    });
+    expect(r).toEqual({ logisticType: "fulfillment", inventoryId: "A1", inventoryIds: ["A1", "B2"] });
+  });
+
+  it("publicación sin variantes: un solo inventory_id", () => {
+    expect(extractLogistics({ inventory_id: "X9" })).toEqual({ logisticType: null, inventoryId: "X9", inventoryIds: ["X9"] });
+  });
+});
+
 describe("getFullStock", () => {
   beforeEach(() => vi.clearAllMocks());
 
@@ -1238,14 +1252,19 @@ describe("getFullStock", () => {
     );
   });
 
-  it("no cae de la sincronización si un inventory_id da 404 (todavía sin stock en Full)", async () => {
+  it("un inventory_id que da 404 (sin stock en Full) se informa en 0, no se saltea", async () => {
     vi.mocked(mlFetch)
       .mockRejectedValueOnce(new MlApiError(404, "not found"))
       .mockResolvedValueOnce({ available_quantity: 3, not_available_quantity: 0 });
 
     const rows = await getFullStock("acc1", ["INV1", "INV2"]);
 
-    expect(rows).toEqual([{ inventoryId: "INV2", availableQuantity: 3, unavailableQuantity: 0 }]);
+    // Antes se salteaba: un producto que se quedó sin stock en Full seguía
+    // mostrando para siempre la cantidad vieja.
+    expect(rows).toEqual([
+      { inventoryId: "INV1", availableQuantity: 0, unavailableQuantity: 0 },
+      { inventoryId: "INV2", availableQuantity: 3, unavailableQuantity: 0 },
+    ]);
   });
 
   it("avisa si ningún inventory_id trae 'available_quantity' reconocible", async () => {

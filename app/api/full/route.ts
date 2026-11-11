@@ -4,6 +4,7 @@ import { hasColumn } from "@/db/schema-capabilities";
 import { resolveCurrentAccount } from "@/lib/current-account";
 import { revenueStatusFilter } from "@/lib/order-status";
 import { classifyCharge, classifyFullChargeDetail, FULL_CHARGE_DETAIL_LABEL, type FullChargeDetail } from "@/sync/billing";
+import { CHARGE_DATE_SQL } from "@/sync/period-charges";
 
 export const runtime = "nodejs";
 
@@ -34,6 +35,8 @@ interface ProductRow {
   fullSince: string | null;
   currentCost: number | null;
   lowStockThreshold: number | null;
+  /** Qué depósito físico usa: dos publicaciones con la misma clave comparten stock. */
+  inventoryKey: string | null;
 }
 
 export async function GET(request: NextRequest) {
@@ -53,6 +56,11 @@ export async function GET(request: NextRequest) {
     const hasFullSince = await hasColumn(client, "products", "full_since");
     const hasLowStock = await hasColumn(client, "products", "low_stock_threshold");
     const hasThumbnail = await hasColumn(client, "products", "thumbnail");
+    const inventoryKey = (await hasColumn(client, "products", "inventory_ids"))
+      ? `CASE WHEN COALESCE(array_length(p.inventory_ids, 1), 0) > 0
+              THEN array_to_string(ARRAY(SELECT unnest(p.inventory_ids) ORDER BY 1), ',')
+              ELSE p.inventory_id END`
+      : "p.inventory_id";
 
     const productsResult = await client.query(
       `SELECT p.id, p.title,
@@ -61,6 +69,7 @@ export async function GET(request: NextRequest) {
               p.full_stock_unavailable_qty as "fullStockUnavailableQty",
               ${hasFullSince ? "p.full_since" : "NULL::timestamptz"} as "fullSince",
               ${hasLowStock ? "p.low_stock_threshold" : "NULL::integer"} as "lowStockThreshold",
+              ${inventoryKey} as "inventoryKey",
               (SELECT cost FROM product_costs pc WHERE pc.account_id = p.account_id AND pc.product_id = p.id ORDER BY pc.valid_from DESC LIMIT 1) as "currentCost"
        FROM products p
        WHERE p.account_id = $1 AND p.logistic_type = 'fulfillment'
@@ -101,6 +110,7 @@ export async function GET(request: NextRequest) {
       const daysUntilStockout = avgDailySales > 0 ? availableQty / avgDailySales : null;
 
       return {
+        inventoryKey: p.inventoryKey ?? null,
         id: p.id,
         title: p.title,
         thumbnail: p.thumbnail,
@@ -126,7 +136,7 @@ export async function GET(request: NextRequest) {
       const chargesResult = await client.query<{ concept: string | null; detailType: string | null; detailSubType: string | null; amount: number }>(
         `SELECT concept, detail_type as "detailType", detail_sub_type as "detailSubType", amount
          FROM billing_charges
-         WHERE account_id = $1 AND (charged_at IS NULL OR charged_at::date BETWEEN $2::date AND $3::date)`,
+         WHERE account_id = $1 AND ${CHARGE_DATE_SQL} BETWEEN $2::date AND $3::date`,
         [account.id, from, to]
       );
       const totals = new Map<FullChargeDetail, number>();
@@ -140,15 +150,34 @@ export async function GET(request: NextRequest) {
         .sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
     }
 
+    // Dos publicaciones del mismo producto (clásica y premium, por ejemplo)
+    // comparten el mismo stock físico en Full: Mercado Libre informa esas
+    // unidades en las dos. En la tabla cada una muestra su stock, pero en los
+    // totales se cuentan una sola vez — si no, las unidades y el capital
+    // inmovilizado salían duplicados.
+    const seenInventories = new Set<string>();
+    let totalUnits = 0;
+    let totalCapital = 0;
+    // Primero las que tienen costo, así el depósito compartido se valoriza
+    // aunque una de sus publicaciones no lo tenga cargado.
+    for (const p of [...products].sort((a, b) => Number(b.fullStockValue !== null) - Number(a.fullStockValue !== null))) {
+      if (p.inventoryKey) {
+        if (seenInventories.has(p.inventoryKey)) continue;
+        seenInventories.add(p.inventoryKey);
+      }
+      totalUnits += p.availableQty + p.unavailableQty;
+      totalCapital += p.fullStockValue ?? 0;
+    }
+
     return {
       available: true as const,
       oldStockDaysThreshold: OLD_STOCK_DAYS_THRESHOLD,
       salesVelocityDays: SALES_VELOCITY_DAYS,
-      products,
+      products: products.map(({ inventoryKey: _inventoryKey, ...p }) => p),
       totals: {
-        capital: products.reduce((sum, p) => sum + (p.fullStockValue ?? 0), 0),
+        capital: totalCapital,
         productos: products.length,
-        unidades: products.reduce((sum, p) => sum + p.availableQty + p.unavailableQty, 0),
+        unidades: totalUnits,
         conStockBajo: products.filter((p) => p.lowStock).length,
       },
       costs,

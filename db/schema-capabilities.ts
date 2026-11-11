@@ -162,6 +162,11 @@ export const EXPECTED_COLUMNS: { table: string; column: string; ddl: string }[] 
     column: "units_per_pack",
     ddl: "ALTER TABLE products ADD COLUMN IF NOT EXISTS units_per_pack INTEGER;",
   },
+  {
+    table: "products",
+    column: "inventory_ids",
+    ddl: "ALTER TABLE products ADD COLUMN IF NOT EXISTS inventory_ids TEXT[] NOT NULL DEFAULT '{}';",
+  },
 ];
 
 export async function missingMigrations(client: QueryExecutor): Promise<{ table: string; column: string; ddl: string }[]> {

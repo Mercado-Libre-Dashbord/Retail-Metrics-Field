@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { businessDateStr } from "@/lib/dates";
 import { withScope } from "@/db/client";
 import { hasColumn } from "@/db/schema-capabilities";
 import { resolveCurrentAccount } from "@/lib/current-account";
@@ -78,7 +79,7 @@ export async function GET(request: NextRequest) {
     lines.push(
       [
         csvCell(r.orderId),
-        csvCell(new Date(r.dateCreated).toISOString().slice(0, 10)),
+        csvCell(businessDateStr(r.dateCreated)),
         csvCell(r.status),
         csvCell(r.productId),
         csvCell(r.productTitle),
