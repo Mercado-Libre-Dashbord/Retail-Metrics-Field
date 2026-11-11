@@ -123,11 +123,12 @@ describe("ajustes del período (Postgres real)", () => {
   it("concilia cada venta facturada con la factura: resta lo que ML cobró de más y devuelve lo estimado de más", async () => {
     const { withScope } = await import("@/db/client");
     const { createAccount } = await import("@/db/accounts");
-    const { periodAdjustments } = await import("./period-charges");
+    const { periodAdjustments, invoiceOrders } = await import("./period-charges");
     const account = await withScope({ isAdmin: true }, (c) => createAccount(c, "Cuenta factura", `fa.${nanoid(6)}@example.com`.toLowerCase()));
 
+    let perOrder: Awaited<ReturnType<typeof invoiceOrders>> = [];
     const adj = await withScope({ accountId: account.id }, async (c) => {
-      const orders: [string, string][] = [["A", "paid"], ["B", "paid"], ["C", "paid"], ["D", "cancelled"], ["E", "paid"], ["F", "paid"]];
+      const orders: [string, string][] = [["A", "paid"], ["B", "paid"], ["C", "paid"], ["D", "cancelled"], ["E", "paid"], ["F", "paid"], ["G", "paid"]];
       for (const [id, status] of orders) {
         await c.query(`INSERT INTO orders (account_id, id, date_created, status) VALUES ($1, $2, '2026-09-10T15:00:00Z', $3)`, [account.id, id, status]);
       }
@@ -139,6 +140,7 @@ describe("ajustes del período (Postgres real)", () => {
         ["D", 700, 200, 0],       // cancelada: no cuenta
         ["E", 500, 100, null],    // sin costo cargado: fuera de la ganancia
         ["F", 1000, 0, 2500],     // devuelta: ML anuló el cargo por vender, la orden sigue "paid"
+        ["G", 300, 400, 1500],    // hermana de un carrito: su parte del envío se facturó en otra orden
       ];
       for (const [order, commission, shipping, net] of items) {
         await c.query(
@@ -161,6 +163,7 @@ describe("ajustes del período (Postgres real)", () => {
         ["f1", "CHARGE", "Cargo por vender", 1000, "F"],
         ["f2", "BONUS", "Anulación del cargo por vender", 1000, "F"],
         ["f3", "CHARGE", "Cargo por devolución", 350, "F"],
+        ["g1", "CHARGE", "Cargo por vender", 300, "G"],
       ];
       for (const [id, type, concept, amount, order] of charges) {
         await c.query(
@@ -169,16 +172,32 @@ describe("ajustes del período (Postgres real)", () => {
           [account.id, id, type, concept, order, amount]
         );
       }
+      perOrder = await invoiceOrders(c, account.id, "2026-09-01", "2026-09-30");
       return periodAdjustments(c, account.id, "2026-09-01", "2026-09-30", false);
     });
+    // El detalle venta por venta suma lo mismo que el ajuste del período.
+    const byId = Object.fromEntries(perOrder.map((o) => [o.orderId, o]));
+    expect(byId.A).toMatchObject({ status: "conciliada", adjustment: 800 });
+    expect(byId.G).toMatchObject({ status: "conciliada", shipBilled: 0, adjustment: -400 });
+    expect(byId.C.status).toBe("sin factura");
+    expect(byId.F).toMatchObject({ status: "devuelta", adjustment: 2850 });
+    expect(byId.D).toMatchObject({ status: "cancelada", adjustment: 700 });
+    expect(perOrder.reduce((a, o) => a + o.adjustment, 0)).toBe(-adj.total);
 
     // Cuentan A, B y C (con costo, válidas y no devueltas); con factura, A y B.
-    expect(adj.ordersTotal).toBe(3);
-    expect(adj.ordersInvoiced).toBe(2);
-    // Estimado en A y B: 1500 + 2600. Facturado: 2300 + (1800 + 600 − 300).
-    expect(adj.invoiceEstimated).toBe(4100);
-    expect(adj.invoiceBilled).toBe(4400);
-    expect(adj.invoiceDiff).toBe(300);
+    expect(adj.ordersTotal).toBe(4);
+    expect(adj.ordersInvoiced).toBe(3);
+    // Cargos por vender: estimado 1000 + 2000 + 300, facturado 1500 + 1800 + 300.
+    expect(adj.feeEstimated).toBe(3300);
+    expect(adj.feeBilled).toBe(3600);
+    // Envío: estimado 500 + 600 + 400 (G); facturado 800 + (600 − 300) + 0. A G
+    // no le llegó cargo de envío (se facturó en la otra orden del carrito): se
+    // le devuelve su parte estimada.
+    expect(adj.shipEstimated).toBe(1500);
+    expect(adj.shipBilled).toBe(1100);
+    expect(adj.invoiceEstimated).toBe(4800);
+    expect(adj.invoiceBilled).toBe(4700);
+    expect(adj.invoiceDiff).toBe(-100);
     // F se devolvió: se saca su ganancia (2500) y se resta el cargo por devolución que quedó (350).
     expect(adj.refundedOrders).toBe(1);
     expect(adj.refundedRevenue).toBe(10000);
@@ -186,6 +205,6 @@ describe("ajustes del período (Postgres real)", () => {
     expect(adj.refundedCosts).toBe(350);
     // D está cancelada, pero ML le dejó cobrado un cargo de 700 sin anular.
     expect(adj.cancelledCosts).toBe(700);
-    expect(adj.total).toBe(-300 - 2500 - 350 - 700);
+    expect(adj.total).toBe(100 - 2500 - 350 - 700);
   });
 });

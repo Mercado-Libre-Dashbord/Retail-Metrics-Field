@@ -151,6 +151,11 @@ export interface PeriodAdjustments {
   /** En las ventas conciliadas: lo estimado y lo facturado. */
   invoiceEstimated: number;
   invoiceBilled: number;
+  /** Lo mismo, abierto en cargos por vender y envío. */
+  feeEstimated: number;
+  feeBilled: number;
+  shipEstimated: number;
+  shipBilled: number;
   /**
    * Ventas con el cargo por vender anulado (devueltas) que la orden todavía
    * muestra como pagadas: cuántas, cuánto habían facturado, la ganancia que se
@@ -176,6 +181,7 @@ function emptyAdjustments(): PeriodAdjustments {
   return {
     adSpend: 0, adsInSales: 0, adsNotInSales: 0, full: 0, otherCharges: 0,
     invoiceDiff: 0, ordersTotal: 0, ordersInvoiced: 0, invoiceEstimated: 0, invoiceBilled: 0,
+    feeEstimated: 0, feeBilled: 0, shipEstimated: 0, shipBilled: 0,
     refundedOrders: 0, refundedRevenue: 0, refundedProfit: 0, refundedCosts: 0, cancelledCosts: 0,
     ivaCredit: 0, total: 0,
   };
@@ -195,6 +201,10 @@ interface InvoiceMonth {
   ordersInvoiced: number;
   estimated: number;
   billed: number;
+  feeEstimated: number;
+  feeBilled: number;
+  shipEstimated: number;
+  shipBilled: number;
   refundedOrders: number;
   refundedRevenue: number;
   refundedProfit: number;
@@ -231,10 +241,11 @@ const ANNULLED_SHARE = 0.9;
  * Quedan afuera la publicidad (se resta desde Mercado Ads) y los impuestos y
  * percepciones (pagos a cuenta; el IVA y los otros impuestos se restan aparte).
  */
-export async function invoiceDiffByMonth(db: QueryExecutor, accountId: string, from: string, to: string): Promise<InvoiceMonth[]> {
-  if (!(await hasColumn(db, "billing_charges", "detail_id"))) return [];
-  // Los conceptos se clasifican acá (por texto, ver classifyCharge) y se le
-  // pasan a la consulta como listas.
+/** Días que se le dan a ML para facturar el envío antes de tomar "sin cargo de envío" como definitivo. */
+export const SHIPPING_SETTLE_DAYS = 7;
+
+/** Clasifica los conceptos de la factura atados a ventas (por texto, ver classifyCharge). */
+async function saleChargeKeys(db: QueryExecutor, accountId: string) {
   const kinds = await db.query<{ key: string; concept: string | null; dt: string | null; dst: string | null }>(
     `SELECT DISTINCT ${CHARGE_KEY_SQL} as key, concept, detail_type as dt, detail_sub_type as dst
        FROM billing_charges
@@ -249,43 +260,69 @@ export async function invoiceDiffByMonth(db: QueryExecutor, accountId: string, f
     if (bucket === "comision" || bucket === "otro" || bucket === "full") feeKeys.push(k.key);
     if (bucket === "envio") shipKeys.push(k.key);
   }
+  return { saleKeys, feeKeys, shipKeys };
+}
+
+/**
+ * Una fila por venta del período ($1 cuenta, $2/$3 fechas, $4 cargos por
+ * vender, $5 envío, $6 comisión): lo estimado, lo facturado y si cada parte ya
+ * se puede conciliar.
+ *
+ * - fee_ok: la factura ya trae cargos por vender de esta venta.
+ * - ship_ok: la factura trae cargos de envío de esta venta, o ya trae sus
+ *   cargos por vender y pasaron SHIPPING_SETTLE_DAYS sin que aparezca un
+ *   envío. Ese segundo caso es el de los carritos: ML factura el envío del
+ *   carrito atado a UNA de sus órdenes, mientras que acá el envío estimado
+ *   está repartido entre todas. La orden que recibe el cargo queda con la
+ *   diferencia en contra y sus hermanas con su parte a favor: sumadas, el
+ *   carrito paga el envío una sola vez.
+ */
+const INVOICE_ORDERS_CTE = `
+  WITH sales AS (
+    SELECT o.id, o.date_created, to_char(o.date_created, 'YYYY-MM') as month,
+           (${revenueStatusFilter()}) as valid,
+           (o.date_created < now() - interval '${SHIPPING_SETTLE_DAYS} days') as settled,
+           SUM(oi.ml_commission) as est_fee, SUM(oi.shipping_cost) as est_ship,
+           SUM(oi.unit_price * oi.quantity) as revenue,
+           COALESCE(SUM(oi.net_profit), 0) as net,
+           bool_and(oi.net_profit IS NOT NULL) as counted
+      FROM orders o JOIN order_items oi ON oi.account_id = o.account_id AND oi.order_id = o.id
+     WHERE o.account_id = $1 AND o.date_created::date BETWEEN $2::date AND $3::date
+     GROUP BY o.id, o.date_created, o.status
+  ), billed AS (
+    SELECT bc.order_id,
+           COALESCE(SUM(${SIGNED_AMOUNT_SQL}) FILTER (WHERE ${CHARGE_KEY_SQL} = ANY($4::text[])), 0) as fee_net,
+           COUNT(*) FILTER (WHERE ${CHARGE_KEY_SQL} = ANY($4::text[])) as fee_n,
+           COALESCE(SUM(${SIGNED_AMOUNT_SQL}) FILTER (WHERE ${CHARGE_KEY_SQL} = ANY($5::text[])), 0) as ship_net,
+           COUNT(*) FILTER (WHERE ${CHARGE_KEY_SQL} = ANY($5::text[])) as ship_n,
+           COALESCE(SUM(abs(bc.amount)) FILTER (WHERE ${CHARGE_KEY_SQL} = ANY($6::text[]) AND upper(COALESCE(bc.detail_type, '')) <> 'BONUS'), 0) as sale_charge,
+           COALESCE(SUM(abs(bc.amount)) FILTER (WHERE ${CHARGE_KEY_SQL} = ANY($6::text[]) AND upper(COALESCE(bc.detail_type, '')) = 'BONUS'), 0) as sale_bonus
+      FROM billing_charges bc
+     WHERE bc.account_id = $1 AND bc.order_id IN (SELECT id FROM sales)
+     GROUP BY bc.order_id
+  ), j AS (
+    SELECT s.*, COALESCE(b.fee_net, 0) as fee_net, COALESCE(b.ship_net, 0) as ship_net,
+           (COALESCE(b.fee_n, 0) > 0) as fee_ok,
+           (COALESCE(b.ship_n, 0) > 0 OR (COALESCE(b.fee_n, 0) > 0 AND s.settled)) as ship_ok,
+           (s.valid AND COALESCE(b.sale_charge, 0) > 0 AND COALESCE(b.sale_bonus, 0) >= ${ANNULLED_SHARE} * b.sale_charge) as annulled
+      FROM sales s LEFT JOIN billed b ON b.order_id = s.id
+  )`;
+
+export async function invoiceDiffByMonth(db: QueryExecutor, accountId: string, from: string, to: string): Promise<InvoiceMonth[]> {
+  if (!(await hasColumn(db, "billing_charges", "detail_id"))) return [];
+  const { saleKeys, feeKeys, shipKeys } = await saleChargeKeys(db, accountId);
   if (feeKeys.length === 0 && shipKeys.length === 0) return [];
 
-  const isBonus = `upper(COALESCE(bc.detail_type, '')) = 'BONUS'`;
+  const normal = `valid AND counted AND NOT annulled`;
   const result = await db.query<Record<string, string | number>>(
-    `WITH sales AS (
-       SELECT o.id, to_char(o.date_created, 'YYYY-MM') as month,
-              (${revenueStatusFilter()}) as valid,
-              SUM(oi.ml_commission) as est_fee, SUM(oi.shipping_cost) as est_ship,
-              SUM(oi.unit_price * oi.quantity) as revenue,
-              COALESCE(SUM(oi.net_profit), 0) as net,
-              bool_and(oi.net_profit IS NOT NULL) as counted
-         FROM orders o JOIN order_items oi ON oi.account_id = o.account_id AND oi.order_id = o.id
-        WHERE o.account_id = $1 AND o.date_created::date BETWEEN $2::date AND $3::date
-        GROUP BY o.id, o.date_created, o.status
-     ), billed AS (
-       SELECT bc.order_id,
-              COALESCE(SUM(${SIGNED_AMOUNT_SQL}) FILTER (WHERE ${CHARGE_KEY_SQL} = ANY($4::text[])), 0) as fee_net,
-              COUNT(*) FILTER (WHERE ${CHARGE_KEY_SQL} = ANY($4::text[])) as fee_n,
-              COALESCE(SUM(${SIGNED_AMOUNT_SQL}) FILTER (WHERE ${CHARGE_KEY_SQL} = ANY($5::text[])), 0) as ship_net,
-              COUNT(*) FILTER (WHERE ${CHARGE_KEY_SQL} = ANY($5::text[])) as ship_n,
-              COALESCE(SUM(abs(bc.amount)) FILTER (WHERE ${CHARGE_KEY_SQL} = ANY($6::text[]) AND NOT ${isBonus}), 0) as sale_charge,
-              COALESCE(SUM(abs(bc.amount)) FILTER (WHERE ${CHARGE_KEY_SQL} = ANY($6::text[]) AND ${isBonus}), 0) as sale_bonus
-         FROM billing_charges bc
-        WHERE bc.account_id = $1 AND bc.order_id IN (SELECT id FROM sales)
-        GROUP BY bc.order_id
-     ), j AS (
-       SELECT s.*, COALESCE(b.fee_net, 0) as fee_net, COALESCE(b.fee_n, 0) as fee_n,
-              COALESCE(b.ship_net, 0) as ship_net, COALESCE(b.ship_n, 0) as ship_n,
-              (s.valid AND COALESCE(b.sale_charge, 0) > 0 AND COALESCE(b.sale_bonus, 0) >= ${ANNULLED_SHARE} * b.sale_charge) as annulled
-         FROM sales s LEFT JOIN billed b ON b.order_id = s.id
-     )
+    `${INVOICE_ORDERS_CTE}
      SELECT month,
-            COUNT(*) FILTER (WHERE valid AND counted AND NOT annulled) as orders_total,
-            COUNT(*) FILTER (WHERE valid AND counted AND NOT annulled AND (fee_n > 0 OR ship_n > 0)) as orders_invoiced,
-            COALESCE(SUM((CASE WHEN fee_n > 0 THEN est_fee ELSE 0 END) + (CASE WHEN ship_n > 0 THEN est_ship ELSE 0 END))
-                     FILTER (WHERE valid AND counted AND NOT annulled), 0) as estimated,
-            COALESCE(SUM(fee_net + ship_net) FILTER (WHERE valid AND counted AND NOT annulled), 0) as billed,
+            COUNT(*) FILTER (WHERE ${normal}) as orders_total,
+            COUNT(*) FILTER (WHERE ${normal} AND (fee_ok OR ship_ok)) as orders_invoiced,
+            COALESCE(SUM(est_fee) FILTER (WHERE ${normal} AND fee_ok), 0) as fee_estimated,
+            COALESCE(SUM(fee_net) FILTER (WHERE ${normal} AND fee_ok), 0) as fee_billed,
+            COALESCE(SUM(est_ship) FILTER (WHERE ${normal} AND ship_ok), 0) as ship_estimated,
+            COALESCE(SUM(ship_net) FILTER (WHERE ${normal} AND ship_ok), 0) as ship_billed,
             COUNT(*) FILTER (WHERE annulled) as refunded_orders,
             COALESCE(SUM(revenue) FILTER (WHERE annulled), 0) as refunded_revenue,
             COALESCE(SUM(net) FILTER (WHERE annulled), 0) as refunded_profit,
@@ -298,14 +335,69 @@ export async function invoiceDiffByMonth(db: QueryExecutor, accountId: string, f
     month: String(r.month),
     ordersTotal: Number(r.orders_total),
     ordersInvoiced: Number(r.orders_invoiced),
-    estimated: Number(r.estimated),
-    billed: Number(r.billed),
+    feeEstimated: Number(r.fee_estimated),
+    feeBilled: Number(r.fee_billed),
+    shipEstimated: Number(r.ship_estimated),
+    shipBilled: Number(r.ship_billed),
+    estimated: Number(r.fee_estimated) + Number(r.ship_estimated),
+    billed: Number(r.fee_billed) + Number(r.ship_billed),
     refundedOrders: Number(r.refunded_orders),
     refundedRevenue: Number(r.refunded_revenue),
     refundedProfit: Number(r.refunded_profit),
     refundedCosts: Number(r.refunded_costs),
     cancelledCosts: Number(r.cancelled_costs),
   }));
+}
+
+export interface InvoiceOrderRow {
+  orderId: string;
+  date: string;
+  status: "conciliada" | "sin factura" | "devuelta" | "cancelada" | "sin costo";
+  revenue: number;
+  feeEstimated: number;
+  feeBilled: number | null;
+  shipEstimated: number;
+  shipBilled: number | null;
+  /** Lo que esta venta le suma (o le resta, si es negativo) a los costos. */
+  adjustment: number;
+}
+
+/** La conciliación venta por venta, para que el vendedor pueda chequearla contra Mercado Libre. */
+export async function invoiceOrders(db: QueryExecutor, accountId: string, from: string, to: string): Promise<InvoiceOrderRow[]> {
+  if (!(await hasColumn(db, "billing_charges", "detail_id"))) return [];
+  const { saleKeys, feeKeys, shipKeys } = await saleChargeKeys(db, accountId);
+  const result = await db.query<Record<string, string | number | boolean>>(
+    `${INVOICE_ORDERS_CTE}
+     SELECT id, to_char(date_created, 'YYYY-MM-DD') as date, valid, counted, annulled, fee_ok, ship_ok,
+            revenue, est_fee, est_ship, fee_net, ship_net, net
+       FROM j ORDER BY date_created`,
+    [accountId, from, to, feeKeys, shipKeys, saleKeys]
+  );
+  return result.rows.map((r) => {
+    const n = (k: string) => Number(r[k] ?? 0);
+    const leftover = Math.max(n("fee_net") + n("ship_net"), 0);
+    let status: InvoiceOrderRow["status"];
+    let adjustment = 0;
+    if (!r.valid) { status = "cancelada"; adjustment = leftover; }
+    else if (r.annulled) { status = "devuelta"; adjustment = n("net") + leftover; }
+    else if (!r.counted) status = "sin costo";
+    else if (!r.fee_ok && !r.ship_ok) status = "sin factura";
+    else {
+      status = "conciliada";
+      adjustment = (r.fee_ok ? n("fee_net") - n("est_fee") : 0) + (r.ship_ok ? n("ship_net") - n("est_ship") : 0);
+    }
+    return {
+      orderId: String(r.id),
+      date: String(r.date),
+      status,
+      revenue: n("revenue"),
+      feeEstimated: n("est_fee"),
+      feeBilled: r.fee_ok || r.annulled || !r.valid ? n("fee_net") : null,
+      shipEstimated: n("est_ship"),
+      shipBilled: r.ship_ok || r.annulled || !r.valid ? n("ship_net") : null,
+      adjustment,
+    };
+  });
 }
 
 /**
@@ -373,6 +465,8 @@ export async function monthlyAdjustments(
     m.invoiceEstimated = inv.estimated;
     m.invoiceBilled = inv.billed;
     m.invoiceDiff = inv.billed - inv.estimated;
+    m.feeEstimated = inv.feeEstimated; m.feeBilled = inv.feeBilled;
+    m.shipEstimated = inv.shipEstimated; m.shipBilled = inv.shipBilled;
     m.refundedOrders = inv.refundedOrders;
     m.refundedRevenue = inv.refundedRevenue;
     m.refundedProfit = inv.refundedProfit;
@@ -413,6 +507,8 @@ export function sumAdjustments(months: PeriodAdjustments[]): PeriodAdjustments {
     acc.ordersInvoiced += m.ordersInvoiced;
     acc.invoiceEstimated += m.invoiceEstimated;
     acc.invoiceBilled += m.invoiceBilled;
+    acc.feeEstimated += m.feeEstimated; acc.feeBilled += m.feeBilled;
+    acc.shipEstimated += m.shipEstimated; acc.shipBilled += m.shipBilled;
     acc.refundedOrders += m.refundedOrders;
     acc.refundedRevenue += m.refundedRevenue;
     acc.refundedProfit += m.refundedProfit;
