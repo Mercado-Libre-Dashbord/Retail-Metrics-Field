@@ -16,6 +16,12 @@ export interface MlProduct {
   logisticType: string | null;
   /** Id para consultar /inventories/{id}/stock/fulfillment. Sin confirmar. */
   inventoryId: string | null;
+  /**
+   * Todos los inventory_id de la publicación: el propio y el de CADA variante.
+   * Una publicación con talles o colores guarda el stock de Full por variante;
+   * leyendo solo la primera, las unidades en Full quedaban cortas.
+   */
+  inventoryIds?: string[];
   /** Todos los SKU de la publicación: el de la publicación y el de cada variante. */
   skus: string[];
   /** Códigos de barras (EAN/GTIN) de la publicación y de sus variantes. */
@@ -78,10 +84,17 @@ export function extractUnitsPerPack(body: any): number | null {
 
 /** Sin confirmar todavía dónde vive exactamente en la respuesta de /items:
  * puede ser la raíz (ítem simple) o cada variación (ítem con variantes). */
-function extractLogistics(body: any): { logisticType: string | null; inventoryId: string | null } {
+export function extractLogistics(body: any): { logisticType: string | null; inventoryId: string | null; inventoryIds: string[] } {
+  const ids = new Set<string>();
+  if (body?.inventory_id) ids.add(String(body.inventory_id));
+  for (const v of Array.isArray(body?.variations) ? body.variations : []) {
+    if (v?.inventory_id) ids.add(String(v.inventory_id));
+  }
+  const inventoryIds = [...ids];
   return {
     logisticType: body?.shipping?.logistic_type ?? null,
-    inventoryId: body?.inventory_id ?? body?.variations?.[0]?.inventory_id ?? null,
+    inventoryId: inventoryIds[0] ?? null,
+    inventoryIds,
   };
 }
 
@@ -1647,9 +1660,13 @@ export async function getFullStock(accountId: string, inventoryIds: string[]): P
         try {
           res = await mlFetch(`/inventories/${inventoryId}/stock/fulfillment`, token);
         } catch (err) {
-          if (!(err instanceof MlApiError && err.status === 404)) {
-            console.warn(`No se pudo traer el stock de Full de ${inventoryId}:`, (err as Error).message);
+          if (err instanceof MlApiError && err.status === 404) {
+            // Sin stock en Full: se informa como 0 en vez de saltearlo, así un
+            // producto que dejó de tener stock ahí no queda con la cantidad vieja.
+            results.push({ inventoryId, availableQuantity: 0, unavailableQuantity: 0 });
+            return;
           }
+          console.warn(`No se pudo traer el stock de Full de ${inventoryId}:`, (err as Error).message);
           return;
         }
         if (typeof res.available_quantity !== "number") {

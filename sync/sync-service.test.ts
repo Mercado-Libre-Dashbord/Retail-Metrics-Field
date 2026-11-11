@@ -488,6 +488,48 @@ describe("syncFullStock", () => {
   });
 });
 
+describe("syncFullStock con variantes", () => {
+  it("suma el stock de todas las variantes de la publicación", async () => {
+    const { getFullStock } = await import("@/mcp/tools");
+    const { withScope } = await import("@/db/client");
+    const { syncFullStock } = await import("./sync-service");
+    const account = await makeAccount();
+
+    await withScope({ accountId: account.id }, (client) =>
+      client.query(
+        `INSERT INTO products (account_id, id, title, current_price, stock, inventory_id, inventory_ids, updated_at)
+         VALUES ($1,'MLA1','Remera',100,5,'INV1',ARRAY['INV1','INV2','INV3'],now())`,
+        [account.id]
+      )
+    );
+    vi.mocked(getFullStock).mockResolvedValueOnce([
+      { inventoryId: "INV1", availableQuantity: 8, unavailableQuantity: 1 },
+      { inventoryId: "INV2", availableQuantity: 4, unavailableQuantity: 0 },
+      { inventoryId: "INV3", availableQuantity: 0, unavailableQuantity: 2 },
+    ]);
+    await withScope({ accountId: account.id }, (client) => syncFullStock(client, account.id));
+
+    const read = () =>
+      withScope({ accountId: account.id }, async (client) => {
+        const r = await client.query<{ full_stock_qty: number; full_stock_unavailable_qty: number }>(
+          `SELECT full_stock_qty, full_stock_unavailable_qty FROM products WHERE account_id = $1 AND id = 'MLA1'`,
+          [account.id]
+        );
+        return r.rows[0];
+      });
+    // Antes: solo la primera variante (8). Ahora: 8 + 4 + 0.
+    expect(await read()).toEqual({ full_stock_qty: 12, full_stock_unavailable_qty: 3 });
+
+    // Si Mercado Libre no contesta por una variante, no se guarda una suma
+    // parcial: queda el dato anterior.
+    vi.mocked(getFullStock).mockResolvedValueOnce([
+      { inventoryId: "INV1", availableQuantity: 1, unavailableQuantity: 0 },
+    ]);
+    await withScope({ accountId: account.id }, (client) => syncFullStock(client, account.id));
+    expect(await read()).toEqual({ full_stock_qty: 12, full_stock_unavailable_qty: 3 });
+  });
+});
+
 describe("recalculate", () => {
   it("reparte el gasto de Mercado Ads sin publicación asociada entre TODAS las ventas de ese día, no solo las de un producto", async () => {
     // El bug real que corrige: Mercado Ads dejó de discriminar el gasto por

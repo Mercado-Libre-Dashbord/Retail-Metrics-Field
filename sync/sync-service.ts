@@ -4,6 +4,7 @@ import { revenueStatusFilter } from "@/lib/order-status";
 import { getCostEntryAtDate, allocateAdsCost, calculateNetProfit, calculateIva } from "./profitability";
 import { applyIvaPayments } from "./iva-payments";
 import { hasColumn } from "@/db/schema-capabilities";
+import { businessDateStr } from "@/lib/dates";
 
 /**
  * Se sube cuando cambia algo de cómo se procesa una orden (por ejemplo, de
@@ -44,6 +45,7 @@ interface ProductColumnFlags {
   hasLogistics: boolean;
   hasCodes: boolean;
   hasPackUnits: boolean;
+  hasInventoryIds: boolean;
 }
 
 /**
@@ -55,7 +57,7 @@ interface ProductColumnFlags {
  * como ficha mínima de una corrida anterior.
  */
 function buildOptionalProductColumns(
-  p: { categoryId?: string | null; categoryName?: string | null; thumbnail?: string | null; logisticType?: string | null; inventoryId?: string | null; skus?: string[]; gtins?: string[]; unitsPerPack?: number | null } | undefined,
+  p: { categoryId?: string | null; categoryName?: string | null; thumbnail?: string | null; logisticType?: string | null; inventoryId?: string | null; inventoryIds?: string[]; skus?: string[]; gtins?: string[]; unitsPerPack?: number | null } | undefined,
   flags: ProductColumnFlags,
   updateOnConflict: boolean
 ): { cols: string[]; vals: unknown[]; updateSet: string[] } {
@@ -77,6 +79,11 @@ function buildOptionalProductColumns(
     vals.push(p?.logisticType ?? null, p?.inventoryId ?? null);
     if (updateOnConflict) updateSet.push("logistic_type = excluded.logistic_type", "inventory_id = excluded.inventory_id");
   }
+  if (flags.hasInventoryIds) {
+    cols.push("inventory_ids");
+    vals.push(p?.inventoryIds ?? (p?.inventoryId ? [p.inventoryId] : []));
+    if (updateOnConflict) updateSet.push("inventory_ids = excluded.inventory_ids");
+  }
   if (flags.hasCodes) {
     cols.push("skus", "gtins");
     vals.push(p?.skus ?? [], p?.gtins ?? []);
@@ -97,6 +104,7 @@ async function productColumnFlags(db: QueryExecutor): Promise<ProductColumnFlags
     hasLogistics: await hasColumn(db, "products", "logistic_type"),
     hasCodes: await hasColumn(db, "products", "gtins"),
     hasPackUnits: await hasColumn(db, "products", "units_per_pack"),
+    hasInventoryIds: await hasColumn(db, "products", "inventory_ids"),
   };
 }
 
@@ -361,32 +369,54 @@ export async function syncFullStock(
 ): Promise<{ synced: number; nextOffset: number | null }> {
   if (!(await hasColumn(db, "products", "inventory_id"))) return { synced: 0, nextOffset: null };
   try {
-    // DISTINCT + orden estable: varias publicaciones pueden compartir un
-    // mismo inventory_id (ver getFullStock), y sin un orden fijo la paginación
-    // por offset podría saltear o repetir ids entre una llamada y la siguiente.
-    const productsResult = await db.query<{ inventory_id: string }>(
-      `SELECT DISTINCT inventory_id FROM products WHERE account_id = $1 AND inventory_id IS NOT NULL ORDER BY inventory_id`,
+    // Una publicación con variantes tiene un inventory_id por variante
+    // (migración 028): su stock en Full es la SUMA de todos. Sin esa columna
+    // solo se conoce el primero, como antes.
+    const hasInventoryIds = await hasColumn(db, "products", "inventory_ids");
+    const idsExpr = hasInventoryIds
+      ? `CASE WHEN COALESCE(array_length(inventory_ids, 1), 0) > 0 THEN inventory_ids ELSE ARRAY[inventory_id] END`
+      : `ARRAY[inventory_id]`;
+    // Orden estable: la paginación por offset entre llamadas no puede saltear
+    // ni repetir productos.
+    const productsResult = await db.query<{ id: string; ids: string[] }>(
+      `SELECT id, ${idsExpr} as ids FROM products WHERE account_id = $1 AND inventory_id IS NOT NULL ORDER BY id`,
       [accountId]
     );
-    const allIds = productsResult.rows.map((r) => r.inventory_id);
-    if (allIds.length === 0) return { synced: 0, nextOffset: null };
-    const batch = allIds.slice(offset, offset + FULL_STOCK_BATCH);
-    if (batch.length === 0) return { synced: 0, nextOffset: null };
+    const all = productsResult.rows;
+    if (offset >= all.length) return { synced: 0, nextOffset: null };
+
+    // El lote se arma por PRODUCTO (así cada uno suma todas sus variantes en
+    // la misma llamada) hasta juntar `FULL_STOCK_BATCH` inventory_id.
+    const batch: { id: string; ids: string[] }[] = [];
+    const wanted = new Set<string>();
+    let end = offset;
+    while (end < all.length && (batch.length === 0 || wanted.size + all[end].ids.length <= FULL_STOCK_BATCH)) {
+      batch.push(all[end]);
+      for (const id of all[end].ids) wanted.add(id);
+      end += 1;
+    }
 
     const hasFullSince = await hasColumn(db, "products", "full_since");
-    const stock = await getFullStock(accountId, batch);
-    for (const s of stock) {
+    const stock = new Map((await getFullStock(accountId, [...wanted])).map((s) => [s.inventoryId, s]));
+    let synced = 0;
+    for (const p of batch) {
+      // Si falta la respuesta de alguna variante (error pasajero de ML), no
+      // se pisa con una suma parcial: queda el dato anterior hasta el próximo sync.
+      if (!p.ids.every((id) => stock.has(id))) continue;
+      const available = p.ids.reduce((sum, id) => sum + stock.get(id)!.availableQuantity, 0);
+      const unavailable = p.ids.reduce((sum, id) => sum + stock.get(id)!.unavailableQuantity, 0);
       // full_since se pisa solo si todavía está vacío: es la primera vez
       // que VIMOS este producto con stock en Full, no la fecha real de
       // ingreso al depósito (eso no lo expone la API de ML).
+      const since = hasFullSince && available + unavailable > 0 ? ", full_since = COALESCE(full_since, now())" : "";
       await db.query(
-        `UPDATE products SET full_stock_qty = $1, full_stock_unavailable_qty = $2${hasFullSince ? ", full_since = COALESCE(full_since, now())" : ""}
-         WHERE account_id = $3 AND inventory_id = $4`,
-        [s.availableQuantity, s.unavailableQuantity, accountId, s.inventoryId]
+        `UPDATE products SET full_stock_qty = $1, full_stock_unavailable_qty = $2${since}
+         WHERE account_id = $3 AND id = $4`,
+        [available, unavailable, accountId, p.id]
       );
+      synced += 1;
     }
-    const nextOffset = offset + FULL_STOCK_BATCH < allIds.length ? offset + FULL_STOCK_BATCH : null;
-    return { synced: stock.length, nextOffset };
+    return { synced, nextOffset: end < all.length ? end : null };
   } catch (err) {
     console.error("No se pudo sincronizar el stock de Full, se continúa sin ese dato:", (err as Error).message);
     return { synced: 0, nextOffset: null };
@@ -444,13 +474,7 @@ export async function backfillMissingProducts(
   const ids = missing.rows.map((r) => r.product_id);
   if (ids.length === 0) return 0;
 
-  const flags: ProductColumnFlags = {
-    hasCategory: await hasColumn(db, "products", "category_id"),
-    hasThumbnail: await hasColumn(db, "products", "thumbnail"),
-    hasLogistics: await hasColumn(db, "products", "logistic_type"),
-    hasCodes: await hasColumn(db, "products", "gtins"),
-    hasPackUnits: await hasColumn(db, "products", "units_per_pack"),
-  };
+  const flags = await productColumnFlags(db);
   const now = new Date().toISOString();
 
   let saved = 0;
@@ -812,7 +836,8 @@ async function reallocateAdsCosts(
   // una cancelada se llevaba su parte, esa plata quedaba fuera de la ganancia.
   for (const it of items) {
     if (it.counts === false) continue;
-    const dateStr = new Date(it.datecreated).toISOString().slice(0, 10);
+    // Día en hora del negocio: el gasto de Mercado Ads viene por día local.
+    const dateStr = businessDateStr(it.datecreated);
     const key = `${it.productid}|${dateStr}`;
     unitsSoldByProductDate.set(key, (unitsSoldByProductDate.get(key) ?? 0) + Number(it.quantity));
     unitsSoldByDate.set(dateStr, (unitsSoldByDate.get(dateStr) ?? 0) + Number(it.quantity));
@@ -879,7 +904,7 @@ async function reallocateAdsCosts(
     const valueRows: string[] = [];
     const cols = hasIva ? 6 : 5;
     batch.forEach((it, idx) => {
-      const dateStr = new Date(it.datecreated).toISOString().slice(0, 10);
+      const dateStr = businessDateStr(it.datecreated);
       const productDateKey = `${it.productid}|${dateStr}`;
       // Gasto sin publicación asociada (todo Mercado Ads hoy): se reparte
       // entre todas las unidades vendidas ESE DÍA en toda la cuenta, no solo

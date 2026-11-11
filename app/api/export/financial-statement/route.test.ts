@@ -182,14 +182,14 @@ describe("GET /api/export/financial-statement", () => {
     const query = mockQuery({
       movements: [
         {
-          orderId: "O1", dateCreated: "2026-08-05T00:00:00Z", status: "paid",
+          orderId: "O1", dateCreated: "2026-08-05T15:00:00Z", status: "paid",
           productId: "MLA1", productTitle: "Producto de prueba",
           quantity: 2, unitPrice: 1000, mlCommission: 130, shippingCost: 90,
           adsCostAllocated: 50, costApplied: 300, taxApplied: 10, ivaApplied: 42,
           netProfit: 578,
         },
         {
-          orderId: "O2", dateCreated: "2026-08-06T00:00:00Z", status: "cancelled",
+          orderId: "O2", dateCreated: "2026-08-06T15:00:00Z", status: "cancelled",
           productId: "MLA2", productTitle: "Producto cancelado",
           quantity: 1, unitPrice: 500, mlCommission: 65, shippingCost: 0,
           adsCostAllocated: 0, costApplied: null, taxApplied: null, ivaApplied: null,

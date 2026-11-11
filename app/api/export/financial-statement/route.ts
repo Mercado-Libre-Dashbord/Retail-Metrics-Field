@@ -1,4 +1,5 @@
 import ExcelJS from "exceljs";
+import { businessDateStr } from "@/lib/dates";
 import { NextResponse } from "next/server";
 import { withScope } from "@/db/client";
 import { hasColumn } from "@/db/schema-capabilities";
@@ -332,7 +333,7 @@ function addMovementsSheet(workbook: ExcelJS.Workbook, rows: MovementRow[]) {
     })),
     rows: rows.map((r) => [
       r.orderId,
-      new Date(r.dateCreated).toISOString().slice(0, 10),
+      businessDateStr(r.dateCreated),
       r.status,
       r.productId,
       r.productTitle,
