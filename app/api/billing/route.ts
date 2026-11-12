@@ -61,8 +61,29 @@ export async function GET(request: NextRequest) {
       }))
       .sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
 
+    // Dos mundos distintos dentro de la misma factura:
+    // - lo que ML cobra dentro de cada venta (cargos atados a una orden), y
+    // - lo que llega para pagar aparte (sin venta asociada): publicidad, Full,
+    //   otros cargos e impuestos. Es el total que el vendedor ve en su factura
+    //   a pagar, y sirve para chequear que nada se cuente dos veces.
+    const split = (pred: (d: (typeof details)[number]) => boolean) => {
+      const out: Partial<Record<ChargeBucket, number>> = {};
+      let total = 0;
+      for (const d of details) {
+        if (d.manual || !pred(d)) continue;
+        out[d.bucket] = (out[d.bucket] ?? 0) + d.amount;
+        total += d.amount;
+      }
+      return { byBucket: out, total };
+    };
+    const inSales = split((d) => d.linkedToOrder);
+    const toPay = split((d) => !d.linkedToOrder);
+    const toPaySubtracted = details.filter((d) => !d.manual && !d.linkedToOrder && d.treatment === "subtracted").reduce((a, d) => a + d.amount, 0);
+
     return {
       available: true,
+      inSales,
+      toPay: { ...toPay, subtractedHere: toPaySubtracted },
       buckets,
       total: buckets.reduce((sum, b) => sum + b.amount, 0),
       subtracted: buckets.reduce((sum, b) => sum + b.subtracted, 0),

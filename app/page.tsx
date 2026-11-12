@@ -106,8 +106,16 @@ interface BillingBucket {
   details?: BillingDetail[];
 }
 
+interface BillingSplit {
+  byBucket: Partial<Record<string, number>>;
+  total: number;
+  subtractedHere?: number;
+}
+
 interface Billing {
   available: boolean;
+  inSales?: BillingSplit;
+  toPay?: BillingSplit;
   buckets: BillingBucket[];
   total: number;
   subtracted?: number;
@@ -666,6 +674,69 @@ const TREATMENT_SHORT: Record<ChargeTreatment, string> = {
   in_ads: "Ya en Publicidad",
   tax: "No se resta (impuestos)",
 };
+
+const INVOICE_ROWS: { bucket: string; label: string; how: string }[] = [
+  { bucket: "publicidad", label: "Cargos por publicidad", how: "Se resta una sola vez, desde Mercado Ads" },
+  { bucket: "full", label: "Cargos de envíos Full", how: "Se resta una sola vez, del período" },
+  { bucket: "otro", label: "Otros cargos (Mi página, etc.)", how: "Se resta una sola vez, del período" },
+  { bucket: "comision", label: "Comisiones sin venta asociada", how: "No se resta: ya está en cada venta" },
+  { bucket: "envio", label: "Envíos sin venta asociada", how: "No se resta: ya está en cada venta" },
+  { bucket: "impuesto", label: "Impuestos y percepciones", how: "No se resta: pago a cuenta de impuestos" },
+];
+
+/**
+ * La misma cuenta que muestra Mercado Libre en "Facturación": los cargos por
+ * venta ya se cobraron dentro de cada venta, y lo que queda para pagar es
+ * publicidad, Full y otros. Sirve para constatar contra la factura que cada
+ * concepto se cuenta una sola vez.
+ */
+function InvoiceCheck({ billing, from, to }: { billing: Billing; from: string; to: string }) {
+  const inSales = billing.inSales;
+  const toPay = billing.toPay;
+  if (!inSales || !toPay) return null;
+  const rows = INVOICE_ROWS.filter((r) => Math.abs(toPay.byBucket[r.bucket] ?? 0) >= 0.5);
+  return (
+    <div className="table-wrap" style={{ marginBottom: 16 }}>
+      <table>
+        <thead>
+          <tr>
+            <th>Para comparar con tu factura de Mercado Libre</th>
+            <th className="num">Importe</th>
+            <th>Cómo lo contamos</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>
+              Cargos por venta
+              <span className="field-hint" style={{ display: "block", margin: 0 }}>Ya cobrados: ML los descontó de cada venta. No se pagan aparte.</span>
+            </td>
+            <td className="num" style={{ color: "var(--text-dim)" }}>{fmt(inSales.total)}</td>
+            <td>Dentro de cada venta, una sola vez</td>
+          </tr>
+          {rows.map((r) => (
+            <tr key={r.bucket}>
+              <td>{r.label}</td>
+              <td className="num">{fmt(toPay.byBucket[r.bucket] ?? 0)}</td>
+              <td>{r.how}</td>
+            </tr>
+          ))}
+          <tr>
+            <td style={{ fontWeight: 600 }}>Total facturado aparte (lo que te llega para pagar)</td>
+            <td className="num" style={{ fontWeight: 600 }}>{fmt(toPay.total)}</td>
+            <td style={{ fontWeight: 600 }}>De acá se resta: {fmt(toPay.subtractedHere ?? 0)}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p className="field-hint" style={{ marginTop: 8 }}>
+        Los cargos por venta no se suman a lo que llega para pagar: son dos cosas distintas y cada una se cuenta una vez.{" "}
+        <a href={`/api/export/billing-charges?from=${from}&to=${to}`}>Descargar cada cargo de la factura (CSV)</a>
+        {" · "}
+        <a href={`/api/export/invoice-reconciliation?from=${from}&to=${to}`}>Descargar el control venta por venta (CSV)</a>
+      </p>
+    </div>
+  );
+}
 
 /**
  * La factura de Mercado Libre por concepto, con qué hace la ganancia neta con
@@ -1563,7 +1634,10 @@ export default function HomePage() {
               </p>
             </div>
           ) : (
-          <BillingTable billing={billing} summary={summary} />
+            <>
+              <InvoiceCheck billing={billing} from={from} to={to} />
+              <BillingTable billing={billing} summary={summary} />
+            </>
           )}
           <ManualBillingCharges
             from={from}
