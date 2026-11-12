@@ -5,7 +5,7 @@ import { getCurrentUser, resolveCurrentAccount } from "@/lib/current-account";
 import { revenueStatusFilter } from "@/lib/order-status";
 import { getStoreVisits } from "@/mcp/tools";
 import { appliesIva } from "@/db/accounts";
-import { monthlyAdjustments, periodAdjustments } from "@/sync/period-charges";
+import { monthlyAdjustments, periodAdjustments, annulledOrderIds } from "@/sync/period-charges";
 
 export const runtime = "nodejs";
 
@@ -36,8 +36,9 @@ async function totalsFor(client: QueryExecutor, accountId: string, from: string,
     [accountId, from, to]
   );
   const row = totalsResult.rows[0];
-  const orders = Number(row.orders);
-  const grossSales = Number(row.grossSales);
+  const returned = await returnedSalesFor(client, accountId, await annulledOrderIds(client, accountId, from, to));
+  const orders = Number(row.orders) - returned.orders;
+  const grossSales = Number(row.grossSales) - returned.revenue;
   // Misma cuenta que el período actual: ventas + publicidad y cargos de ML
   // que no son de una venta (ver sync/period-charges.ts).
   const netProfit = Number(row.netProfit) + (await periodAdjustments(client, accountId, from, to, withIva)).total;
@@ -47,8 +48,8 @@ async function totalsFor(client: QueryExecutor, accountId: string, from: string,
     grossSales,
     netProfit,
     profitPct: grossSales > 0 ? netProfit / grossSales : 0,
-    refundOrders: refunds.orders,
-    refundAmount: refunds.amount,
+    refundOrders: refunds.orders + returned.orders,
+    refundAmount: refunds.amount + returned.revenue,
   };
 }
 
@@ -81,6 +82,25 @@ async function refundsFor(
 
 
 /**
+ * Ventas que ML anuló después de cobrarlas: la orden figura pagada, pero se
+ * devolvió. Para el vendedor son devoluciones, no ventas concretadas.
+ */
+async function returnedSalesFor(client: QueryExecutor, accountId: string, ids: string[]) {
+  if (ids.length === 0) return { orders: 0, revenue: 0, commission: 0, shipping: 0 };
+  const result = await client.query(
+    `SELECT COUNT(DISTINCT oi.order_id) as orders,
+            COALESCE(SUM(oi.unit_price * oi.quantity), 0) as revenue,
+            COALESCE(SUM(oi.ml_commission), 0) as commission,
+            COALESCE(SUM(oi.shipping_cost), 0) as shipping
+       FROM order_items oi
+      WHERE oi.account_id = $1 AND oi.order_id = ANY($2::text[])`,
+    [accountId, ids]
+  );
+  const r = result.rows[0] as Record<string, string | number>;
+  return { orders: Number(r.orders), revenue: Number(r.revenue), commission: Number(r.commission), shipping: Number(r.shipping) };
+}
+
+/**
  * Desglose de la facturación de un rango: a dónde fue cada peso facturado.
  *
  * Los componentes salen solo de las ventas con costo cargado; lo facturado
@@ -95,6 +115,8 @@ async function breakdownFor(client: QueryExecutor, accountId: string, from: stri
   const taxSum = (await hasColumn(client, "order_items", "tax_applied")) ? "oi.tax_applied * oi.quantity" : "0";
   const ivaSum = (await hasColumn(client, "order_items", "iva_applied")) ? "oi.iva_applied" : "0";
   const withCost = "oi.cost_applied IS NOT NULL AND oi.net_profit IS NOT NULL";
+  const returnedIds = await annulledOrderIds(client, accountId, from, to);
+  const returned = await returnedSalesFor(client, accountId, returnedIds);
   const result = await client.query(
     `SELECT COUNT(DISTINCT o.id) as orders,
             COALESCE(SUM(oi.unit_price * oi.quantity), 0) as revenue,
@@ -109,8 +131,8 @@ async function breakdownFor(client: QueryExecutor, accountId: string, from: stri
        FROM order_items oi
        JOIN orders o ON o.account_id = oi.account_id AND o.id = oi.order_id
       WHERE oi.account_id = $1 AND o.date_created::date BETWEEN $2::date AND $3::date
-        AND ${revenueStatusFilter()}`,
-    [accountId, from, to]
+        AND ${revenueStatusFilter()} AND o.id <> ALL($4::text[])`,
+    [accountId, from, to, returnedIds]
   );
   const r = result.rows[0] as Record<string, string | number>;
   const n = (k: string) => Number(r[k] ?? 0);
@@ -133,13 +155,17 @@ async function breakdownFor(client: QueryExecutor, accountId: string, from: stri
     full: adj.full,
     otherCharges: adj.otherCharges,
     invoiceDiff: adj.invoiceDiff,
-    returnedSales: adj.refundedProfit + adj.refundedCosts + adj.cancelledCosts,
+    // Las ventas devueltas ya no están en la facturación: queda solo lo que
+    // ML cobró de más en ellas y en las canceladas.
+    returnedSales: adj.refundedCosts + adj.cancelledCosts,
     ivaCredit: adj.ivaCredit,
     missingCost: n("missingCost") + (n("revenue") - explained),
     salesProfit,
-    netProfit: salesProfit + adj.total,
-    refundOrders: refunds.orders,
-    refundAmount: refunds.amount,
+    // adj.total ya le resta la ganancia de las devueltas, que acá quedó fuera
+    // de salesProfit: se la devolvemos para no restarla dos veces.
+    netProfit: salesProfit + adj.total + adj.refundedProfit,
+    refundOrders: refunds.orders + returned.orders,
+    refundAmount: refunds.amount + returned.revenue,
   };
 }
 
@@ -328,8 +354,9 @@ export async function GET(request: NextRequest) {
       [account.id, from, to]
     );
     const adSpend = Number(adSpendResult.rows[0].total);
-    const revenue = Number(totals.grossSales);
-    const orders = Number(totals.orders);
+    const returned = await returnedSalesFor(client, account.id, await annulledOrderIds(client, account.id, from, to));
+    const revenue = Number(totals.grossSales) - returned.revenue;
+    const orders = Number(totals.orders) - returned.orders;
     // Ganancia de las ventas (venta por venta) + lo que no es de ninguna
     // venta: publicidad no repartida y cargos de ML como Full u otros. Ver
     // sync/period-charges.ts para qué entra y qué no (y por qué no se duplica).
@@ -389,7 +416,7 @@ export async function GET(request: NextRequest) {
       salesProfit,
       adjustments,
       profitPct: revenue > 0 ? netProfit / revenue : 0,
-      netRevenue: revenue - Number(totals.totalCommission) - Number(totals.totalShipping),
+      netRevenue: revenue - (Number(totals.totalCommission) - returned.commission) - (Number(totals.totalShipping) - returned.shipping),
       totalCommission: Number(totals.totalCommission),
       totalShipping: Number(totals.totalShipping),
       totalCost: Number(totals.totalCost),
@@ -402,9 +429,12 @@ export async function GET(request: NextRequest) {
       trueCpa: ordersWithCost > 0 ? adSpend / ordersWithCost : 0,
       itemsMissingCost: Number(totals.itemsMissingCost),
       productsMissingCost,
-      refundOrders: refunds.orders,
-      refundAmount: refunds.amount,
-      refundRate: orders + refunds.orders > 0 ? refunds.orders / (orders + refunds.orders) : 0,
+      refundOrders: refunds.orders + returned.orders,
+      refundAmount: refunds.amount + returned.revenue,
+      refundRate:
+        orders + refunds.orders + returned.orders > 0
+          ? (refunds.orders + returned.orders) / (orders + refunds.orders + returned.orders)
+          : 0,
       visits,
       // De cada 100 visitas, cuántas terminaron en venta.
       conversionRate: visits && visits > 0 ? orders / visits : null,

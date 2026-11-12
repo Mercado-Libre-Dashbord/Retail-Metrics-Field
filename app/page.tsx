@@ -496,7 +496,7 @@ function RevenueBreakdownPanel({ data }: { data: BreakdownResponse }) {
     { label: "Mercado Envíos Full", hint: "Almacenamiento y retiros, de tu factura de ML", color: "var(--ramp-3)", now: c.full, prev: p?.full },
     { label: "Otros cargos de Mercado Libre", hint: "Cargos de la factura que no son de una venta", color: "var(--ramp-5)", now: c.otherCharges, prev: p?.otherCharges },
     { label: "Ajuste de comisión y envío por la factura", hint: "Solo comisión y envío de cada venta ya facturada: lo que Mercado Libre cobró de verdad menos lo que informaba la orden. No incluye publicidad ni Full", color: "var(--ramp-2)", now: c.invoiceDiff ?? 0, prev: p?.invoiceDiff },
-    { label: "Ventas devueltas", hint: "La ganancia de las ventas que Mercado Libre anuló (aunque la orden figure pagada) y los cargos que quedaron en devueltas y canceladas", color: "var(--negative-line)", now: c.returnedSales ?? 0, prev: p?.returnedSales },
+    { label: "Cargos de ventas devueltas y canceladas", hint: "Lo que Mercado Libre te cobró y no devolvió en ventas anuladas o canceladas. Las ventas devueltas ya no están en la facturación: figuran en Cancelado / devuelto", color: "var(--negative-line)", now: c.returnedSales ?? 0, prev: p?.returnedSales },
     { label: "Ventas sin costo cargado", hint: "Quedan fuera de la ganancia hasta que cargues el costo", color: "var(--ramp-6)", now: c.missingCost, prev: p?.missingCost },
   ];
   const visibleRows = rows.filter((r) => Math.abs(r.now) >= 0.5 || Math.abs(r.prev ?? 0) >= 0.5);

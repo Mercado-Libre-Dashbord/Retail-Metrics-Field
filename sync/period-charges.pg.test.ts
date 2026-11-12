@@ -123,10 +123,11 @@ describe("ajustes del período (Postgres real)", () => {
   it("concilia cada venta facturada con la factura: resta lo que ML cobró de más y devuelve lo estimado de más", async () => {
     const { withScope } = await import("@/db/client");
     const { createAccount } = await import("@/db/accounts");
-    const { periodAdjustments, invoiceOrders } = await import("./period-charges");
+    const { periodAdjustments, invoiceOrders, annulledOrderIds } = await import("./period-charges");
     const account = await withScope({ isAdmin: true }, (c) => createAccount(c, "Cuenta factura", `fa.${nanoid(6)}@example.com`.toLowerCase()));
 
     let perOrder: Awaited<ReturnType<typeof invoiceOrders>> = [];
+    let annulled: string[] = [];
     const adj = await withScope({ accountId: account.id }, async (c) => {
       const orders: [string, string][] = [["A", "paid"], ["B", "paid"], ["C", "paid"], ["D", "cancelled"], ["E", "paid"], ["F", "paid"], ["G", "paid"]];
       for (const [id, status] of orders) {
@@ -173,6 +174,7 @@ describe("ajustes del período (Postgres real)", () => {
         );
       }
       perOrder = await invoiceOrders(c, account.id, "2026-09-01", "2026-09-30");
+      annulled = await annulledOrderIds(c, account.id, "2026-09-01", "2026-09-30");
       return periodAdjustments(c, account.id, "2026-09-01", "2026-09-30", false);
     });
     // El detalle venta por venta suma lo mismo que el ajuste del período.
@@ -183,6 +185,8 @@ describe("ajustes del período (Postgres real)", () => {
     expect(byId.F).toMatchObject({ status: "devuelta", adjustment: 2850 });
     expect(byId.D).toMatchObject({ status: "cancelada", adjustment: 700 });
     expect(perOrder.reduce((a, o) => a + o.adjustment, 0)).toBe(-adj.total);
+    // Solo F se anuló: es la única que sale de la facturación y pasa a devoluciones.
+    expect(annulled).toEqual(["F"]);
 
     // Cuentan A, B y C (con costo, válidas y no devueltas); con factura, A y B.
     expect(adj.ordersTotal).toBe(4);
