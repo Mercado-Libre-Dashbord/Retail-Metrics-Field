@@ -154,6 +154,7 @@ async function breakdownFor(client: QueryExecutor, accountId: string, from: stri
     adsNotInSales: adj.adsNotInSales,
     full: adj.full,
     otherCharges: adj.otherCharges,
+    flexBonus: adj.flexBonus,
     invoiceDiff: adj.invoiceDiff,
     // Las ventas devueltas ya no están en la facturación: queda solo lo que
     // ML cobró de más en ellas y en las canceladas.

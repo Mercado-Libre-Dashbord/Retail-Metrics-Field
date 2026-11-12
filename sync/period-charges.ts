@@ -39,16 +39,18 @@ import { BUCKET_LABEL, MANUAL_DETAIL_TYPE, classifyCharge, type ChargeBucket } f
  * cargado ese mes, ese crédito ya está adentro de lo que se pagó.
  */
 
-export type ChargeTreatment = "subtracted" | "per_sale" | "in_ads" | "tax";
+export type ChargeTreatment = "subtracted" | "per_sale" | "in_ads" | "tax" | "income";
 
 export const TREATMENT_LABEL: Record<ChargeTreatment, string> = {
   subtracted: "Se resta de la ganancia",
   per_sale: "Restado venta por venta, con el monto de la factura",
   in_ads: "Ya restado en Publicidad",
   tax: "No se resta: pago a cuenta de impuestos",
+  income: "Se suma a la ganancia: ingresa directo a Mercado Pago",
 };
 
 export function chargeTreatment(bucket: ChargeBucket, linkedToOrder: boolean, manual: boolean): ChargeTreatment {
+  if (bucket === "bonificacion_flex") return "income";
   if (bucket === "comision" || bucket === "envio") return "per_sale";
   if (bucket === "publicidad") return "in_ads";
   if (bucket === "impuesto") return "tax";
@@ -139,6 +141,8 @@ export interface PeriodAdjustments {
   /** Cargos de ML que se restan acá, por concepto. */
   full: number;
   otherCharges: number;
+  /** Bonificaciones de envío Flex: ingreso que ML paga directo a Mercado Pago. Se suma. */
+  flexBonus: number;
   /**
    * Factura de ML vs. lo estimado, en las ventas ya facturadas: lo que ML
    * cobró atado a cada venta menos la comisión y el envío que se habían
@@ -179,7 +183,7 @@ export interface MonthAdjustments extends PeriodAdjustments {
 
 function emptyAdjustments(): PeriodAdjustments {
   return {
-    adSpend: 0, adsInSales: 0, adsNotInSales: 0, full: 0, otherCharges: 0,
+    adSpend: 0, adsInSales: 0, adsNotInSales: 0, full: 0, otherCharges: 0, flexBonus: 0,
     invoiceDiff: 0, ordersTotal: 0, ordersInvoiced: 0, invoiceEstimated: 0, invoiceBilled: 0,
     feeEstimated: 0, feeBilled: 0, shipEstimated: 0, shipBilled: 0,
     refundedOrders: 0, refundedRevenue: 0, refundedProfit: 0, refundedCosts: 0, cancelledCosts: 0,
@@ -471,6 +475,7 @@ export async function monthlyAdjustments(
   }
   for (const r of allocated.rows) get(r.month).adsInSales += Number(r.amount);
   for (const c of charges) {
+    if (c.treatment === "income") { get(c.month).flexBonus += c.amount; continue; }
     if (c.treatment !== "subtracted") continue;
     const m = get(c.month);
     if (c.bucket === "full") m.full += c.amount; else m.otherCharges += c.amount;
@@ -504,7 +509,7 @@ export async function monthlyAdjustments(
       // estimado hay más crédito; si cobró menos, se devuelve el de más.
       m.ivaCredit = ivaFromGross(mlAdsNotInSales + Math.max(0, m.full + m.otherCharges)) + ivaFromGross(m.invoiceDiff + m.refundedCosts + m.cancelledCosts);
     }
-    m.total = -m.adsNotInSales - m.full - m.otherCharges - m.invoiceDiff - m.refundedProfit - m.refundedCosts - m.cancelledCosts + m.ivaCredit;
+    m.total = -m.adsNotInSales - m.full - m.otherCharges - m.invoiceDiff - m.refundedProfit - m.refundedCosts - m.cancelledCosts + m.ivaCredit + m.flexBonus;
     const { mlAds: _mlAds, ...rest } = m;
     out.push(rest);
   }
@@ -519,6 +524,7 @@ export function sumAdjustments(months: PeriodAdjustments[]): PeriodAdjustments {
     acc.adsNotInSales += m.adsNotInSales;
     acc.full += m.full;
     acc.otherCharges += m.otherCharges;
+    acc.flexBonus += m.flexBonus;
     acc.invoiceDiff += m.invoiceDiff;
     acc.ordersTotal += m.ordersTotal;
     acc.ordersInvoiced += m.ordersInvoiced;

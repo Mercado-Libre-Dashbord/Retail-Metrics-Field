@@ -28,7 +28,8 @@ export async function GET(request: NextRequest) {
       return { available: false, buckets: [], total: 0, subtracted: 0 };
     }
 
-    const details = await chargeDetails(client, account.id, from, to);
+    // La bonificación Flex es un ingreso, no un cargo de la factura: no suma al total facturado.
+    const details = (await chargeDetails(client, account.id, from, to)).filter((d) => d.treatment !== "income");
     const byBucket = new Map<ChargeBucket, { amount: number; byTreatment: Partial<Record<ChargeTreatment, number>>; details: typeof details }>();
     for (const d of details) {
       const b = byBucket.get(d.bucket) ?? { amount: 0, byTreatment: {}, details: [] };

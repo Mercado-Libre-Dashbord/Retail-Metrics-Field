@@ -211,4 +211,35 @@ describe("ajustes del período (Postgres real)", () => {
     expect(adj.cancelledCosts).toBe(700);
     expect(adj.total).toBe(100 - 2500 - 350 - 700);
   });
+
+  it("la bonificación de envío Flex cargada a mano se suma a la ganancia y no cuenta como facturado", async () => {
+    const { withScope } = await import("@/db/client");
+    const { createAccount } = await import("@/db/accounts");
+    const { periodAdjustments, chargeDetails } = await import("./period-charges");
+    const { manualSubType, MANUAL_DETAIL_TYPE } = await import("./billing");
+
+    const account = await withScope({ isAdmin: true }, (c) => createAccount(c, "Cuenta flex", `fx.${nanoid(6)}@example.com`.toLowerCase()));
+    const { adj, details } = await withScope({ accountId: account.id }, async (c) => {
+      const rows: [string, string, number][] = [
+        ["manual-flex", manualSubType("bonificacion_flex"), 1306382],
+        ["manual-otro", manualSubType("otro"), 1000],
+      ];
+      for (const [id, sub, amount] of rows) {
+        await c.query(
+          `INSERT INTO billing_charges (account_id, detail_id, period_key, detail_type, detail_sub_type, concept, order_id, amount, charged_at)
+           VALUES ($1, $2, '2026-11-01', $3, $4, NULL, NULL, $5, '2026-11-05')`,
+          [account.id, id, MANUAL_DETAIL_TYPE, sub, amount]
+        );
+      }
+      return {
+        adj: await periodAdjustments(c, account.id, "2026-11-01", "2026-11-30", false),
+        details: await chargeDetails(c, account.id, "2026-11-01", "2026-11-30"),
+      };
+    });
+    expect(adj.flexBonus).toBe(1306382);
+    expect(adj.otherCharges).toBe(1000);
+    // Suma la bonificación y resta el otro cargo.
+    expect(adj.total).toBe(1306382 - 1000);
+    expect(details.find((d) => d.bucket === "bonificacion_flex")?.treatment).toBe("income");
+  });
 });

@@ -49,6 +49,7 @@ export async function GET(request: NextRequest) {
     const bucket = classifyCharge(r.concept, r.detail_type, r.detail_sub_type);
     const linked = Boolean(r.order_id);
     const how =
+      bucket === "bonificacion_flex" ? "Se suma a la ganancia: ingresa directo a Mercado Pago" :
       bucket === "impuesto" ? HOW.impuesto :
       bucket === "publicidad" ? (/products? ads/i.test(r.concept ?? "") || manual ? HOW.ads : HOW.resta) :
       linked && !manual ? HOW.venta :
