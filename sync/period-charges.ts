@@ -349,6 +349,23 @@ export async function invoiceDiffByMonth(db: QueryExecutor, accountId: string, f
   }));
 }
 
+/**
+ * Ids de las ventas que ML anuló después de cobrarlas (la orden figura pagada
+ * pero se le devolvió el cargo por vender). Para el vendedor son devoluciones:
+ * no cuentan en la facturación ni en las órdenes, y sí en Devoluciones.
+ */
+export async function annulledOrderIds(db: QueryExecutor, accountId: string, from: string, to: string): Promise<string[]> {
+  if (!(await hasColumn(db, "billing_charges", "detail_id"))) return [];
+  const { saleKeys, feeKeys, shipKeys } = await saleChargeKeys(db, accountId);
+  if (saleKeys.length === 0) return [];
+  const result = await db.query<{ id: string }>(
+    `${INVOICE_ORDERS_CTE}
+     SELECT id FROM j WHERE annulled`,
+    [accountId, from, to, feeKeys, shipKeys, saleKeys]
+  );
+  return result.rows.map((r) => String(r.id));
+}
+
 export interface InvoiceOrderRow {
   orderId: string;
   date: string;

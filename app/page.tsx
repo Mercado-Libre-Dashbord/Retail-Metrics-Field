@@ -496,7 +496,7 @@ function RevenueBreakdownPanel({ data }: { data: BreakdownResponse }) {
     { label: "Mercado Envíos Full", hint: "Almacenamiento y retiros, de tu factura de ML", color: "var(--ramp-3)", now: c.full, prev: p?.full },
     { label: "Otros cargos de Mercado Libre", hint: "Cargos de la factura que no son de una venta", color: "var(--ramp-5)", now: c.otherCharges, prev: p?.otherCharges },
     { label: "Ajuste de comisión y envío por la factura", hint: "Solo comisión y envío de cada venta ya facturada: lo que Mercado Libre cobró de verdad menos lo que informaba la orden. No incluye publicidad ni Full", color: "var(--ramp-2)", now: c.invoiceDiff ?? 0, prev: p?.invoiceDiff },
-    { label: "Ventas devueltas", hint: "La ganancia de las ventas que Mercado Libre anuló (aunque la orden figure pagada) y los cargos que quedaron en devueltas y canceladas", color: "var(--negative-line)", now: c.returnedSales ?? 0, prev: p?.returnedSales },
+    { label: "Cargos de ventas devueltas y canceladas", hint: "Lo que Mercado Libre te cobró y no devolvió en ventas anuladas o canceladas. Las ventas devueltas ya no están en la facturación: figuran en Cancelado / devuelto", color: "var(--negative-line)", now: c.returnedSales ?? 0, prev: p?.returnedSales },
     { label: "Ventas sin costo cargado", hint: "Quedan fuera de la ganancia hasta que cargues el costo", color: "var(--ramp-6)", now: c.missingCost, prev: p?.missingCost },
   ];
   const visibleRows = rows.filter((r) => Math.abs(r.now) >= 0.5 || Math.abs(r.prev ?? 0) >= 0.5);
@@ -1070,15 +1070,84 @@ function ChartSkeleton({ height = 300 }: { height?: number }) {
 function MissingCostPanel({
   items,
   products,
+  onSaved,
 }: {
   items: number;
   products: { productId: string; title: string; thumbnail: string | null; units: number }[];
+  onSaved: () => void;
 }) {
+  const [currency, setCurrency] = useState<"ARS" | "USD">("ARS");
+  const [rate, setRate] = useState<number | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState<string | null>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
+  // El dólar blue de hoy, el mismo que usa Productos para convertir.
+  useEffect(() => {
+    if (currency !== "USD" || rate !== null) return;
+    fetch("/api/exchange-rate")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setRate(d?.blue?.venta ?? d?.oficial?.venta ?? null))
+      .catch(() => setRate(null));
+  }, [currency, rate]);
+
+  // Publicaciones con el mismo título: tienen el mismo costo, se cargan juntas.
+  const titleKey = (t: string) => t.trim().toLowerCase().replace(/\s+/g, " ");
+
+  async function save(p: { productId: string; title: string }) {
+    const typed = Number((drafts[p.productId] ?? "").replace(",", "."));
+    if (!Number.isFinite(typed) || typed <= 0) {
+      setErrors((e) => ({ ...e, [p.productId]: "Ingresá un costo mayor a 0." }));
+      return;
+    }
+    if (currency === "USD" && !rate) {
+      setErrors((e) => ({ ...e, [p.productId]: "No pude traer el dólar de hoy. Cargalo en pesos o probá de nuevo." }));
+      return;
+    }
+    const cost = currency === "USD" ? Math.round(typed * (rate as number) * 100) / 100 : typed;
+    setSaving(p.productId);
+    setErrors((e) => ({ ...e, [p.productId]: "" }));
+    try {
+      const ids = products.filter((o) => titleKey(o.title) === titleKey(p.title)).map((o) => o.productId);
+      for (const productId of ids) {
+        const res = await fetch("/api/products", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            productId,
+            cost,
+            exchangeRate: currency === "USD" ? rate : null,
+            costCurrency: currency,
+            replaceHistory: true,
+          }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          setErrors((e) => ({ ...e, [p.productId]: data.error ?? "No se pudo guardar el costo." }));
+          return;
+        }
+      }
+      setDrafts((d) => ({ ...d, [p.productId]: "" }));
+      onSaved();
+    } finally {
+      setSaving(null);
+    }
+  }
+
   return (
     <div className="missing-cost-panel" role="status">
       <p className="missing-cost-head">
         <strong>{items} línea(s) de venta sin costo cargado.</strong> Sus ventas quedan fuera de la ganancia
-        neta — no se estima un valor.
+        neta — no se estima un valor. Cargá el costo acá mismo, empezando por el que más vendió.
+      </p>
+      <p className="missing-cost-foot" style={{ marginTop: 8 }}>
+        <label>
+          Moneda del costo{" "}
+          <select value={currency} onChange={(e) => setCurrency(e.target.value as "ARS" | "USD")}>
+            <option value="ARS">Pesos</option>
+            <option value="USD">Dólares{rate ? ` (blue $${Math.round(rate).toLocaleString("es-AR")})` : ""}</option>
+          </select>
+        </label>
       </p>
       {products.length > 0 && (
         <ul className="missing-cost-list">
@@ -1092,19 +1161,31 @@ function MissingCostPanel({
                 )}
                 <span style={{ minWidth: 0 }}>
                   <span className="missing-cost-title" title={p.title}>{p.title}</span>
-                  {/* El id abajo del nombre: es lo que hay que buscar en
-                      Productos, y si el nombre no se pudo resolver es lo
-                      único que identifica la publicación. */}
-                  <span className="cell-sub">{p.productId}</span>
+                  <span className="cell-sub">{p.productId} · {p.units} u.</span>
+                  {errors[p.productId] && <span className="cell-sub" style={{ color: "var(--negative)" }}>{errors[p.productId]}</span>}
                 </span>
               </span>
-              <span className="missing-cost-units">{p.units} u.</span>
+              <span style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  aria-label={`Costo de ${p.title} en ${currency === "USD" ? "dólares" : "pesos"}`}
+                  placeholder={currency === "USD" ? "US$" : "$"}
+                  value={drafts[p.productId] ?? ""}
+                  onChange={(e) => setDrafts((d) => ({ ...d, [p.productId]: e.target.value }))}
+                  onKeyDown={(e) => { if (e.key === "Enter") save(p); }}
+                  style={{ width: 96 }}
+                />
+                <button className="btn btn-secondary btn-sm" disabled={saving === p.productId} onClick={() => save(p)}>
+                  {saving === p.productId ? "Guardando…" : "Guardar"}
+                </button>
+              </span>
             </li>
           ))}
         </ul>
       )}
       <p className="missing-cost-foot">
-        <a className="btn btn-secondary btn-sm" href="/productos">Cargar costos</a>
+        <a className="btn btn-secondary btn-sm" href="/productos">Ver todos en Productos</a>
         <span>Si alguno ya no está publicado, igual aparece en Productos para que puedas costearlo.</span>
       </p>
     </div>
@@ -1592,6 +1673,7 @@ export default function HomePage() {
         <MissingCostPanel
           items={summary.itemsMissingCost}
           products={summary.productsMissingCost ?? []}
+          onSaved={loadAll}
         />
       )}
 

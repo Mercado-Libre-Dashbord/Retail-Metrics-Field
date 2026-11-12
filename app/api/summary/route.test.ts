@@ -12,6 +12,7 @@ const ZERO_ADJ = { adSpend: 0, adsInSales: 0, adsNotInSales: 0, full: 0, otherCh
 vi.mock("@/sync/period-charges", () => ({
   periodAdjustments: vi.fn(),
   monthlyAdjustments: vi.fn(),
+  annulledOrderIds: vi.fn().mockResolvedValue([]),
 }));
 
 import { GET } from "./route";
