@@ -53,6 +53,8 @@ interface Adjustments {
   adsNotInSales: number;
   full: number;
   otherCharges: number;
+  /** Bonificaciones de envío Flex (ingreso, se suma). */
+  flexBonus?: number;
   /** Factura de ML menos lo estimado, en las ventas ya facturadas (positivo = se resta). */
   invoiceDiff?: number;
   ordersTotal?: number;
@@ -85,7 +87,7 @@ interface DailyBreakdown {
   netProfit: number;
 }
 
-type ChargeTreatment = "subtracted" | "per_sale" | "in_ads" | "tax";
+type ChargeTreatment = "subtracted" | "per_sale" | "in_ads" | "tax" | "income";
 
 interface BillingDetail {
   concept: string;
@@ -342,6 +344,7 @@ function DeltaPill({ current, previous }: { current: number; previous: number | 
  * el número de la tarjeta se pueda verificar, no solo creer.
  */
 interface BreakdownTotals {
+  flexBonus?: number;
   orders: number;
   revenue: number;
   cost: number;
@@ -495,6 +498,7 @@ function RevenueBreakdownPanel({ data }: { data: BreakdownResponse }) {
     { label: "Publicidad", hint: `Mercado Ads${c.adsNotInSales > 0 ? " + Meta, Google o TikTok cargados a mano" : ""}`, color: "var(--chart-ads)", now: ads(c), prev: p ? ads(p) : undefined },
     { label: "Mercado Envíos Full", hint: "Almacenamiento y retiros, de tu factura de ML", color: "var(--ramp-3)", now: c.full, prev: p?.full },
     { label: "Otros cargos de Mercado Libre", hint: "Cargos de la factura que no son de una venta", color: "var(--ramp-5)", now: c.otherCharges, prev: p?.otherCharges },
+    { label: "Bonificaciones de envío Flex", hint: "Ingresan directo a Mercado Pago, sin pasar por la liquidación de ventas. Las cargás vos en Configuración de facturas", color: "var(--positive-fill)", now: -(c.flexBonus ?? 0), prev: p ? -(p.flexBonus ?? 0) : undefined },
     { label: "Ajuste de comisión y envío por la factura", hint: "Solo comisión y envío de cada venta ya facturada: lo que Mercado Libre cobró de verdad menos lo que informaba la orden. No incluye publicidad ni Full", color: "var(--ramp-2)", now: c.invoiceDiff ?? 0, prev: p?.invoiceDiff },
     { label: "Cargos de ventas devueltas y canceladas", hint: "Lo que Mercado Libre te cobró y no devolvió en ventas anuladas o canceladas. Las ventas devueltas ya no están en la facturación: figuran en Cancelado / devuelto", color: "var(--negative-line)", now: c.returnedSales ?? 0, prev: p?.returnedSales },
     { label: "Ventas sin costo cargado", hint: "Quedan fuera de la ganancia hasta que cargues el costo", color: "var(--ramp-6)", now: c.missingCost, prev: p?.missingCost },
@@ -550,7 +554,7 @@ function RevenueBreakdownPanel({ data }: { data: BreakdownResponse }) {
                 <tr key={r.label} title={r.hint}>
                   <td>
                     <span className="breakdown-dot" style={{ background: r.color }} aria-hidden="true" />
-                    − {r.label}
+                    {r.now < 0 ? "+" : "−"} {r.label}
                   </td>
                   <td className="num">{fmt(-r.now)}</td>
                   <td className="num">{share(r.now)}</td>
@@ -589,6 +593,12 @@ function NetProfitBreakdown({ salesProfit, adj, netProfit, from, to }: { salesPr
       sign: "−",
     },
     { label: "Mercado Envíos Full", hint: "Almacenamiento y retiros de stock, de tu factura de Mercado Libre.", value: adj.full, sign: "−" },
+    {
+      label: "Bonificaciones de envío Flex",
+      hint: "Ingreso que Mercado Libre te paga directo en Mercado Pago por tus envíos Flex. Lo cargás a mano en \"Agregar una factura de ML a mano\".",
+      value: adj.flexBonus ?? 0,
+      sign: "+",
+    },
     {
       label: "Otros cargos de Mercado Libre",
       hint: "Cargos de tu factura que no son de una venta (multas, cargos varios), incluidos los que cargaste a mano.",
@@ -671,6 +681,7 @@ function NetProfitBreakdown({ salesProfit, adj, netProfit, from, to }: { salesPr
 const TREATMENT_SHORT: Record<ChargeTreatment, string> = {
   subtracted: "Se resta",
   per_sale: "En cada venta (monto de la factura)",
+  income: "Se suma (ingreso)",
   in_ads: "Ya en Publicidad",
   tax: "No se resta (impuestos)",
 };

@@ -1,4 +1,4 @@
-export type ChargeBucket = "comision" | "envio" | "impuesto" | "publicidad" | "full" | "otro";
+export type ChargeBucket = "comision" | "envio" | "impuesto" | "publicidad" | "full" | "otro" | "bonificacion_flex";
 
 export const BUCKET_LABEL: Record<ChargeBucket, string> = {
   comision: "Comisiones de venta",
@@ -7,6 +7,9 @@ export const BUCKET_LABEL: Record<ChargeBucket, string> = {
   publicidad: "Publicidad",
   full: "Mercado Envíos Full (almacenamiento y retiros)",
   otro: "Otros cargos",
+  // Ingreso, no cargo: ML lo paga directo a Mercado Pago, sin pasar por la
+  // liquidación de ventas. Se carga a mano, en positivo.
+  bonificacion_flex: "Bonificaciones de envío Flex (ingreso)",
 };
 
 export const CHARGE_BUCKETS = Object.keys(BUCKET_LABEL) as ChargeBucket[];
