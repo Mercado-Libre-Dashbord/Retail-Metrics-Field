@@ -1,5 +1,5 @@
 import type { QueryExecutor } from "@/db/client";
-import { listProducts, listOrders, getOrderDetail, getAdsSpend, listBillingPeriods, getBillingCharges, getProductsByIds, getOrderItemTitles, getFullStock, scanProductIds, getProductDetails, type MlProduct } from "@/mcp/tools";
+import { listProducts, listOrders, getOrderDetail, getAdsSpend, listBillingPeriods, getBillingCharges, creditNotePeriodKey, getProductsByIds, getOrderItemTitles, getFullStock, scanProductIds, getProductDetails, type MlProduct } from "@/mcp/tools";
 import { revenueStatusFilter } from "@/lib/order-status";
 import { getCostEntryAtDate, allocateAdsCost, calculateNetProfit, calculateIva } from "./profitability";
 import { applyIvaPayments } from "./iva-payments";
@@ -677,7 +677,15 @@ export async function syncBillingCharges(db: QueryExecutor, accountId: string): 
     // el sync no termina nunca. Lo que no entra se completa en el próximo.
     const deadline = Date.now() + BILLING_TIME_BUDGET_MS;
     const state = { rateLimited: false };
-    for (const period of periods.slice(0, 3)) {
+    // Cada período tiene dos documentos: la factura (cargos y anulaciones del
+    // mismo período) y las notas de crédito de facturas anteriores. Sin las
+    // segundas, una venta devuelta después del cierre seguía contando como
+    // venta, y una cancelada seguía con sus cargos restados.
+    const documents = periods.slice(0, 3).flatMap((period) => [
+      { period, documentType: "BILL" as const, storedKey: period.key },
+      { period, documentType: "CREDIT_NOTE" as const, storedKey: creditNotePeriodKey(period.key) },
+    ]);
+    for (const { period, documentType, storedKey } of documents) {
       if (Date.now() > deadline || state.rateLimited) break;
       // Los cargos de ML no cambian una vez emitidos: se sigue desde el último
       // detail_id guardado de este período. Así un período grande se completa
@@ -686,11 +694,11 @@ export async function syncBillingCharges(db: QueryExecutor, accountId: string): 
       const last = await db.query(
         `SELECT MAX(detail_id::numeric)::text AS last FROM billing_charges
           WHERE account_id = $1 AND period_key = $2 AND detail_id ~ '^[0-9]+$'`,
-        [accountId, period.key]
+        [accountId, storedKey]
       );
       const fromId = (last.rows[0] as { last: string | null } | undefined)?.last ?? undefined;
       const unique = new Map<string, Awaited<ReturnType<typeof getBillingCharges>>[number]>();
-      for (const c of await getBillingCharges(accountId, period.key, deadline, { fromId, state })) {
+      for (const c of await getBillingCharges(accountId, period.key, deadline, { fromId, state, documentType })) {
         if (c.detailType && c.detailType.toUpperCase() !== "CHARGE") {
           const entry = unexpectedTypes.get(c.detailType) ?? {
             subTypes: new Set(), concepts: new Set(), withOrderId: 0, withoutOrderId: 0,

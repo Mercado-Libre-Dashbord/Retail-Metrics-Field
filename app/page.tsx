@@ -847,7 +847,8 @@ function RevenueSplitPie({ daily, adjustments }: { daily: DailyBreakdown[]; adju
   // cargos de ML) se suma a su porción y se resta de la ganancia, así la torta
   // muestra la misma ganancia neta que la tarjeta de arriba.
   const adj = adjustments;
-  const otherMl = adj ? adj.full + adj.otherCharges + Math.max(0, adj.invoiceDiff ?? 0) + (adj.refundedCosts ?? 0) + (adj.cancelledCosts ?? 0) : 0;
+  // La bonificación Flex es un ingreso de ML: compensa sus cargos en la torta.
+  const otherMl = adj ? Math.max(0, adj.full + adj.otherCharges + Math.max(0, adj.invoiceDiff ?? 0) + (adj.refundedCosts ?? 0) + (adj.cancelledCosts ?? 0) - (adj.flexBonus ?? 0)) : 0;
   if (adj) {
     totals.ads += adj.adsNotInSales;
     totals.iva -= adj.ivaCredit;
