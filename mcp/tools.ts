@@ -1419,6 +1419,11 @@ export interface MlBillingCharge {
   chargedAt: string | null;
 }
 
+/** Clave con la que se guardan las notas de crédito de un período (ver getBillingCharges). */
+export function creditNotePeriodKey(periodKey: string): string {
+  return `${periodKey}#NC`;
+}
+
 export async function listBillingPeriods(accountId: string): Promise<MlBillingPeriod[]> {
   const token = await getValidAccessToken(accountId);
   const res = await listOrEmpty(
@@ -1462,6 +1467,13 @@ export async function getBillingCharges(
     fromId?: string;
     /** Se marca en true si Mercado Libre cortó por límite de pedidos (429). */
     state?: { rateLimited: boolean };
+    /**
+     * BILL: los cargos del período y las anulaciones hechas dentro del mismo
+     * período. CREDIT_NOTE: las notas de crédito de facturas anteriores
+     * (anulaciones de cargos de períodos ya cerrados). Son documentos
+     * distintos: pedir solo BILL deja afuera las segundas.
+     */
+    documentType?: "BILL" | "CREDIT_NOTE";
   } = {}
 ): Promise<MlBillingCharge[]> {
   const token = await getValidAccessToken(accountId);
@@ -1470,9 +1482,13 @@ export async function getBillingCharges(
   const charges: MlBillingCharge[] = [];
   let fromId = opts.fromId ?? "0";
   let skipped = 0;
+  const documentType = opts.documentType ?? "BILL";
+  // Las notas de crédito se guardan con su propia clave de período: así el
+  // cursor (último id guardado) de cada documento no pisa al del otro.
+  const storedPeriodKey = documentType === "CREDIT_NOTE" ? creditNotePeriodKey(periodKey) : periodKey;
 
   for (let page = 0; page < MAX_PAGES; page += 1) {
-    const query = new URLSearchParams({ document_type: "BILL", limit: String(PAGE_SIZE), from_id: fromId });
+    const query = new URLSearchParams({ document_type: documentType, limit: String(PAGE_SIZE), from_id: fromId });
     let res: any;
     try {
       res = await listOrEmpty(
@@ -1504,8 +1520,10 @@ export async function getBillingCharges(
       const sales = Array.isArray(row.sales_info) ? row.sales_info : row.sales_info ? [row.sales_info] : [];
       charges.push({
         detailId,
-        periodKey,
-        detailType: ci.detail_type ?? null,
+        periodKey: storedPeriodKey,
+        // Una nota de crédito siempre devuelve plata: si ML no la marcara
+        // como BONUS, igual tiene que restar.
+        detailType: documentType === "CREDIT_NOTE" ? "BONUS" : ci.detail_type ?? null,
         detailSubType: ci.detail_sub_type ?? null,
         concept: ci.transaction_detail ?? ci.concept ?? ci.detail_sub_type ?? ci.detail_type ?? null,
         // ML nombra este campo distinto según el tipo de cargo; el primero que
