@@ -1529,7 +1529,14 @@ main:has(.resumen-page) { max-width: 1680px; }
 .kpi-compact .kpi-card { padding: var(--space-3) var(--space-3); }
 .kpi-compact .kpi-card .label { font-size: 12px; }
 .kpi-compact .kpi-card .value { font-size: clamp(17px, 1.35vw, 22px); margin-top: var(--space-1); }
-.kpi-compact .kpi-card.kpi-hero .value { font-size: clamp(18px, 1.5vw, 24px); }
+.kpi-compact .kpi-card.kpi-hero .value { font-size: clamp(17px, 1.3vw, 22px); }
+/* Un monto nunca se parte en dos renglones: se achica antes de cortarse. */
+.kpi-compact .kpi-card .value { white-space: nowrap; overflow-wrap: normal; }
+/* Con ocho tarjetas en fila cada una es angosta: un monto de nueve dígitos tiene que entrar entero. */
+@media (min-width: 1760px) {
+  .kpi-compact .kpi-card .value,
+  .kpi-compact .kpi-card.kpi-hero .value { font-size: clamp(15px, 1.05vw, 19px); }
+}
 .kpi-compact .kpi-delta { margin-top: var(--space-1); }
 .breakdown-card { padding: var(--space-4); }
 .breakdown-card .chart-card-head { margin-bottom: var(--space-2); }
