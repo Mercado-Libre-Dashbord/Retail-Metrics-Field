@@ -681,10 +681,14 @@ export async function syncBillingCharges(db: QueryExecutor, accountId: string): 
     // mismo período) y las notas de crédito de facturas anteriores. Sin las
     // segundas, una venta devuelta después del cierre seguía contando como
     // venta, y una cancelada seguía con sus cargos restados.
-    const documents = periods.slice(0, 3).flatMap((period) => [
-      { period, documentType: "BILL" as const, storedKey: period.key },
-      { period, documentType: "CREDIT_NOTE" as const, storedKey: creditNotePeriodKey(period.key) },
-    ]);
+    // Las notas de crédito van primero: son pocas filas (un pedido por
+    // período) y la factura de un período grande se come todo el cupo de 5
+    // pedidos por minuto de ML; si fueran después, nunca llegarían a pedirse.
+    const recent = periods.slice(0, 3);
+    const documents = [
+      ...recent.map((period) => ({ period, documentType: "CREDIT_NOTE" as const, storedKey: creditNotePeriodKey(period.key) })),
+      ...recent.map((period) => ({ period, documentType: "BILL" as const, storedKey: period.key })),
+    ];
     for (const { period, documentType, storedKey } of documents) {
       if (Date.now() > deadline || state.rateLimited) break;
       // Los cargos de ML no cambian una vez emitidos: se sigue desde el último
