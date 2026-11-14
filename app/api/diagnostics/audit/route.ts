@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { withScope } from "@/db/client";
 import { hasColumn } from "@/db/schema-capabilities";
 import { getCurrentUser, resolveCurrentAccount } from "@/lib/current-account";
@@ -30,10 +30,15 @@ async function tryFetch(path: string, token: string) {
  *
  * Solo totales: ningún dato de compradores ni de ventas individuales.
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
   const [account, user] = await Promise.all([resolveCurrentAccount(), getCurrentUser()]);
   if (!account) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
   if (!user?.isAdmin) return NextResponse.json({ error: "Solo para administradores" }, { status: 403 });
+
+  // ?probe=2026-11-01 → un solo pedido a ML (notas de crédito de ese período)
+  // para ver si trae filas con el mismo detail_id y si las guardamos todas.
+  const probeKey = request.nextUrl.searchParams.get("probe");
+  if (probeKey) return NextResponse.json(await probeCreditNotes(account.id, probeKey));
 
   const stored = await withScope({ accountId: account.id }, async (client) => {
     if (!(await hasColumn(client, "billing_charges", "detail_id"))) return null;
@@ -100,4 +105,49 @@ export async function GET() {
       "publicidadPorMes.cociente: factura de Product Ads / Mercado Ads. Cerca de 1 = la app resta lo mismo que cobra ML. Cerca de 1,21 = Mercado Ads informa sin IVA y la factura lo cobra con IVA.",
     ],
   });
+}
+
+async function probeCreditNotes(accountId: string, key: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return { error: "probe=AAAA-MM-DD" };
+  const token = await getValidAccessToken(accountId);
+  const r = await tryFetch(`/billing/integration/periods/key/${key}/group/ML/details?document_type=CREDIT_NOTE&limit=1000&from_id=0`, token);
+  if (!r.ok) return { error: r.error };
+  const rows: any[] = r.body?.results ?? [];
+  const ids: string[] = rows.map((x) => String(x?.charge_info?.detail_id ?? ""));
+  const groups = new Map<string, any[]>();
+  rows.forEach((x, i) => groups.set(ids[i], [...(groups.get(ids[i]) ?? []), x]));
+  const amount = (x: any) => Number(x?.charge_info?.detail_amount ?? 0);
+  const distinctLastWins = [...groups.values()].reduce((a, g) => a + amount(g[g.length - 1]), 0);
+  const duplicated = [...groups.entries()].filter(([, g]) => g.length > 1);
+  const numeric = ids.map(Number);
+  const stored = await withScope({ accountId }, async (c) => {
+    const q = await c.query<{ n: string; amount: string }>(
+      `SELECT COUNT(*) as n, COALESCE(SUM(abs(amount)), 0) as amount FROM billing_charges WHERE account_id = $1 AND period_key = $2`,
+      [accountId, `${key}#NC`]
+    );
+    return { filas: Number(q.rows[0].n), importe: Number(q.rows[0].amount) };
+  });
+  return {
+    periodo: key,
+    mercadoLibre: {
+      total: r.body?.total ?? null,
+      filasDevueltas: rows.length,
+      idsDistintos: groups.size,
+      filasConIdRepetido: rows.length - groups.size,
+      sinDetailId: ids.filter((i) => !i).length,
+      sumaTodasLasFilas: Math.round(rows.reduce((a, x) => a + amount(x), 0) * 100) / 100,
+      sumaConUnaFilaPorId: Math.round(distinctLastWins * 100) / 100,
+      ordenadoPorId: numeric.every((v, i) => i === 0 || v >= numeric[i - 1]),
+      lastId: r.body?.last_id ?? null,
+      ejemplosDeIdRepetido: duplicated.slice(0, 4).map(([id, g]) => ({
+        detailId: id,
+        filas: g.length,
+        importes: g.map(amount),
+        ordenes: g.map((x) => x?.sales_info?.[0]?.order_id ?? null),
+        tipos: g.map((x) => x?.charge_info?.detail_sub_type ?? null),
+      })),
+    },
+    guardado: stored,
+    comoLeerlo: "Si sumaTodasLasFilas es mayor que sumaConUnaFilaPorId (y se parece al importe del período), perdemos plata al guardar una sola fila por detail_id.",
+  };
 }
