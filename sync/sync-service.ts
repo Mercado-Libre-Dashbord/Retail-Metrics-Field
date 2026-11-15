@@ -723,13 +723,31 @@ export async function syncBillingChargesDetailed(db: QueryExecutor, accountId: s
     const recent = periods.slice(0, BILLING_PERIODS);
     const creditNotes = recent.map((period) => ({ period, documentType: "CREDIT_NOTE" as const, storedKey: creditNotePeriodKey(period.key) }));
     const bills = recent.map((period) => ({ period, documentType: "BILL" as const, storedKey: period.key }));
-    // Los documentos que todavía no se recorrieron enteros, primero (notas de
-    // crédito antes que facturas); los ya completos, que solo se verifican, al final.
+    // Un período cerrado que se recorrió ANTES de cerrarse quedó incompleto
+    // (siguieron entrando cargos): hay que recorrerlo entero una vez más.
+    const isClosed = (period: { periodStatus: string | null }) => period.periodStatus !== "OPEN";
+    const closeTs = (period: { dateTo: string | null }) => (period.dateTo ? Date.parse(`${period.dateTo}T23:59:59Z`) : 0);
+    const needsScan = (doc: { period: { periodStatus: string | null; dateTo: string | null }; storedKey: string }) => {
+      const cur = cursors.get(doc.storedKey);
+      return !cur || !cur.complete || (isClosed(doc.period) && cur.updatedAt < closeTs(doc.period));
+    };
+    // Orden de prioridad: los períodos cerrados que falta recorrer van primero
+    // (ahí está lo que cambia el número de los meses ya terminados); después el
+    // período abierto. El abierto crece sin parar y, si se lo volviera a
+    // recorrer entero en cada vuelta, se comería todo el cupo de pedidos y los
+    // cerrados nunca avanzarían (pasó: las facturas de septiembre a noviembre
+    // no se movieron en toda una tarde de sincronizaciones).
     const docs = [...creditNotes, ...bills];
     if (cursorsReady) {
-      docs.sort((a, b) => Number(cursors.get(a.storedKey)?.complete === true) - Number(cursors.get(b.storedKey)?.complete === true));
+      const rank = (doc: (typeof docs)[number]) => {
+        const closed = isClosed(doc.period);
+        const scan = needsScan(doc);
+        return closed && scan ? 0 : !closed && scan ? 1 : closed ? 2 : 3;
+      };
+      docs.sort((a, b) => rank(a) - rank(b));
     }
-    for (const { period, documentType, storedKey } of docs) {
+    for (const doc of docs) {
+      const { period, documentType, storedKey } = doc;
       if (Date.now() > deadline || state.rateLimited) {
         pending = true;
         break;
@@ -737,10 +755,14 @@ export async function syncBillingChargesDetailed(db: QueryExecutor, accountId: s
       let fromId: string | undefined;
       const current = cursors.get(storedKey);
       if (cursorsReady) {
-        if (current?.complete) {
+        if (needsScan(doc)) {
+          // Seguir donde quedó; si estaba completo pero se recorrió antes de
+          // cerrarse el período, empezar de nuevo.
+          fromId = current && !current.complete ? current.fromId : "0";
+        } else if (current) {
           // Un período cerrado ya recorrido entero no cambia de un momento a otro:
           // no se gasta un pedido (son 5 por minuto) en volver a mirarlo.
-          if (period.periodStatus !== "OPEN" && Date.now() - current.updatedAt < CLOSED_DOC_RECHECK_MS) continue;
+          if (isClosed(period) && Date.now() - current.updatedAt < CLOSED_DOC_RECHECK_MS) continue;
           let total: number | null;
           try {
             total = await getBillingTotal(accountId, period.key, documentType);
@@ -756,9 +778,12 @@ export async function syncBillingChargesDetailed(db: QueryExecutor, accountId: s
             await db.query(`UPDATE billing_scan_cursors SET updated_at = now() WHERE account_id = $1 AND doc_key = $2`, [accountId, storedKey]);
             continue;
           }
-          fromId = "0";
+          // Cerrado: algo cambió, se recorre de nuevo. Abierto: lo nuevo se agrega
+          // al final, se sigue desde el cursor (recorrerlo entero cada vez agotaría
+          // el cupo de pedidos).
+          fromId = isClosed(period) ? "0" : current.fromId;
         } else {
-          fromId = current?.fromId ?? "0";
+          fromId = "0";
         }
       } else if (documentType === "CREDIT_NOTE") {
         fromId = undefined;
