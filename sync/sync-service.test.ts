@@ -717,6 +717,39 @@ describe("syncBillingCharges", () => {
     vi.mocked(listBillingPeriods).mockResolvedValue([]);
   });
 
+  it("avisa si la factura quedó incompleta para que el botón siga solo", async () => {
+    const { listBillingPeriods, getBillingCharges, getBillingTotal } = await import("@/mcp/tools");
+    vi.mocked(getBillingCharges).mockReset();
+    vi.mocked(getBillingTotal).mockReset();
+    vi.mocked(listBillingPeriods).mockResolvedValue([
+      { key: "2026-11-01", dateFrom: "2026-10-08", dateTo: "2026-11-07", amount: 100, periodStatus: "CLOSED" },
+    ]);
+    const { withScope } = await import("@/db/client");
+    const { syncBillingChargesDetailed } = await import("./sync-service");
+    const account = await makeAccount();
+    const partial = async (_a: string, _k: string, _d: number, opts: any) => {
+      opts.progress.lastId = "50";
+      opts.progress.total = 3000;
+      opts.progress.reachedEnd = false;
+      return [];
+    };
+    const full = async (_a: string, _k: string, _d: number, opts: any) => {
+      opts.progress.lastId = "99";
+      opts.progress.total = 3000;
+      opts.progress.reachedEnd = true;
+      return [];
+    };
+    vi.mocked(getBillingCharges).mockImplementation(partial as any);
+    expect((await withScope({ accountId: account.id }, (c) => syncBillingChargesDetailed(c, account.id))).pending).toBe(true);
+    vi.mocked(getBillingCharges).mockImplementation(full as any);
+    expect((await withScope({ accountId: account.id }, (c) => syncBillingChargesDetailed(c, account.id))).pending).toBe(false);
+    vi.mocked(getBillingCharges).mockReset();
+    vi.mocked(getBillingCharges).mockResolvedValue([]);
+    vi.mocked(getBillingTotal).mockResolvedValue(null);
+    vi.mocked(listBillingPeriods).mockReset();
+    vi.mocked(listBillingPeriods).mockResolvedValue([]);
+  });
+
   it("un período cerrado ya recorrido no gasta pedidos de ML durante 12 horas", async () => {
     const { listBillingPeriods, getBillingCharges, getBillingTotal } = await import("@/mcp/tools");
     vi.mocked(getBillingCharges).mockReset();

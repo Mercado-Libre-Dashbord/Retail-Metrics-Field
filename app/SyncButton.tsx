@@ -11,6 +11,8 @@ interface SyncResponse {
   ordersSynced: number;
   adsRowsSynced: number;
   billingChargesSynced?: number;
+  /** La factura de ML quedó incompleta (límite de 5 pedidos por minuto): hace falta otra vuelta. */
+  billingPending?: boolean;
   /** scroll_id de catálogo para retomar el escaneo donde quedó. */
   productsScrollId?: string;
   /** Si el catálogo ya quedó sincronizado del todo. */
@@ -40,6 +42,9 @@ interface CallBody {
   fullStockOffset?: number;
   recalcOffset?: number;
 }
+
+/** ML permite 5 pedidos por minuto en la facturación: se espera a que se libere el cupo. */
+const BILLING_WAIT_SECONDS = 65;
 
 const SYNC_HINT =
   "Trae tus ventas nuevas y recalcula envíos, IVA y ganancia de todo el historial. La primera vez puede tardar varios minutos; después es cuestión de segundos porque saltea lo que ya está al día.";
@@ -117,6 +122,7 @@ export function SyncButton({ compact = false }: { compact?: boolean } = {}) {
 
     try {
       const totals = { products: 0, orders: 0, ads: 0, billing: 0 };
+      let billingPending = false;
       let productsScrollId: string | undefined;
       let productsDone = false;
       let ordersFrom: string | undefined;
@@ -162,7 +168,10 @@ export function SyncButton({ compact = false }: { compact?: boolean } = {}) {
               const closing = await call({ finalize: true, finalizeStep, fullStockOffset, recalcOffset });
               totals.ads += closing.adsRowsSynced;
               totals.billing += closing.billingChargesSynced ?? 0;
-              if (closing.finalized) break;
+              if (closing.finalized) {
+                billingPending = closing.billingPending === true;
+                break;
+              }
               finalizeStep = closing.finalizeStep;
               fullStockOffset = closing.fullStockOffset ?? 0;
               recalcOffset = closing.recalcOffset ?? 0;
@@ -178,6 +187,21 @@ export function SyncButton({ compact = false }: { compact?: boolean } = {}) {
         }
         ordersFrom = nextFrom;
         ordersOffsetInWindow = nextOffsetInWindow;
+      }
+
+      // La factura de Mercado Libre no entra en una sola vuelta: ML deja 5
+      // pedidos por minuto y una factura grande necesita decenas. En vez de
+      // pedirle al vendedor que apriete el botón una y otra vez, se sigue acá,
+      // esperando el minuto que hace falta, hasta que quede completa.
+      for (let round = 1; billingPending && round <= 25; round += 1) {
+        for (let s = BILLING_WAIT_SECONDS; s > 0; s -= 1) {
+          setProgress(`Completando la factura de Mercado Libre (vuelta ${round}) · siguiente en ${s}s. Podés dejar esta pantalla abierta.`);
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        setProgress(`Completando la factura de Mercado Libre (vuelta ${round})…`);
+        const more = await call({ finalize: true, finalizeStep: "billing" });
+        totals.billing += more.billingChargesSynced ?? 0;
+        billingPending = more.billingPending === true;
       }
 
       setProgress(null);

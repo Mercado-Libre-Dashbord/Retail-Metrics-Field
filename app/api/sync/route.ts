@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withScope } from "@/db/client";
 import { hasColumn } from "@/db/schema-capabilities";
-import { syncProductsPage, syncOrders, syncAds, syncFullStock, syncBillingCharges, recalculate, pendingOrderIds, backfillMissingProducts } from "@/sync/sync-service";
+import { syncProductsPage, syncOrders, syncAds, syncFullStock, syncBillingChargesDetailed, recalculate, pendingOrderIds, backfillMissingProducts } from "@/sync/sync-service";
 import { appliesIva, setOrdersSyncedThrough } from "@/db/accounts";
 import { listOrdersPage } from "@/mcp/tools";
 import { resolveCurrentAccount } from "@/lib/current-account";
@@ -156,13 +156,13 @@ export async function POST(request: NextRequest) {
             return { ...zeroed, done: false, finalized: false, finalizeStep: "billing" as FinalizeStep };
           }
           case "billing": {
-            const billingChargesSynced = await syncBillingCharges(client, account.id);
+            const { saved: billingChargesSynced, pending: billingPending } = await syncBillingChargesDetailed(client, account.id);
             // Recién ahora queda confirmado que todo el historial hasta hoy
             // está al día: el próximo sync puede arrancar cerca de acá en
             // vez de desde cero.
             const today = new Date().toISOString().slice(0, 10);
             await setOrdersSyncedThrough(client, account.id, today);
-            return { ...zeroed, billingChargesSynced, done: true, finalized: true };
+            return { ...zeroed, billingChargesSynced, billingPending, done: true, finalized: true };
           }
         }
       };
