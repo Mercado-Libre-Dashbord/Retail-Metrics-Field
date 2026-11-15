@@ -13,6 +13,7 @@ vi.mock("@/mcp/tools", () => ({
   getFullStock: vi.fn().mockResolvedValue([]),
   listBillingPeriods: vi.fn().mockResolvedValue([]),
   getBillingCharges: vi.fn().mockResolvedValue([]),
+  getBillingTotal: vi.fn().mockResolvedValue(null),
   creditNotePeriodKey: (k: string) => `${k}#NC`,
 }));
 
@@ -648,38 +649,68 @@ describe("recalculate", () => {
 });
 
 describe("syncBillingCharges", () => {
-  it("trae también las notas de crédito de facturas anteriores, con su propio cursor", async () => {
+  it("pide las notas de crédito enteras en cada sync y sigue la factura desde el cursor de ML", async () => {
     const { listBillingPeriods, getBillingCharges } = await import("@/mcp/tools");
-    vi.mocked(getBillingCharges).mockClear();
-    vi.mocked(listBillingPeriods).mockResolvedValueOnce([
-      { key: "2026-11-01", dateFrom: "2026-10-08", dateTo: "2026-11-07", amount: 100, periodStatus: "CLOSED" },
-    ]);
+    vi.mocked(getBillingCharges).mockReset();
+    const periods = [{ key: "2026-11-01", dateFrom: "2026-10-08", dateTo: "2026-11-07", amount: 100, periodStatus: "CLOSED" }];
+    vi.mocked(listBillingPeriods).mockResolvedValue(periods);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { withScope } = await import("@/db/client");
+    const { syncBillingCharges } = await import("./sync-service");
+    const account = await makeAccount();
+
+    // Primer sync: la nota de crédito entera y la factura hasta la mitad.
     vi.mocked(getBillingCharges)
       .mockResolvedValueOnce([
         { detailId: "100", periodKey: "2026-11-01#NC", detailType: "BONUS", detailSubType: "BVFV", concept: "Anulación del cargo por vender", orderId: "O0", amount: 40, chargedAt: null },
       ])
-      .mockResolvedValueOnce([
-        { detailId: "900", periodKey: "2026-11-01", detailType: "CHARGE", detailSubType: "CVFV", concept: "Cargo por vender", orderId: "O1", amount: 50, chargedAt: null },
-      ]);
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-    const { withScope } = await import("@/db/client");
-    const { syncBillingCharges } = await import("./sync-service");
-    const account = await makeAccount();
+      .mockImplementationOnce(async (_a, _k, _d, opts) => {
+        opts!.progress!.lastId = "5000";
+        opts!.progress!.total = 1500;
+        opts!.progress!.reachedEnd = false;
+        return [{ detailId: "900", periodKey: "2026-11-01", detailType: "CHARGE", detailSubType: "CVFV", concept: "Cargo por vender", orderId: "O1", amount: 50, chargedAt: null }];
+      });
     const saved = await withScope({ accountId: account.id }, (client) => syncBillingCharges(client, account.id));
     expect(saved).toBe(2);
-    const calls = vi.mocked(getBillingCharges).mock.calls;
-    // Las notas de crédito se piden antes que la factura (ver syncBillingCharges).
-    expect(calls.map((c) => c[3]?.documentType)).toEqual(["CREDIT_NOTE", "BILL"]);
+    expect(vi.mocked(getBillingCharges).mock.calls.map((c) => c[3]?.documentType)).toEqual(["CREDIT_NOTE", "BILL"]);
 
-    // Segundo sync: cada documento sigue desde SU último id (100 y 900), no desde el mayor de los dos.
+    // Segundo sync: la nota de crédito arranca de cero (ML puede haberle agregado
+    // filas con ids menores) y la factura sigue desde el cursor de ML, no desde el
+    // id más alto guardado (900).
     vi.mocked(getBillingCharges).mockClear();
-    vi.mocked(listBillingPeriods).mockResolvedValueOnce([
-      { key: "2026-11-01", dateFrom: "2026-10-08", dateTo: "2026-11-07", amount: 100, periodStatus: "CLOSED" },
-    ]);
+    vi.mocked(getBillingCharges)
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(async (_a, _k, _d, opts) => {
+        opts!.progress!.lastId = "7000";
+        opts!.progress!.total = 1500;
+        opts!.progress!.reachedEnd = true;
+        return [];
+      });
     await withScope({ accountId: account.id }, (client) => syncBillingCharges(client, account.id));
-    expect(vi.mocked(getBillingCharges).mock.calls.map((c) => c[3]?.fromId)).toEqual(["100", "900"]);
+    const calls = vi.mocked(getBillingCharges).mock.calls;
+    expect(calls[0][3]?.fromId).toBeUndefined();
+    expect(calls[1][3]?.fromId).toBe("5000");
+
+    // Tercer sync: la factura ya está completa y ML informa el mismo total: no se vuelve a pedir.
+    const { getBillingTotal } = await import("@/mcp/tools");
+    vi.mocked(getBillingTotal).mockResolvedValueOnce(1500);
+    vi.mocked(getBillingCharges).mockClear();
+    vi.mocked(getBillingCharges).mockResolvedValue([]);
+    await withScope({ accountId: account.id }, (client) => syncBillingCharges(client, account.id));
+    expect(vi.mocked(getBillingCharges).mock.calls.map((c) => c[3]?.documentType)).toEqual(["CREDIT_NOTE"]);
+
+    // Cuarto sync: ML informa más filas que antes: se vuelve a recorrer desde el principio.
+    vi.mocked(getBillingTotal).mockResolvedValueOnce(1600);
+    vi.mocked(getBillingCharges).mockClear();
+    vi.mocked(getBillingCharges).mockResolvedValue([]);
+    await withScope({ accountId: account.id }, (client) => syncBillingCharges(client, account.id));
+    const rescan = vi.mocked(getBillingCharges).mock.calls.find((c) => c[3]?.documentType === "BILL");
+    expect(rescan?.[3]?.fromId).toBe("0");
     warnSpy.mockRestore();
+    vi.mocked(getBillingCharges).mockReset();
+    vi.mocked(getBillingCharges).mockResolvedValue([]);
+    vi.mocked(listBillingPeriods).mockReset();
+    vi.mocked(listBillingPeriods).mockResolvedValue([]);
   });
 
   it("no loguea nada cuando todos los cargos son detail_type CHARGE", async () => {

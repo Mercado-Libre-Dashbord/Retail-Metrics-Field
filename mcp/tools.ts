@@ -1419,6 +1419,20 @@ export interface MlBillingCharge {
   chargedAt: string | null;
 }
 
+/**
+ * Cuántas filas informa Mercado Libre en un documento, con un solo pedido y
+ * sin traer las filas. Sirve para saber si un documento ya recorrido creció.
+ * Puede lanzar MlApiError 429 (5 pedidos por minuto).
+ */
+export async function getBillingTotal(accountId: string, periodKey: string, documentType: "BILL" | "CREDIT_NOTE"): Promise<number | null> {
+  const token = await getValidAccessToken(accountId);
+  const res = await mlFetch(
+    `/billing/integration/periods/key/${periodKey}/group/ML/details?document_type=${documentType}&limit=1&from_id=0`,
+    token
+  );
+  return typeof res?.total === "number" ? res.total : null;
+}
+
 /** Clave con la que se guardan las notas de crédito de un período (ver getBillingCharges). */
 export function creditNotePeriodKey(periodKey: string): string {
   return `${periodKey}#NC`;
@@ -1474,6 +1488,8 @@ export async function getBillingCharges(
      * distintos: pedir solo BILL deja afuera las segundas.
      */
     documentType?: "BILL" | "CREDIT_NOTE";
+    /** Se completa con por dónde seguir (el cursor de ML), si se llegó al final y cuántas filas informa ML. */
+    progress?: { lastId?: string; reachedEnd?: boolean; total?: number };
   } = {}
 ): Promise<MlBillingCharge[]> {
   const token = await getValidAccessToken(accountId);
@@ -1506,7 +1522,11 @@ export async function getBillingCharges(
       throw err;
     }
     const rows: any[] = res.results ?? res.details ?? [];
-    if (rows.length === 0) break;
+    if (opts.progress && opts.progress.total === undefined && typeof res.total === "number") opts.progress.total = res.total;
+    if (rows.length === 0) {
+      if (opts.progress) opts.progress.reachedEnd = true;
+      break;
+    }
 
     let lastId: string | null = null;
     for (const row of rows) {
@@ -1535,7 +1555,11 @@ export async function getBillingCharges(
     }
 
     const nextId = firstDefined(res.last_id, lastId);
-    if (!nextId || rows.length < PAGE_SIZE || nextId === fromId) break;
+    if (opts.progress && nextId) opts.progress.lastId = nextId;
+    if (!nextId || rows.length < PAGE_SIZE || nextId === fromId) {
+      if (opts.progress) opts.progress.reachedEnd = true;
+      break;
+    }
     if (Date.now() > deadline) {
       console.warn(`Facturación ML: período ${periodKey} cortado por tiempo; se completa en el próximo sync.`);
       break;
