@@ -38,7 +38,10 @@ export async function GET(request: NextRequest) {
   // ?probe=2026-11-01 → un solo pedido a ML (notas de crédito de ese período)
   // para ver si trae filas con el mismo detail_id y si las guardamos todas.
   const probeKey = request.nextUrl.searchParams.get("probe");
-  if (probeKey) return NextResponse.json(await probeCreditNotes(account.id, probeKey));
+  if (probeKey) {
+    const doc = request.nextUrl.searchParams.get("doc") === "BILL" ? "BILL" : "CREDIT_NOTE";
+    return NextResponse.json(await probeCreditNotes(account.id, probeKey, doc));
+  }
 
   const stored = await withScope({ accountId: account.id }, async (client) => {
     if (!(await hasColumn(client, "billing_charges", "detail_id"))) return null;
@@ -107,10 +110,10 @@ export async function GET(request: NextRequest) {
   });
 }
 
-async function probeCreditNotes(accountId: string, key: string) {
+async function probeCreditNotes(accountId: string, key: string, doc: "BILL" | "CREDIT_NOTE") {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return { error: "probe=AAAA-MM-DD" };
   const token = await getValidAccessToken(accountId);
-  const r = await tryFetch(`/billing/integration/periods/key/${key}/group/ML/details?document_type=CREDIT_NOTE&limit=1000&from_id=0`, token);
+  const r = await tryFetch(`/billing/integration/periods/key/${key}/group/ML/details?document_type=${doc}&limit=1000&from_id=0`, token);
   if (!r.ok) return { error: r.error };
   const rows: any[] = r.body?.results ?? [];
   const ids: string[] = rows.map((x) => String(x?.charge_info?.detail_id ?? ""));
@@ -127,8 +130,22 @@ async function probeCreditNotes(accountId: string, key: string) {
     );
     return { filas: Number(q.rows[0].n), importe: Number(q.rows[0].amount) };
   });
+  // ¿Dónde está cada fila que ML devolvió? Si están todas guardadas pero con
+  // otra clave de período, no se perdió nada; si faltan, no se guardaron.
+  const dbIds = ids.filter(Boolean);
+  const where = await withScope({ accountId }, async (c) => {
+    const found = await c.query<{ period_key: string; detail_type: string | null; n: string; amount: string }>(
+      `SELECT period_key, detail_type, COUNT(*) as n, SUM(abs(amount)) as amount
+         FROM billing_charges WHERE account_id = $1 AND detail_id = ANY($2::text[]) GROUP BY 1, 2 ORDER BY 3 DESC`,
+      [accountId, dbIds]
+    );
+    return found.rows.map((x) => ({ periodoGuardado: x.period_key, tipo: x.detail_type, filas: Number(x.n), importe: Math.round(Number(x.amount) * 100) / 100 }));
+  });
+  const foundTotal = where.reduce((a, x) => a + x.filas, 0);
   return {
     periodo: key,
+    documento: doc,
+    dondeEstanLasFilas: { devueltasPorMl: dbIds.length, guardadasEnTotal: foundTotal, noGuardadas: dbIds.length - foundTotal, porPeriodoGuardado: where },
     mercadoLibre: {
       total: r.body?.total ?? null,
       filasDevueltas: rows.length,
