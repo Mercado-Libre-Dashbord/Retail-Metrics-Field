@@ -978,6 +978,39 @@ describe("getBillingCharges", () => {
     expect(state.rateLimited).toBe(true);
   });
 
+  it("una página con menos filas que el límite no es el final: sigue hasta una página vacía", async () => {
+    // Visto en producción: ML devolvió 950 filas de un pedido de 1.000 con miles todavía por delante.
+    const short = Array.from({ length: 950 }, (_, i) => row(i + 1, 1));
+    const rest = Array.from({ length: 300 }, (_, i) => row(5000 + i, 1));
+    vi.mocked(mlFetch)
+      .mockResolvedValueOnce({ results: short, last_id: 950, total: 1250 })
+      .mockResolvedValueOnce({ results: rest, last_id: 5299, total: 1250 })
+      .mockResolvedValueOnce({ results: [], total: 1250 });
+    const progress: { lastId?: string; reachedEnd?: boolean; total?: number } = {};
+
+    const charges = await getBillingCharges("acc1", "2026-11-01", Number.POSITIVE_INFINITY, { progress });
+
+    expect(charges).toHaveLength(1250);
+    expect(vi.mocked(mlFetch)).toHaveBeenCalledTimes(3);
+    expect(String(vi.mocked(mlFetch).mock.calls[1][0])).toContain("from_id=950");
+    expect(progress).toMatchObject({ reachedEnd: true, total: 1250, lastId: "5299" });
+  });
+
+  it("si lo corta el límite de pedidos a mitad de camino, no lo da por completo y deja el cursor", async () => {
+    const short = Array.from({ length: 950 }, (_, i) => row(i + 1, 1));
+    vi.mocked(mlFetch)
+      .mockResolvedValueOnce({ results: short, last_id: 950, total: 5000 })
+      .mockRejectedValueOnce(new MlApiError(429, "Rate limit exceeded: 5 requests per minute"));
+    const progress: { lastId?: string; reachedEnd?: boolean; total?: number } = {};
+    const state = { rateLimited: false };
+
+    await getBillingCharges("acc1", "2026-11-01", Number.POSITIVE_INFINITY, { state, progress });
+
+    expect(state.rateLimited).toBe(true);
+    expect(progress.reachedEnd).not.toBe(true);
+    expect(progress.lastId).toBe("950");
+  });
+
   it("sigue desde el último cargo guardado cuando se le pasa fromId", async () => {
     vi.mocked(mlFetch).mockResolvedValueOnce({ results: [] });
 
