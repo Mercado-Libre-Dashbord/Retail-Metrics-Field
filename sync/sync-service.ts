@@ -649,14 +649,21 @@ const BILLING_PERIODS = 4;
 /** Un documento cerrado y ya recorrido entero no se vuelve a consultar antes de este tiempo. */
 const CLOSED_DOC_RECHECK_MS = 12 * 60 * 60 * 1000;
 
+/** Cargos guardados, y si la factura de ML todavía quedó incompleta (hace falta otra vuelta, 1 minuto después). */
 export async function syncBillingCharges(db: QueryExecutor, accountId: string): Promise<number> {
+  return (await syncBillingChargesDetailed(db, accountId)).saved;
+}
+
+export async function syncBillingChargesDetailed(db: QueryExecutor, accountId: string): Promise<{ saved: number; pending: boolean }> {
   try {
-    if (!(await hasColumn(db, "billing_charges", "detail_id"))) return 0;
+    if (!(await hasColumn(db, "billing_charges", "detail_id"))) return { saved: 0, pending: false };
 
     const periods = await listBillingPeriods(accountId);
     // Los últimos 3 meses alcanzan para conciliar y acotan el volumen: los
     // períodos viejos ya están cerrados y no cambian.
     let saved = 0;
+    // Si algún documento todavía no se recorrió entero (o ML cortó por límite de pedidos).
+    let pending = false;
     // Diagnóstico: una investigación externa (sin confirmar) sostiene que
     // las devoluciones/cancelaciones no borran el cargo original sino que
     // ML agrega una fila propia con detail_type "BONUS" (sub_type BV/BXD/
@@ -723,7 +730,10 @@ export async function syncBillingCharges(db: QueryExecutor, accountId: string): 
       docs.sort((a, b) => Number(cursors.get(a.storedKey)?.complete === true) - Number(cursors.get(b.storedKey)?.complete === true));
     }
     for (const { period, documentType, storedKey } of docs) {
-      if (Date.now() > deadline || state.rateLimited) break;
+      if (Date.now() > deadline || state.rateLimited) {
+        pending = true;
+        break;
+      }
       let fromId: string | undefined;
       const current = cursors.get(storedKey);
       if (cursorsReady) {
@@ -741,7 +751,8 @@ export async function syncBillingCharges(db: QueryExecutor, accountId: string): 
             }
             throw err;
           }
-          if (total !== null && total === current.total) {
+          // ML a veces informa total 0 en este pedido (visto en el diagnóstico): no es un cambio real.
+          if (total === null || total === 0 || total === current.total) {
             await db.query(`UPDATE billing_scan_cursors SET updated_at = now() WHERE account_id = $1 AND doc_key = $2`, [accountId, storedKey]);
             continue;
           }
@@ -799,6 +810,7 @@ export async function syncBillingCharges(db: QueryExecutor, accountId: string): 
         );
         saved += batch.length;
       }
+      if (cursorsReady && progress.reachedEnd !== true) pending = true;
       if (cursorsReady) {
         await db.query(
           `INSERT INTO billing_scan_cursors (account_id, doc_key, from_id, total, complete, updated_at)
@@ -822,10 +834,10 @@ export async function syncBillingCharges(db: QueryExecutor, accountId: string): 
     if (state.rateLimited) {
       console.warn(`Facturación ML: límite de pedidos de Mercado Libre; se guardaron ${saved} cargo(s) y el resto se completa en el próximo sync.`);
     }
-    return saved;
+    return { saved, pending: pending || state.rateLimited };
   } catch (err) {
     console.error("No se pudo sincronizar la facturación de ML, se continúa sin ese dato:", (err as Error).message);
-    return 0;
+    return { saved: 0, pending: false };
   }
 }
 

@@ -6,7 +6,7 @@ vi.mock("@/sync/sync-service", () => ({
   syncOrders: vi.fn().mockResolvedValue(0),
   syncAds: vi.fn().mockResolvedValue(0),
   syncFullStock: vi.fn().mockResolvedValue({ synced: 0, nextOffset: null }),
-  syncBillingCharges: vi.fn().mockResolvedValue(0),
+  syncBillingChargesDetailed: vi.fn().mockResolvedValue({ saved: 0, pending: false }),
   recalculate: vi.fn().mockResolvedValue({ done: true, nextOffset: null }),
   backfillMissingProducts: vi.fn().mockResolvedValue(0),
   pendingOrderIds: vi.fn(async (_db: unknown, _acc: string, ids: string[]) => ids),
