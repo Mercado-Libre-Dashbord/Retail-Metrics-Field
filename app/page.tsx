@@ -1656,7 +1656,7 @@ export default function HomePage() {
           <div className="kpi-card-head"><KpiIcon name="aov" /><span className="label">Ticket promedio</span><KpiInfo>Facturación ÷ Órdenes. Cuánto gasta en promedio cada comprador.</KpiInfo></div>
           <div className="value"><KpiValue>{summary ? fmt(summary.aov) : "-"}</KpiValue></div>
         </div>
-        <div className="kpi-card kpi-hero">
+        <div className="kpi-card">
           <div className="kpi-card-head"><KpiIcon name="gross" /><span className="label">Facturación</span><KpiInfo>Suma de precio × cantidad de todo lo vendido, antes de descontar nada. Las órdenes canceladas no cuentan.</KpiInfo></div>
           <div className="value"><KpiValue>{summary ? fmt(summary.grossSales) : "-"}</KpiValue></div>
           {summary && <DeltaPill current={summary.grossSales} previous={summary.previous?.grossSales} />}
@@ -1669,7 +1669,8 @@ export default function HomePage() {
           <div className="kpi-card-head"><KpiIcon name="margin" /><span className="label">Margen neto</span><KpiInfo>Ganancia neta ÷ Facturación. De cada $100 que facturás, cuánto te queda de verdad.</KpiInfo></div>
           <div className="value"><KpiValue>{summary ? pct(summary.profitPct) : "-"}</KpiValue></div>
         </div>
-        <div className="kpi-card">
+        {/* La tarjeta protagonista es la ganancia: verde si ganás, rojo si perdés. */}
+        <div className={`kpi-card ${summary && summary.netProfit < 0 ? "kpi-loss" : "kpi-profit"}`}>
           <div className="kpi-card-head"><KpiIcon name="profit" /><span className="label">Ganancia neta</span><KpiInfo>Facturación − comisión de Mercado Libre − envío − costo del producto − IVA − otros impuestos − toda la publicidad − Full y otros cargos de Mercado Libre. El paso a paso está en &quot;Cómo se calcula tu ganancia neta&quot;, más abajo. Si a un producto le falta el costo cargado, sus ventas quedan afuera de este número: no se inventa un valor.</KpiInfo></div>
           <div className="value"><KpiValue>{summary ? fmt(summary.netProfit) : "-"}</KpiValue></div>
           {summary && <DeltaPill current={summary.netProfit} previous={summary.previous?.netProfit} />}
