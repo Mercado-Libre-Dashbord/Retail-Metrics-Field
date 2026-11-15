@@ -163,6 +163,11 @@ export const EXPECTED_COLUMNS: { table: string; column: string; ddl: string }[] 
     ddl: "-- Correr db/postgres/migrations/028-referencia-de-precios.sql (referencia de precios de Mercado Libre).",
   },
   {
+    table: "billing_scan_cursors",
+    column: "doc_key",
+    ddl: "-- Correr db/postgres/migrations/029-cursor-facturacion.sql (cursor de la descarga de la factura de ML).",
+  },
+  {
     table: "products",
     column: "units_per_pack",
     ddl: "ALTER TABLE products ADD COLUMN IF NOT EXISTS units_per_pack INTEGER;",

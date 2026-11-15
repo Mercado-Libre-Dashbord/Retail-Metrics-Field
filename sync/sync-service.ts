@@ -1,9 +1,10 @@
 import type { QueryExecutor } from "@/db/client";
-import { listProducts, listOrders, getOrderDetail, getAdsSpend, listBillingPeriods, getBillingCharges, creditNotePeriodKey, getProductsByIds, getOrderItemTitles, getFullStock, scanProductIds, getProductDetails, type MlProduct } from "@/mcp/tools";
+import { listProducts, listOrders, getOrderDetail, getAdsSpend, listBillingPeriods, getBillingCharges, getBillingTotal, creditNotePeriodKey, getProductsByIds, getOrderItemTitles, getFullStock, scanProductIds, getProductDetails, type MlProduct } from "@/mcp/tools";
 import { revenueStatusFilter } from "@/lib/order-status";
 import { getCostEntryAtDate, allocateAdsCost, calculateNetProfit, calculateIva } from "./profitability";
 import { applyIvaPayments } from "./iva-payments";
 import { hasColumn } from "@/db/schema-capabilities";
+import { MlApiError } from "@/mcp/ml-client";
 
 /**
  * Se sube cuando cambia algo de cómo se procesa una orden (por ejemplo, de
@@ -684,25 +685,66 @@ export async function syncBillingCharges(db: QueryExecutor, accountId: string): 
     // Las notas de crédito van primero: son pocas filas (un pedido por
     // período) y la factura de un período grande se come todo el cupo de 5
     // pedidos por minuto de ML; si fueran después, nunca llegarían a pedirse.
-    const recent = periods.slice(0, 3);
-    const documents = [
-      ...recent.map((period) => ({ period, documentType: "CREDIT_NOTE" as const, storedKey: creditNotePeriodKey(period.key) })),
-      ...recent.map((period) => ({ period, documentType: "BILL" as const, storedKey: period.key })),
-    ];
-    for (const { period, documentType, storedKey } of documents) {
-      if (Date.now() > deadline || state.rateLimited) break;
-      // Los cargos de ML no cambian una vez emitidos: se sigue desde el último
-      // detail_id guardado de este período. Así un período grande se completa
-      // de a pedazos entre syncs (ML acepta 5 pedidos por minuto acá) y uno
-      // ya completo cuesta un solo pedido.
-      const last = await db.query(
-        `SELECT MAX(detail_id::numeric)::text AS last FROM billing_charges
-          WHERE account_id = $1 AND period_key = $2 AND detail_id ~ '^[0-9]+$'`,
-        [accountId, storedKey]
+    //
+    // Dónde seguir: ML agrega a un documento filas con ids MENORES al más alto
+    // ya guardado (una nota de crédito tenía 281 filas y solo se habían
+    // guardado 181), así que retomar desde el máximo detail_id perdía filas
+    // para siempre. Las notas de crédito, que son chicas, se piden enteras en
+    // cada sync. La factura guarda el cursor de ML (migración 029); un
+    // documento ya recorrido se vuelve a recorrer si ML informa otro total de
+    // filas. Sin la tabla, se sigue como antes.
+    const cursorsReady = await hasColumn(db, "billing_scan_cursors", "doc_key");
+    const cursors = new Map<string, { fromId: string; total: number | null; complete: boolean }>();
+    if (cursorsReady) {
+      const stored = await db.query<{ doc_key: string; from_id: string; total: number | null; complete: boolean }>(
+        `SELECT doc_key, from_id, total, complete FROM billing_scan_cursors WHERE account_id = $1`,
+        [accountId]
       );
-      const fromId = (last.rows[0] as { last: string | null } | undefined)?.last ?? undefined;
+      for (const r of stored.rows) cursors.set(r.doc_key, { fromId: r.from_id, total: r.total === null ? null : Number(r.total), complete: r.complete });
+    }
+    const recent = periods.slice(0, 3);
+    const creditNotes = recent.map((period) => ({ period, documentType: "CREDIT_NOTE" as const, storedKey: creditNotePeriodKey(period.key) }));
+    const bills = recent.map((period) => ({ period, documentType: "BILL" as const, storedKey: period.key }));
+    // Las facturas que todavía no se recorrieron enteras, primero.
+    if (cursorsReady) {
+      bills.sort((a, b) => Number(cursors.get(a.storedKey)?.complete === true) - Number(cursors.get(b.storedKey)?.complete === true));
+    }
+    for (const { period, documentType, storedKey } of [...creditNotes, ...bills]) {
+      if (Date.now() > deadline || state.rateLimited) break;
+      let fromId: string | undefined;
+      const current = cursors.get(storedKey);
+      if (documentType === "CREDIT_NOTE") {
+        fromId = undefined;
+      } else if (cursorsReady) {
+        if (current?.complete) {
+          let total: number | null;
+          try {
+            total = await getBillingTotal(accountId, period.key, "BILL");
+          } catch (err) {
+            if (err instanceof MlApiError && err.status === 429) {
+              state.rateLimited = true;
+              break;
+            }
+            throw err;
+          }
+          if (total !== null && total === current.total) continue;
+          fromId = "0";
+        } else {
+          fromId = current?.fromId ?? "0";
+        }
+      } else {
+        // Los cargos de ML no cambian una vez emitidos: se sigue desde el último
+        // detail_id guardado de este período.
+        const last = await db.query(
+          `SELECT MAX(detail_id::numeric)::text AS last FROM billing_charges
+            WHERE account_id = $1 AND period_key = $2 AND detail_id ~ '^[0-9]+$'`,
+          [accountId, storedKey]
+        );
+        fromId = (last.rows[0] as { last: string | null } | undefined)?.last ?? undefined;
+      }
+      const progress: { lastId?: string; reachedEnd?: boolean; total?: number } = {};
       const unique = new Map<string, Awaited<ReturnType<typeof getBillingCharges>>[number]>();
-      for (const c of await getBillingCharges(accountId, period.key, deadline, { fromId, state, documentType })) {
+      for (const c of await getBillingCharges(accountId, period.key, deadline, { fromId, state, documentType, progress })) {
         if (c.detailType && c.detailType.toUpperCase() !== "CHARGE") {
           const entry = unexpectedTypes.get(c.detailType) ?? {
             subTypes: new Set(), concepts: new Set(), withOrderId: 0, withoutOrderId: 0,
@@ -737,6 +779,15 @@ export async function syncBillingCharges(db: QueryExecutor, accountId: string): 
           values
         );
         saved += batch.length;
+      }
+      if (cursorsReady && documentType === "BILL") {
+        await db.query(
+          `INSERT INTO billing_scan_cursors (account_id, doc_key, from_id, total, complete, updated_at)
+           VALUES ($1, $2, $3, $4, $5, now())
+           ON CONFLICT (account_id, doc_key) DO UPDATE SET
+             from_id = excluded.from_id, total = excluded.total, complete = excluded.complete, updated_at = now()`,
+          [accountId, storedKey, progress.lastId ?? fromId ?? "0", progress.total ?? current?.total ?? null, progress.reachedEnd === true]
+        );
       }
     }
     if (unexpectedTypes.size > 0) {
