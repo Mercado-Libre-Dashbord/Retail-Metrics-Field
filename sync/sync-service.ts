@@ -644,6 +644,10 @@ export async function runSync(
 const BILLING_WRITE_BATCH = 500;
 /** Tiempo máximo para traer cargos de Mercado Libre dentro del paso de facturación. */
 const BILLING_TIME_BUDGET_MS = 35_000;
+/** Períodos de facturación que se mantienen al día (cada uno tiene factura y notas de crédito). */
+const BILLING_PERIODS = 4;
+/** Un documento cerrado y ya recorrido entero no se vuelve a consultar antes de este tiempo. */
+const CLOSED_DOC_RECHECK_MS = 12 * 60 * 60 * 1000;
 
 export async function syncBillingCharges(db: QueryExecutor, accountId: string): Promise<number> {
   try {
@@ -694,32 +698,42 @@ export async function syncBillingCharges(db: QueryExecutor, accountId: string): 
     // documento ya recorrido se vuelve a recorrer si ML informa otro total de
     // filas. Sin la tabla, se sigue como antes.
     const cursorsReady = await hasColumn(db, "billing_scan_cursors", "doc_key");
-    const cursors = new Map<string, { fromId: string; total: number | null; complete: boolean }>();
+    const cursors = new Map<string, { fromId: string; total: number | null; complete: boolean; updatedAt: number }>();
     if (cursorsReady) {
-      const stored = await db.query<{ doc_key: string; from_id: string; total: number | null; complete: boolean }>(
-        `SELECT doc_key, from_id, total, complete FROM billing_scan_cursors WHERE account_id = $1`,
+      const stored = await db.query<{ doc_key: string; from_id: string; total: number | null; complete: boolean; updated_at: string | Date }>(
+        `SELECT doc_key, from_id, total, complete, updated_at FROM billing_scan_cursors WHERE account_id = $1`,
         [accountId]
       );
-      for (const r of stored.rows) cursors.set(r.doc_key, { fromId: r.from_id, total: r.total === null ? null : Number(r.total), complete: r.complete });
+      for (const r of stored.rows) {
+        cursors.set(r.doc_key, {
+          fromId: r.from_id,
+          total: r.total === null ? null : Number(r.total),
+          complete: r.complete,
+          updatedAt: new Date(r.updated_at).getTime(),
+        });
+      }
     }
-    const recent = periods.slice(0, 3);
+    const recent = periods.slice(0, BILLING_PERIODS);
     const creditNotes = recent.map((period) => ({ period, documentType: "CREDIT_NOTE" as const, storedKey: creditNotePeriodKey(period.key) }));
     const bills = recent.map((period) => ({ period, documentType: "BILL" as const, storedKey: period.key }));
-    // Las facturas que todavía no se recorrieron enteras, primero.
+    // Los documentos que todavía no se recorrieron enteros, primero (notas de
+    // crédito antes que facturas); los ya completos, que solo se verifican, al final.
+    const docs = [...creditNotes, ...bills];
     if (cursorsReady) {
-      bills.sort((a, b) => Number(cursors.get(a.storedKey)?.complete === true) - Number(cursors.get(b.storedKey)?.complete === true));
+      docs.sort((a, b) => Number(cursors.get(a.storedKey)?.complete === true) - Number(cursors.get(b.storedKey)?.complete === true));
     }
-    for (const { period, documentType, storedKey } of [...creditNotes, ...bills]) {
+    for (const { period, documentType, storedKey } of docs) {
       if (Date.now() > deadline || state.rateLimited) break;
       let fromId: string | undefined;
       const current = cursors.get(storedKey);
-      if (documentType === "CREDIT_NOTE") {
-        fromId = undefined;
-      } else if (cursorsReady) {
+      if (cursorsReady) {
         if (current?.complete) {
+          // Un período cerrado ya recorrido entero no cambia de un momento a otro:
+          // no se gasta un pedido (son 5 por minuto) en volver a mirarlo.
+          if (period.periodStatus !== "OPEN" && Date.now() - current.updatedAt < CLOSED_DOC_RECHECK_MS) continue;
           let total: number | null;
           try {
-            total = await getBillingTotal(accountId, period.key, "BILL");
+            total = await getBillingTotal(accountId, period.key, documentType);
           } catch (err) {
             if (err instanceof MlApiError && err.status === 429) {
               state.rateLimited = true;
@@ -727,11 +741,16 @@ export async function syncBillingCharges(db: QueryExecutor, accountId: string): 
             }
             throw err;
           }
-          if (total !== null && total === current.total) continue;
+          if (total !== null && total === current.total) {
+            await db.query(`UPDATE billing_scan_cursors SET updated_at = now() WHERE account_id = $1 AND doc_key = $2`, [accountId, storedKey]);
+            continue;
+          }
           fromId = "0";
         } else {
           fromId = current?.fromId ?? "0";
         }
+      } else if (documentType === "CREDIT_NOTE") {
+        fromId = undefined;
       } else {
         // Los cargos de ML no cambian una vez emitidos: se sigue desde el último
         // detail_id guardado de este período.
@@ -780,7 +799,7 @@ export async function syncBillingCharges(db: QueryExecutor, accountId: string): 
         );
         saved += batch.length;
       }
-      if (cursorsReady && documentType === "BILL") {
+      if (cursorsReady) {
         await db.query(
           `INSERT INTO billing_scan_cursors (account_id, doc_key, from_id, total, complete, updated_at)
            VALUES ($1, $2, $3, $4, $5, now())

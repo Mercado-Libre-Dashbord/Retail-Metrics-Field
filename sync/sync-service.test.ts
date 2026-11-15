@@ -688,18 +688,22 @@ describe("syncBillingCharges", () => {
       });
     await withScope({ accountId: account.id }, (client) => syncBillingCharges(client, account.id));
     const calls = vi.mocked(getBillingCharges).mock.calls;
-    expect(calls[0][3]?.fromId).toBeUndefined();
+    expect(calls[0][3]?.documentType).toBe("CREDIT_NOTE");
+    expect(calls[0][3]?.fromId).toBe("0");
     expect(calls[1][3]?.fromId).toBe("5000");
 
-    // Tercer sync: la factura ya está completa y ML informa el mismo total: no se vuelve a pedir.
+    // Tercer sync (pasaron más de 12 horas): la factura ya está completa y ML informa el mismo total: no se vuelve a pedir.
     const { getBillingTotal } = await import("@/mcp/tools");
+    await withScope({ accountId: account.id }, (c) => c.query(`UPDATE billing_scan_cursors SET updated_at = now() - interval '13 hours' WHERE account_id = $1`, [account.id]));
     vi.mocked(getBillingTotal).mockResolvedValueOnce(1500);
     vi.mocked(getBillingCharges).mockClear();
     vi.mocked(getBillingCharges).mockResolvedValue([]);
     await withScope({ accountId: account.id }, (client) => syncBillingCharges(client, account.id));
+    // La nota de crédito (que el mock no marcó como completa) se sigue pidiendo; la factura completa, no.
     expect(vi.mocked(getBillingCharges).mock.calls.map((c) => c[3]?.documentType)).toEqual(["CREDIT_NOTE"]);
 
     // Cuarto sync: ML informa más filas que antes: se vuelve a recorrer desde el principio.
+    await withScope({ accountId: account.id }, (c) => c.query(`UPDATE billing_scan_cursors SET updated_at = now() - interval '13 hours' WHERE account_id = $1`, [account.id]));
     vi.mocked(getBillingTotal).mockResolvedValueOnce(1600);
     vi.mocked(getBillingCharges).mockClear();
     vi.mocked(getBillingCharges).mockResolvedValue([]);
@@ -709,6 +713,35 @@ describe("syncBillingCharges", () => {
     warnSpy.mockRestore();
     vi.mocked(getBillingCharges).mockReset();
     vi.mocked(getBillingCharges).mockResolvedValue([]);
+    vi.mocked(listBillingPeriods).mockReset();
+    vi.mocked(listBillingPeriods).mockResolvedValue([]);
+  });
+
+  it("un período cerrado ya recorrido no gasta pedidos de ML durante 12 horas", async () => {
+    const { listBillingPeriods, getBillingCharges, getBillingTotal } = await import("@/mcp/tools");
+    vi.mocked(getBillingCharges).mockReset();
+    vi.mocked(getBillingTotal).mockReset();
+    vi.mocked(listBillingPeriods).mockResolvedValue([
+      { key: "2026-09-01", dateFrom: "2026-08-08", dateTo: "2026-09-07", amount: 100, periodStatus: "CLOSED" },
+    ]);
+    const { withScope } = await import("@/db/client");
+    const { syncBillingCharges } = await import("./sync-service");
+    const account = await makeAccount();
+    const done = async (_a: string, _k: string, _d: number, opts: any) => {
+      opts.progress.lastId = "9";
+      opts.progress.total = 3;
+      opts.progress.reachedEnd = true;
+      return [];
+    };
+    vi.mocked(getBillingCharges).mockImplementation(done as any);
+    await withScope({ accountId: account.id }, (client) => syncBillingCharges(client, account.id));
+    vi.mocked(getBillingCharges).mockClear();
+    await withScope({ accountId: account.id }, (client) => syncBillingCharges(client, account.id));
+    expect(getBillingCharges).not.toHaveBeenCalled();
+    expect(getBillingTotal).not.toHaveBeenCalled();
+    vi.mocked(getBillingCharges).mockReset();
+    vi.mocked(getBillingCharges).mockResolvedValue([]);
+    vi.mocked(getBillingTotal).mockResolvedValue(null);
     vi.mocked(listBillingPeriods).mockReset();
     vi.mocked(listBillingPeriods).mockResolvedValue([]);
   });
