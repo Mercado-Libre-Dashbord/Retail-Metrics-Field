@@ -1521,8 +1521,8 @@ export async function getBillingCharges(
       }
       throw err;
     }
-    const rows: any[] = res.results ?? res.details ?? [];
-    if (opts.progress && opts.progress.total === undefined && typeof res.total === "number") opts.progress.total = res.total;
+    const rows: any[] = res?.results ?? res?.details ?? [];
+    if (opts.progress && opts.progress.total === undefined && typeof res?.total === "number") opts.progress.total = res.total;
     if (rows.length === 0) {
       if (opts.progress) opts.progress.reachedEnd = true;
       break;
@@ -1554,9 +1554,13 @@ export async function getBillingCharges(
       });
     }
 
-    const nextId = firstDefined(res.last_id, lastId);
+    const nextId = firstDefined(res?.last_id, lastId);
     if (opts.progress && nextId) opts.progress.lastId = nextId;
-    if (!nextId || rows.length < PAGE_SIZE || nextId === fromId) {
+    // El final es una página vacía (arriba) o un cursor que no avanza. Una página
+    // con menos filas que el límite NO es el final: ML devolvió 950 filas de un
+    // pedido de 1.000 con 11.000 todavía por delante (visto en producción), y
+    // tomarla como la última dejaba el documento "completo" para siempre.
+    if (!nextId || nextId === fromId) {
       if (opts.progress) opts.progress.reachedEnd = true;
       break;
     }

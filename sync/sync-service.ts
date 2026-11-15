@@ -646,6 +646,14 @@ const BILLING_WRITE_BATCH = 500;
 const BILLING_TIME_BUDGET_MS = 35_000;
 /** Períodos de facturación que se mantienen al día (cada uno tiene factura y notas de crédito). */
 const BILLING_PERIODS = 4;
+/**
+ * Los cursores guardados con la versión anterior daban por completo un documento
+ * apenas una página traía menos filas que el límite (ML devuelve páginas de 950
+ * sobre 1.000 con miles de filas todavía por delante). Se cambia la clave para
+ * que arranquen de nuevo, sin tocar la base.
+ */
+const CURSOR_VERSION = "@2";
+const cursorKey = (storedKey: string) => `${storedKey}${CURSOR_VERSION}`;
 /** Un documento cerrado y ya recorrido entero no se vuelve a consultar antes de este tiempo. */
 const CLOSED_DOC_RECHECK_MS = 12 * 60 * 60 * 1000;
 
@@ -728,7 +736,7 @@ export async function syncBillingChargesDetailed(db: QueryExecutor, accountId: s
     const isClosed = (period: { periodStatus: string | null }) => period.periodStatus !== "OPEN";
     const closeTs = (period: { dateTo: string | null }) => (period.dateTo ? Date.parse(`${period.dateTo}T23:59:59Z`) : 0);
     const needsScan = (doc: { period: { periodStatus: string | null; dateTo: string | null }; storedKey: string }) => {
-      const cur = cursors.get(doc.storedKey);
+      const cur = cursors.get(cursorKey(doc.storedKey));
       return !cur || !cur.complete || (isClosed(doc.period) && cur.updatedAt < closeTs(doc.period));
     };
     // Orden de prioridad: los períodos cerrados que falta recorrer van primero
@@ -753,7 +761,7 @@ export async function syncBillingChargesDetailed(db: QueryExecutor, accountId: s
         break;
       }
       let fromId: string | undefined;
-      const current = cursors.get(storedKey);
+      const current = cursors.get(cursorKey(storedKey));
       if (cursorsReady) {
         if (needsScan(doc)) {
           // Seguir donde quedó; si estaba completo pero se recorrió antes de
@@ -775,7 +783,7 @@ export async function syncBillingChargesDetailed(db: QueryExecutor, accountId: s
           }
           // ML a veces informa total 0 en este pedido (visto en el diagnóstico): no es un cambio real.
           if (total === null || total === 0 || total === current.total) {
-            await db.query(`UPDATE billing_scan_cursors SET updated_at = now() WHERE account_id = $1 AND doc_key = $2`, [accountId, storedKey]);
+            await db.query(`UPDATE billing_scan_cursors SET updated_at = now() WHERE account_id = $1 AND doc_key = $2`, [accountId, cursorKey(storedKey)]);
             continue;
           }
           // Cerrado: algo cambió, se recorre de nuevo. Abierto: lo nuevo se agrega
@@ -842,7 +850,7 @@ export async function syncBillingChargesDetailed(db: QueryExecutor, accountId: s
            VALUES ($1, $2, $3, $4, $5, now())
            ON CONFLICT (account_id, doc_key) DO UPDATE SET
              from_id = excluded.from_id, total = excluded.total, complete = excluded.complete, updated_at = now()`,
-          [accountId, storedKey, progress.lastId ?? fromId ?? "0", progress.total ?? current?.total ?? null, progress.reachedEnd === true]
+          [accountId, cursorKey(storedKey), progress.lastId ?? fromId ?? "0", progress.total ?? current?.total ?? null, progress.reachedEnd === true]
         );
       }
     }
