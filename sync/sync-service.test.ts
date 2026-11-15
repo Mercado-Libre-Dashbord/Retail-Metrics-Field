@@ -750,6 +750,50 @@ describe("syncBillingCharges", () => {
     vi.mocked(listBillingPeriods).mockResolvedValue([]);
   });
 
+  it("el período abierto no deja sin pedidos a los cerrados que faltan recorrer", async () => {
+    const { listBillingPeriods, getBillingCharges, getBillingTotal } = await import("@/mcp/tools");
+    vi.mocked(getBillingCharges).mockReset();
+    vi.mocked(getBillingTotal).mockReset();
+    const periods = [
+      { key: "2026-12-01", dateFrom: "2026-11-08", dateTo: "2026-12-07", amount: 100, periodStatus: "OPEN" },
+      { key: "2026-11-01", dateFrom: "2026-10-08", dateTo: "2026-11-07", amount: 100, periodStatus: "CLOSED" },
+    ];
+    vi.mocked(listBillingPeriods).mockResolvedValue(periods);
+    const { withScope } = await import("@/db/client");
+    const { syncBillingCharges } = await import("./sync-service");
+    const account = await makeAccount();
+    const fill = (lastId: string, total: number, end: boolean) => async (_a: string, _k: string, _d: number, opts: any) => {
+      opts.progress.lastId = lastId;
+      opts.progress.total = total;
+      opts.progress.reachedEnd = end;
+      return [];
+    };
+    // Primera vuelta: el abierto queda completo (con 100 filas) y el cerrado a medias.
+    vi.mocked(getBillingCharges).mockImplementation(async (_a: any, key: any, _d: any, opts: any) => {
+      if (opts.documentType === "CREDIT_NOTE") return fill("1", 1, true)(_a, key, _d, opts);
+      return key === "2026-12-01" ? fill("500", 100, true)(_a, key, _d, opts) : fill("300", 12000, false)(_a, key, _d, opts);
+    });
+    await withScope({ accountId: account.id }, (c) => syncBillingCharges(c, account.id));
+
+    // Segunda vuelta: el abierto creció (ML informa 140). El cerrado incompleto va ANTES y sigue
+    // desde su cursor; el abierto sigue desde su cursor (500), no desde cero.
+    vi.mocked(getBillingCharges).mockClear();
+    vi.mocked(getBillingTotal).mockImplementation(async (_a: string, key: string) => (key === "2026-12-01" ? 140 : 12000));
+    await withScope({ accountId: account.id }, (c) => syncBillingCharges(c, account.id));
+    const bill = vi.mocked(getBillingCharges).mock.calls.filter((c) => c[3]?.documentType === "BILL");
+    expect(bill[0][1]).toBe("2026-11-01");
+    expect(bill[0][3]?.fromId).toBe("300");
+    const open = bill.find((c) => c[1] === "2026-12-01");
+    if (open) expect(open[3]?.fromId).toBe("500");
+
+    vi.mocked(getBillingCharges).mockReset();
+    vi.mocked(getBillingCharges).mockResolvedValue([]);
+    vi.mocked(getBillingTotal).mockReset();
+    vi.mocked(getBillingTotal).mockResolvedValue(null);
+    vi.mocked(listBillingPeriods).mockReset();
+    vi.mocked(listBillingPeriods).mockResolvedValue([]);
+  });
+
   it("un período cerrado ya recorrido no gasta pedidos de ML durante 12 horas", async () => {
     const { listBillingPeriods, getBillingCharges, getBillingTotal } = await import("@/mcp/tools");
     vi.mocked(getBillingCharges).mockReset();
